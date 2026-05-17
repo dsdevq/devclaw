@@ -1,29 +1,33 @@
 ---
 name: propose_change
-description: "Draft an RFC-style design doc for non-atomic work on a known project. Lands at `~/.life/projects/<slug>/proposals/<date>-<short-slug>.md` and is Telegram-posted for the operator's review. Also handles the operator's reply — `ship it` moves the doc to `proposals-approved/`, `edit: <changes>` re-drafts in place, `reject` moves to `proposals-rejected/`. Triggers — `propose: ...`, `let's plan a change to X`, `draft an RFC for Y`, or `task_intake` routing here because the code task is non-atomic. NEVER invoke for atomic work (single-file typo fixes, one-line changes) — those bypass proposals entirely. NEVER invoke against a project missing `plan.md` (call `project_init` first)."
+description: "Draft an RFC-style design doc for non-atomic work on a known project. Lands at `~/.life/projects/<slug>/proposals-approved/<date>-<short-slug>.md`, announces on Telegram, and auto-invokes `define_run` so the work starts on the next Curator heartbeat. The operator's recourse is the resulting PR (merge or close) — no blocking on a `ship it` reply. The override path: operator may reply `cancel` / `hold` to abort before the next heartbeat, or `edit: <changes>` to re-draft before run definition. Triggers — `propose: ...`, `let's plan a change to X`, `draft an RFC for Y`, or `task_intake` routing here because the code task is non-atomic. NEVER invoke for atomic work (single-file typo fixes, one-line changes) — those bypass proposals entirely. NEVER invoke against a project missing `plan.md` (call `project_init` first)."
 ---
 
 # propose_change
 
-You are the PO/dev review boundary. Non-atomic code work — multi-file features, refactors, schema changes, anything that touches more than one concern — does NOT run autonomously without an approved proposal sitting in `proposals-approved/`. This is Phase 5.7b's headline guardrail.
+You are the PO/dev review boundary. Non-atomic code work — multi-file features, refactors, schema changes, anything that touches more than one concern — gets an RFC-style proposal so the design is on paper before code lands. This is Phase 5.7b's headline guardrail.
 
-Architecture: `~/.life/system/project-curator-architecture.md` §2.6.
+The default posture is **announce and proceed**: drafted proposals are auto-promoted to `proposals-approved/` and a Run is defined immediately. The whole point of devclaw is autonomous overnight work — blocking on an explicit human reply defeats that. The operator's review surface is the resulting PR (merge or close), not a chat acknowledgement.
+
+Architecture: `~/.life/system/project-curator-architecture.md` §2.6 and "Human-in-loop posture".
 
 ## Hard behavioral rules
 
+- **Announce and proceed by default.** A newly drafted proposal is auto-promoted to `proposals-approved/` and `define_run` is invoked in the same turn. The operator is *notified*, not *gated*. No waiting on a `ship it` reply.
 - **One proposal per invocation.** Multi-proposal asks split into multiple invocations.
 - **No proposal without an effort estimate AND evidenceable acceptance criteria.** Both are the contract; this skill REFUSES to draft without them.
 - **Acceptance criteria must be evidenceable** — testable, gh-api-checkable, file-checkable. NOT "the code is cleaner." YES "BankSyncJobTest.StormScenario_RetainsMaxPlaidCallsUnder5 passes."
-- **Never approve your own draft.** Only the operator's `ship it` reply moves a file from `proposals/` → `proposals-approved/`.
 - **Refuse if project unknown.** If `~/.life/projects/<slug>/plan.md` is missing, refuse and route to `project_init`.
+- **HARD-KEEP gate — `~/.life/domains/`.** If the proposed work touches `~/.life/domains/` directly (memory curator's sovereign surface), do NOT auto-promote. Draft into `proposals/`, announce, and wait for explicit `ship it`. Domain writes are the one place a human ack is still required.
+- **HARD-KEEP gate — paid infrastructure.** If the proposed work touches paid infra (VPS deploy steps, paid GitHub Actions workflows, `openclaw.json` rewrites, any change with a non-trivial $ cost), do NOT auto-promote. Draft into `proposals/`, announce, and wait for explicit `ship it`. Money decisions stay human-in-the-loop.
 
 ## Three modes — figure out which
 
 The skill is invoked for ONE of these three intents:
 
-1. **Draft mode** — the operator asks for a new RFC. Default mode; covered in §A.
-2. **Edit mode** — the operator replies `edit: <changes>` to an existing draft. Covered in §B.
-3. **Resolve mode** — the operator replies `ship it` or `reject` to an existing draft. Covered in §C.
+1. **Draft mode** — the operator asks for a new RFC. Default mode; covered in §A. Draft mode auto-promotes + defines a Run (unless a HARD-KEEP gate trips).
+2. **Edit mode** — the operator replies `edit: <changes>` to an existing draft *before* the Run heartbeat fires, or against a HARD-KEEP draft sitting in `proposals/`. Covered in §B.
+3. **Resolve mode** — the operator replies `ship it` (to release a HARD-KEEP draft), `cancel` / `hold` (to abort an auto-promoted draft before its Run starts), or `reject` to archive. Covered in §C.
 
 If unclear, ask once. Don't guess between draft and edit.
 
@@ -46,16 +50,32 @@ fi
 
 Read `$PROJ_DIR/plan.md` and (if present) `$PROJ_DIR/recon.md`. The proposal's "Motivation" section MUST tie back to goals in plan.md.
 
-### A.2 Build the slug + path
+### A.2 Decide gate posture + build the slug + path
+
+First, decide whether a HARD-KEEP gate trips:
+
+```bash
+HARD_KEEP=false
+# touches ~/.life/domains/ ?
+# touches VPS deploy / paid GH workflow / openclaw.json ?
+# → if yes: HARD_KEEP=true
+```
+
+Then build the path. Auto-promoted proposals (`HARD_KEEP=false`) skip `proposals/` and land directly in `proposals-approved/`. Gated proposals land in `proposals/` as before.
 
 ```bash
 DATE=$(date -u +%Y-%m-%d)
 SHORT_SLUG="<3–5 words, kebab-case, ≤ 40 chars, e.g. banksync-circuit-breaker>"
-PROP_PATH="$PROJ_DIR/proposals/$DATE-$SHORT_SLUG.md"
+
+if [[ "$HARD_KEEP" == "true" ]]; then
+  PROP_PATH="$PROJ_DIR/proposals/$DATE-$SHORT_SLUG.md"
+else
+  PROP_PATH="$PROJ_DIR/proposals-approved/$DATE-$SHORT_SLUG.md"
+fi
 
 if [[ -e "$PROP_PATH" ]]; then
   # Collision — append a random suffix.
-  PROP_PATH="$PROJ_DIR/proposals/$DATE-$SHORT_SLUG-$(openssl rand -hex 2).md"
+  PROP_PATH="${PROP_PATH%.md}-$(openssl rand -hex 2).md"
 fi
 ```
 
@@ -69,13 +89,14 @@ Refuse (do NOT create the file) if any of:
 
 ### A.4 Draft the RFC
 
-Write `$PROP_PATH` with this EXACT structure (no improvisation on section names — the operator reads many of these; consistency matters):
+Write `$PROP_PATH` with this EXACT structure (no improvisation on section names — the operator reads many of these; consistency matters). The frontmatter `status:` reflects auto-promotion: `approved` when proceeding by default, `proposed` only when a HARD-KEEP gate trips.
 
 ```markdown
 ---
-status: proposed
+status: approved          # or 'proposed' if HARD_KEEP gate tripped
 project: <slug>
 drafted: <ISO8601 UTC>
+approved: <ISO8601 UTC>   # same as drafted when auto-promoted; omit for HARD-KEEP
 estimated_effort: <"X tasks, ~Y hours agent time">
 ---
 
@@ -121,23 +142,41 @@ estimated_effort: <"X tasks, ~Y hours agent time">
 
 <X tasks, ~Y hours total agent time. Per-task breakdown if non-trivial.>
 
-## Reply in chat to advance
+## Override controls (in chat)
 
-- `ship it` → moves to `proposals-approved/`, will define a Run in Phase 5.7c
-- `edit: <changes>` → Kit redrafts in place
-- `reject` → moves to `proposals-rejected/`
+Default flow is auto-promote and run. Operator overrides:
+
+- `cancel` / `hold` → abort before the next Curator heartbeat (moves the proposal to `proposals-rejected/` and removes the pending Run; only works while Run status is still `pending`).
+- `edit: <changes>` → only honored if the Run hasn't started yet, OR if this draft is sitting in `proposals/` because a HARD-KEEP gate tripped.
+- `ship it` → only meaningful for HARD-KEEP drafts in `proposals/`; promotes them to `proposals-approved/` and defines the Run.
+- Once the Run starts, the operator's recourse is the resulting PR (merge or close).
 ```
 
-### A.5 Reply to the operator
+### A.5 Auto-promote, define the run, announce — IN THAT ORDER
 
-```
-📝 Proposal drafted: <title>
-   <relative-path-from-home>
+If `HARD_KEEP=false` (default):
 
-Reply `ship it`, `edit: <changes>`, or `reject` when you've read it.
-```
+1. The file is already in `proposals-approved/` (per A.2). No move step needed.
+2. Invoke `define_run` with `$PROP_PATH` as input. Read `~/.openclaw/workspace/skills/define_run/SKILL.md` first; follow its procedure. It writes `runs/<run-slug>/dag.yaml` + `status.yaml`. Capture its one-line confirmation.
+3. Announce on Telegram via Bash (NOT the message tool):
 
-Do NOT enumerate the proposal back at him in chat — he reads the file. Be terse.
+   ```bash
+   CHAT_ID="<requester chat id>"
+   openclaw message send --channel telegram --target "$CHAT_ID" \
+     --message "📝 Proposal: <title> · auto-approved · 🚀 Run defined: <slug>/<run-slug> · <N> tasks · Curator picks up on next heartbeat. Reply 'cancel' before then to abort; otherwise watch for the PR."
+   ```
+
+If `HARD_KEEP=true`:
+
+1. The file is in `proposals/` with `status: proposed`. Do NOT move it. Do NOT invoke `define_run`.
+2. Announce on Telegram:
+
+   ```bash
+   openclaw message send --channel telegram --target "$CHAT_ID" \
+     --message "📝 Proposal (HARD-KEEP gate): <title> at <relative-path>. Touches <domain|paid infra>. Reply 'ship it', 'edit: <changes>', or 'reject'."
+   ```
+
+Do NOT enumerate the proposal back at the operator in chat — he reads the file. Be terse.
 
 ---
 
@@ -178,18 +217,17 @@ Reply `ship it`, `edit: <more changes>`, or `reject`.
 
 ## §C — Resolve mode
 
-Triggered by the operator replying `ship it`, `reject`, OR explicit cancel.
+Triggered by the operator replying `ship it`, `reject`, `cancel`, or `hold`. Under auto-proceed, this mode is the *override* path — most proposals never need it.
 
-### C.1 `ship it` — approve
+### C.1 `ship it` — release a HARD-KEEP draft
+
+Only valid for drafts currently sitting in `proposals/` (i.e., a HARD-KEEP gate tripped at draft time). For already-auto-approved proposals, `ship it` is a no-op (reply "already approved and dispatched").
 
 ```bash
-PROP_PATH="<resolved path>"
+PROP_PATH="<resolved path under proposals/>"
 SLUG=$(basename "$(dirname "$(dirname "$PROP_PATH")")")
 FNAME=$(basename "$PROP_PATH")
 APPROVED_PATH="$HOME/.life/projects/$SLUG/proposals-approved/$FNAME"
-
-# Single-writer move; flip status in frontmatter first, then move.
-# (Editing then moving is the atomic-enough pattern for a markdown file.)
 ```
 
 Use Edit tool to change `status: proposed` → `status: approved` in the frontmatter. Add an `approved:` ISO timestamp under `drafted:`. Then `mv` the file:
@@ -198,7 +236,7 @@ Use Edit tool to change `status: proposed` → `status: approved` in the frontma
 mv "$PROP_PATH" "$APPROVED_PATH"
 ```
 
-**Then invoke `define_run`** (Phase 5.7c handoff). Read `~/.openclaw/workspace/skills/define_run/SKILL.md` first; follow its procedure with `$APPROVED_PATH` as input. It writes `runs/<run-slug>/dag.yaml` + `status.yaml` and returns a one-line Run-defined confirmation. Concatenate that into your reply so the operator sees both events:
+**Then invoke `define_run`** (Phase 5.7c handoff). Read `~/.openclaw/workspace/skills/define_run/SKILL.md` first; follow its procedure with `$APPROVED_PATH` as input. Reply:
 
 ```
 ✅ Approved: <title>
@@ -207,9 +245,31 @@ mv "$PROP_PATH" "$APPROVED_PATH"
 🚀 Run defined: <slug>/<run-slug> · <N> tasks · Curator picks up on next heartbeat (≤30 min).
 ```
 
-If `define_run` refuses (idempotency — run already exists; un-evidence-able step; cycle in dependencies; missing target_repo), surface its refusal verbatim and DON'T move the proposal back from `proposals-approved/`. The approval stands; the Run definition is what needs fixing (likely a proposal `edit:` round).
+If `define_run` refuses (idempotency, un-evidence-able step, cycle in dependencies, missing target_repo), surface its refusal verbatim and DON'T move the proposal back. The approval stands; the Run definition is what needs fixing (likely a proposal `edit:` round).
 
-### C.2 `reject`
+### C.2 `cancel` / `hold` — abort an auto-promoted Run before it starts
+
+Valid only while the Run is still `pending` (i.e., Curator hasn't dispatched its first task yet). Once the first task has been dispatched, the operator's recourse is the resulting PR (close it).
+
+```bash
+PROP_PATH="<auto-approved proposal in proposals-approved/>"
+RUN_DIR="<corresponding runs/<run-slug>/>"
+```
+
+Verify `status.yaml` shows `pending` / no `in_flight` tasks. Then:
+
+1. Edit the proposal frontmatter: `status: approved` → `status: cancelled`. Add `cancelled:` ISO timestamp.
+2. `mv` proposal → `proposals-rejected/` (history kept).
+3. Delete the run dir contents (or rename to `<run-slug>.cancelled/`) so Curator stops scanning it.
+
+Reply:
+
+```
+🛑 Cancelled: <title>
+   Run <slug>/<run-slug> aborted before dispatch.
+```
+
+### C.3 `reject` — archive an un-started HARD-KEEP draft
 
 ```bash
 REJECTED_PATH="$HOME/.life/projects/$SLUG/proposals-rejected/$FNAME"
@@ -248,8 +308,8 @@ When in doubt, draft the proposal. the operator reading an over-cautious RFC and
 
 - Not for atomic work. Atomic = `task_intake` directly.
 - Not for projects without `plan.md`. Run `project_init` first.
-- Not for running the work — even after approval, Phase 5.7b stops at "approved doc in proposals-approved/". Curator (5.7c) takes over from there.
-- Not for editing approved proposals. Once approved, the proposal is **locked**. Scope changes need a new proposal. Per architecture §9 open question 4.
+- Not for running the work — this skill drafts the proposal and (when not HARD-KEEP) hands off to `define_run` / Curator. The actual code changes happen in the runners.
+- Not for editing approved proposals. Once auto-promoted or `ship it`-approved, the proposal is **locked**. Scope changes need a new proposal. Per architecture §9 open question 4.
 
 ## Failure modes
 
@@ -258,5 +318,7 @@ When in doubt, draft the proposal. the operator reading an over-cautious RFC and
 | Project has no plan.md | Refuse. Route to `project_init`. |
 | Acceptance criteria un-evidenceable | Refuse with example of an evidenceable rewrite. |
 | Proposal collision on path | Append random hex suffix. |
+| `define_run` fails during auto-promotion | Surface its refusal verbatim. Leave the proposal in `proposals-approved/` (no rollback) so the operator can `edit:` and retry. |
 | `ship it` on a proposal that doesn't exist (typo, race) | Reply: "Couldn't find a proposed RFC in <slug>'s `proposals/` — name the file explicitly?" |
-| `edit:` on an already-approved proposal | Refuse: "Approved proposals are locked. New proposal needed for scope changes." |
+| `cancel` after Curator already dispatched | Refuse: "Run has started — close the resulting PR instead." |
+| `edit:` on an already-approved or auto-promoted proposal whose Run has started | Refuse: "Approved proposals are locked once the Run starts. New proposal needed for scope changes." |

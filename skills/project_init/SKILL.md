@@ -1,6 +1,6 @@
 ---
 name: project_init
-description: "Gatekeeper for understanding a project before Kit acts on it. Two arms. Existing-repo arm — clone the repo, map the architecture, write `recon.md`, return informed questions to the operator; after the operator answers, write `plan.md`. New-project arm — Socratic mode, 5 decision-shaped questions, multi-turn produces `plan.md`. ALWAYS the first thing called when the operator references a project Kit doesn't yet know AND wants Kit to do non-trivial work on it. Also invoked when `task_intake` refused a code task because the project lacks `recon.md`/`plan.md`. Triggers — `/recon <repo>`, `let's start a new project: X`, `let's set up X`, `we should plan out Y`. NEVER use for known projects (check `~/.life/projects/<slug>/` first)."
+description: "Gatekeeper for understanding a project before Kit acts on it. Two arms. Existing-repo arm — clone the repo, map the architecture, write `recon.md` AND `plan.md` in the same turn, documenting any defensible assumptions Kit made. New-project arm — Socratic mode, bounded to AT MOST ONE clarifying question (and only when scope is genuinely ambiguous); otherwise pick the strongest defensible reading and write `plan.md` immediately. The operator's correction surface is a one-reply edit, not a multi-turn questionnaire. ALWAYS the first thing called when the operator references a project Kit doesn't yet know AND wants Kit to do non-trivial work on it. Also invoked when `task_intake` refused a code task because the project lacks `recon.md`/`plan.md`. Triggers — `/recon <repo>`, `let's start a new project: X`, `let's set up X`, `we should plan out Y`. NEVER use for known projects (check `~/.life/projects/<slug>/` first)."
 ---
 
 # project_init
@@ -11,9 +11,12 @@ This is Phase 5.7a's first deliverable. Architecture: `~/.life/system/project-cu
 
 ## Hard behavioral rules
 
-- **One project per invocation.** If the operator references two projects in the same message, ask which to recon first.
+- **AT MOST one clarifying question, and only when genuinely ambiguous.** "Genuinely ambiguous" means: no `target_repo` AND scope is internally contradictory (e.g. operator references "lifekit but actually let's rewrite it"). Otherwise, **proceed straight to `plan.md`** using the strongest defensible interpretation. Document the interpretation in `plan.md`'s "Assumptions" section so the operator can correct course in one reply. This applies to BOTH arms — Socratic Q&A is no longer a multi-turn ceremony; it is at most one question.
+- **One project per invocation.** If the operator references two projects in the same message, ask which to recon first (this counts as the one clarifying question).
 - **Never overwrite an existing `plan.md` or `recon.md`.** If they exist, refuse and direct the operator to edit by hand (or invoke a future `project_update` skill — does not yet exist).
-- **Slugify deterministically.** For `dsdevq/lifekit-stack` → slug `lifekit-stack` (strip org). For new projects, ask the operator what to name the slug or propose one; lowercase, kebab-case, ≤ 32 chars.
+- **Slugify deterministically.** For `dsdevq/lifekit-stack` → slug `lifekit-stack` (strip org). For new projects, derive a slug from the operator's wording (lowercase, kebab-case, ≤ 32 chars). Don't ask — just pick one and record it in `plan.md`.
+- **HARD-KEEP gate — `~/.life/domains/`.** `project_init` never writes to `~/.life/domains/`. If reconning a project clearly implies a domain file change (e.g. "this is now my primary nutrition tracker"), do NOT touch the domain file — leave a note in `plan.md`'s "Domain implications" section and let the memory curator pick it up.
+- **HARD-KEEP gate — paid infrastructure.** `project_init` never edits `openclaw.json`, VPS deploy configs, or paid GH workflows. Surface any implied changes in `plan.md`'s "Infra implications" section for explicit operator review.
 - **conversation.md is append-only.** Every Kit↔operator turn during project_init lands in there. This is the audit trail.
 - **No persona drift.** This is Kit-the-architect. Sharp questions, no flattery, no "great idea!"
 
@@ -26,7 +29,7 @@ Discover whether this is the **existing-repo arm** or the **new-project arm**:
 - **Existing-repo arm** when: the operator names a GitHub repo (`org/repo` or full URL), OR the project already has a remote in his world (`finance-sentry`, `lifekit`, `lifekit-stack`, etc.). The expectation is "go read the code, then come back with questions."
 - **New-project arm** when: the operator describes a goal or idea with no existing codebase ("I want to build a habit-tracking thing for personal use", "let's plan a new daemon that does X"). The expectation is "no code yet — talk it through with me."
 
-If genuinely ambiguous (the operator says "lifekit-stack — actually let me describe what I want it to become"), ask once: *"Existing repo to recon, or new project to plan from scratch?"*
+If genuinely ambiguous (the operator says "lifekit-stack — actually let me describe what I want it to become"), this is the ONE clarifying question the hard rules allow: *"Existing repo to recon, or new project to plan from scratch?"* Anything less than internally contradictory: pick the most defensible arm and proceed (document the call in `plan.md`'s Assumptions section).
 
 ---
 
@@ -116,28 +119,13 @@ After writing, **delete the scratch clone** — it's a recon, not a checkout. Do
 rm -rf "$SCRATCH"
 ```
 
-### 4. Return informed questions to the operator
+### 4. Write `plan.md` immediately — proceed by default
 
-Reply in chat with **5–8 sharp questions** drawn from the "What I can't tell from the code" section. Format:
+Do NOT block on operator answers. The whole point of devclaw is autonomous work; gating recon on a chat round-trip defeats it. Write `plan.md` in the same turn as `recon.md`, using the strongest defensible interpretation of "What I can't tell from the code". Record those interpretations in `plan.md`'s **Assumptions** section so the operator can correct course in one reply if any are wrong.
 
-```
-📚 Reconned <slug>. Wrote ~/.life/projects/<slug>/recon.md.
+**ONE clarifying question is permitted, and only when genuinely ambiguous** (no `target_repo` *and* internally contradictory scope — e.g., the operator referenced the repo by name but described work that clearly belongs to a different repo). In that single case, ask the one question and wait. Otherwise: proceed to step 5 immediately.
 
-A few things I can't read out of the code:
-
-1. <question>
-2. <question>
-…
-8. <question>
-
-Answer when you have a minute — I'll write plan.md after.
-```
-
-Questions should be **decision-shaped**, not trivia. Not "what does X do?" (you should have read that). Yes: "the BankSync module has both an `IRetryStrategy` interface and ad-hoc retries — which is the canonical pattern going forward?" Or "I see no CI on this repo — is that intentional or a gap?"
-
-### 5. After the operator answers — write `plan.md`
-
-(This happens in a follow-up conversational turn, NOT a fresh `project_init` invocation. Kit-in-chat reads `recon.md`, reads the operator's answers, and writes `plan.md`.)
+### 5. Write `plan.md`
 
 `$PROJ_DIR/plan.md` shape — markdown, lightweight frontmatter:
 
@@ -165,6 +153,15 @@ mode: recon                # 'recon' for existing-repo arm, 'socratic' for new
 ## Current state
 <Where the project actually is right now. Phase, milestones, known TODOs. Reference recon.md for deep code-level state.>
 
+## Assumptions
+<Decisions Kit made when writing this plan without operator input. Bulleted, each one a single sentence: "Assumed X because Y." The operator's one-reply correction surface — if any of these are wrong, the operator says so and Kit updates.>
+
+## Domain implications
+<If reconning surfaced anything that implies a `~/.life/domains/` change, list it here. HARD-KEEP — project_init does NOT touch domain files.>
+
+## Infra implications
+<If reconning surfaced implied changes to `openclaw.json`, VPS deploy, or paid GH workflows, list them here. HARD-KEEP — project_init does NOT touch infra config.>
+
 ## Open questions
 <Things still undecided. These get resolved as work lands.>
 
@@ -183,50 +180,55 @@ test_command: <from recon, or null>
 notes: ""
 ```
 
-Append the full Q&A turn (the operator's answers + Kit's writeup decisions) to `$PROJ_DIR/conversation.md`.
+Append a one-paragraph "auto-drafted plan.md from recon; assumptions enumerated inside" note to `$PROJ_DIR/conversation.md`.
 
-Reply to the operator with one line:
+Reply to the operator with one line plus the assumptions:
 ```
-✅ <slug> initialized. plan.md + recon.md + settings.yaml live at ~/.life/projects/<slug>/. Ready for tasks.
+✅ <slug> initialized. plan.md + recon.md + settings.yaml at ~/.life/projects/<slug>/.
+
+Assumed:
+- <one-line assumption>
+- <one-line assumption>
+
+Reply with corrections if any are wrong; otherwise the next code task will use this as ground truth.
 ```
 
 ---
 
-## New-project arm (Socratic)
+## New-project arm (Socratic — bounded to one question)
 
-No repo. No code. Just an idea the operator is shaping. The mode is **Socratic** — Kit asks the **5 hardest decision-shaped questions** first, before any plan.md gets written.
+No repo. No code. Just an idea the operator is shaping. Under the auto-proceed posture, Socratic mode is **bounded to AT MOST one clarifying question**, and only when the operator's brief is genuinely ambiguous (e.g., they named no target audience AND the scope describes two contradictory products). Otherwise: pick the strongest defensible interpretation and write `plan.md` immediately, recording the interpretation in the **Assumptions** section.
 
 ### 1. Resolve slug + scaffold
 
-Same as existing-repo arm — propose a slug, mkdir the project tree.
+Same as existing-repo arm — derive a slug from the operator's brief, mkdir the project tree. Don't ask.
 
-### 2. The 5 questions
+### 2. Decide: write the plan, or ask one question
 
-Tailor to the idea, but the *shape* of these is constant — they force commitment to a real design rather than aspirational vagueness. Examples (not a checklist — write the *right* 5 for the operator's idea):
+Read the operator's brief. Apply this test:
 
-1. **What's the irreducible job?** "If this project only did one thing, what would it be?"
-2. **Who's the user, exactly?** Solo the operator? Family? Public? Each implies a wildly different design.
-3. **What does success look like in 3 months?** Concrete artifact, not vibes.
-4. **What's the hard part — the thing you don't yet know how to do?** This is where the actual design work is.
-5. **What's it NOT?** The non-goal is half the spec.
+- **No target audience identified AND scope internally contradictory?** → ask the ONE highest-leverage question. Examples:
+  - "Solo tool for you, or something other people will use?" (when audience drives the entire shape)
+  - "Is this replacing X, or a new thing alongside X?" (when scope is contradictory)
+- **Anything less ambiguous?** → skip to step 3. Make defensible calls, document them in Assumptions.
 
-Reply to the operator with these 5 questions, numbered, in chat. No preamble.
+If you asked the question, wait for the answer (one round trip), then proceed.
 
-### 3. Multi-turn conversation
+### 3. Write `plan.md` (mode: socratic)
 
-After the operator answers, ask **2–4 follow-ups** as needed — but not more. Resist the urge to design forever. Once Kit has enough to write a real plan.md (not a stub), stop asking and write it.
-
-Each turn appended to `$PROJ_DIR/conversation.md`.
-
-### 4. Write `plan.md` (mode: socratic)
-
-Same shape as the recon arm's plan.md, with `mode: socratic` in frontmatter. The "Current state" section will be "Conception / pre-implementation."
+Same shape as the recon arm's plan.md, with `mode: socratic` in frontmatter. The "Current state" section will be "Conception / pre-implementation." Use the **Assumptions** section liberally — every interpretation you made without operator input goes there as a single-sentence bullet.
 
 Write a minimal `settings.yaml` with `github_repo: null` (until a repo exists).
 
 Reply:
 ```
-✅ <slug> planned. Wrote ~/.life/projects/<slug>/plan.md. No repo yet — when one's created, run `/recon` to add recon.md.
+✅ <slug> planned. plan.md at ~/.life/projects/<slug>/.
+
+Assumed:
+- <one-line assumption>
+- <one-line assumption>
+
+Reply with corrections if any are wrong. No repo yet — when one's created, run `/recon` to add recon.md.
 ```
 
 ---
@@ -248,5 +250,5 @@ If `task_intake` is dropping an **atomic** code task on an unknown project, it a
 |---|---|
 | Project already has `plan.md` | Refuse. Tell the operator to edit by hand. |
 | Repo clone fails (auth, network, 404) | Append `recon_failed` to `~/.life/queue.jsonl`, reply with a one-line "couldn't clone <repo>: <reason>" and stop. Do NOT leave a half-populated `$PROJ_DIR`. |
-| the operator never answers the questions | Project sits in a half-initialized state with `recon.md` but no `plan.md`. That's fine — `task_intake` will still refuse non-atomic code there, which is the right outcome. |
+| the operator never replies to a single clarifying question | After ~24h, write `plan.md` anyway using the strongest defensible interpretation — record both candidate readings under "Assumptions" so the operator can correct in one reply. Half-initialized states are no longer an acceptable outcome under the auto-proceed posture. |
 | `gh api` for visibility detection fails | Set `github_visibility: unknown` in settings.yaml. Don't block on it. |

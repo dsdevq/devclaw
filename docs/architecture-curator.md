@@ -120,6 +120,21 @@ The gatekeeper. Called when the operator first references a project Kit doesn't 
 
 In both cases: `conversation.md` is append-only and captures the full transcript for audit / future-Kit context-load.
 
+### 2.8.1 Human-in-loop posture
+
+**Default: announce and proceed.** Devclaw exists to do autonomous overnight work; blocking on explicit human acknowledgement at every stage defeats the purpose. The system's two upstream layers (`project_init` and `propose_change`) default to *proceed by default, correct by exception*:
+
+- **`project_init`** writes `plan.md` (and `recon.md` for existing repos) in the same turn it's invoked. Socratic Q&A is bounded to **AT MOST one clarifying question**, and only when the operator's brief is genuinely ambiguous (no `target_repo` AND internally contradictory scope). Otherwise Kit picks the strongest defensible interpretation and records its calls in a dedicated `Assumptions` section so the operator can correct in a single chat reply.
+- **`propose_change`** auto-promotes drafted RFCs from `proposals/` to `proposals-approved/` and invokes `define_run` immediately. The operator is notified, not gated. Their recourse is the resulting PR (merge or close); they may also reply `cancel` / `hold` to abort a Run that hasn't started yet.
+- **Curator** is unchanged — it already runs autonomously and pings only on the narrow §6.3 escalation list and at Run completion.
+
+**Hard-keep exceptions (still gated on explicit `ship it`):**
+
+1. **`~/.life/domains/` writes.** Memory curator's sovereign surface. Any proposal that touches a domain file is drafted into `proposals/` (not `proposals-approved/`), and stays there until the operator replies `ship it`. `project_init` never writes to `~/.life/domains/` at all — it surfaces implications in `plan.md`'s "Domain implications" section.
+2. **Paid infrastructure.** VPS deploy changes, paid GitHub Actions workflows, `openclaw.json` rewrites, anything with a non-trivial $ cost. Same draft-into-`proposals/`-and-wait pattern. Money decisions stay human-in-the-loop because cost regret is harder to roll back than code regret.
+
+This posture inverts the Phase 5.7b default. Before: human review was the gate; auto-proceed was the exception. After: auto-proceed is the gate; human review is the exception, enumerated above. The trade is bounded — the PR review still exists, and the cancel/hold override exists for the narrow window between dispatch and first task — but the day-to-day friction of running the system drops to near-zero.
+
 ### 2.9 settings.yaml (per-project config, new file)
 
 Lives at `~/.life/projects/<slug>/settings.yaml`. Captures opt-in choices:
