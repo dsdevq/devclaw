@@ -1,0 +1,22 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local scratch
+/tmp/
+.cache/
+
+# Anything that looks like personal state should not be in this repo
+.env
+.env.*
+*.local.yaml
+auth-profiles.json
+*.pem
+*.key
