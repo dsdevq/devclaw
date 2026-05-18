@@ -131,3 +131,33 @@ def sqlite_checkpointer(db_path: Path) -> SqliteSaver:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     return SqliteSaver(conn)
+
+
+def postgres_checkpointer(conn_string: str):
+    """Open a Postgres checkpointer. Production option for cross-machine durability.
+
+    Requires the `postgres` optional dependency:
+        pip install devclaw-orchestrator[postgres]
+
+    Args:
+        conn_string: e.g. "postgresql://user:pass@host:5432/dbname"
+
+    Returns:
+        A LangGraph PostgresSaver instance. Caller owns lifecycle.
+
+    Raises:
+        ImportError if the postgres extra isn't installed.
+    """
+    try:
+        from langgraph.checkpoint.postgres import PostgresSaver  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "PostgresSaver requires the `postgres` extra. "
+            "Install with: pip install 'devclaw-orchestrator[postgres]'"
+        ) from exc
+
+    saver = PostgresSaver.from_conn_string(conn_string)
+    # PostgresSaver requires explicit setup to create its tables on first run.
+    # We call setup() idempotently — it's safe to call on an already-initialized DB.
+    saver.setup()
+    return saver
