@@ -87,7 +87,11 @@ def find_dispatched_specs(life_root: Path) -> list[Path]:
     Scans BOTH atomic (`tasks/*/spec.yaml`) and run-bound (`projects/*/runs/*/tasks/*/spec.yaml`) paths.
     """
     candidates: list[Path] = []
-    for glob in ("tasks/*/spec.yaml", "projects/*/runs/*/tasks/*/spec.yaml"):
+    for glob in (
+        "tasks/*/spec.yaml",
+        "projects/*/tasks/*/spec.yaml",
+        "projects/*/runs/*/tasks/*/spec.yaml",
+    ):
         candidates.extend(life_root.glob(glob))
     return candidates
 
@@ -98,7 +102,11 @@ def find_all_specs(life_root: Path) -> list[Path]:
     Used by the dispatch pass to find `status: ready` specs that need a runner.
     """
     candidates: list[Path] = []
-    for glob in ("tasks/*/spec.yaml", "projects/*/runs/*/tasks/*/spec.yaml"):
+    for glob in (
+        "tasks/*/spec.yaml",
+        "projects/*/tasks/*/spec.yaml",
+        "projects/*/runs/*/tasks/*/spec.yaml",
+    ):
         candidates.extend(life_root.glob(glob))
     return candidates
 
