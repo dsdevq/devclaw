@@ -23,12 +23,27 @@ from orchestrator.state.models import (
     TaskStatus,
 )
 from orchestrator.sweep import (
+    DISPATCH_CAP_PER_TICK,
     REAP_CAP_PER_TICK,
     WATCHDOG_CAP_PER_TICK,
+    find_all_specs,
     find_dispatched_specs,
     is_killswitch_set,
     sweep_once,
 )
+
+
+def _noop_dispatcher(spec_path):
+    """Test dispatcher that records the call but does NOT subprocess.Popen anything."""
+    _noop_dispatcher.calls.append(spec_path)  # type: ignore[attr-defined]
+    return f"pid:0"
+
+
+_noop_dispatcher.calls = []  # type: ignore[attr-defined]
+
+
+def _reset_noop():
+    _noop_dispatcher.calls = []  # type: ignore[attr-defined]
 
 
 def make_spec(task_id: str, **overrides) -> TaskSpec:
@@ -271,9 +286,77 @@ def test_sweep_caps_are_enforced(tmp_path: Path):
 
 def test_sweep_empty_life_returns_clean(tmp_path: Path):
     life = setup_life_root(tmp_path)
-    result = sweep_once(life)
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
     assert result.scanned == 0
     assert result.reaped == []
     assert result.ghosted == []
+    assert result.dispatched == []
     assert result.errors == []
     assert result.skipped_killswitch is False
+
+
+# ─── dispatch pass ───────────────────────────────────────────────────────────
+
+
+def test_sweep_dispatches_ready_atomic_spec(tmp_path: Path):
+    """A spec at status: ready (atomic, no run binding) gets Popen'd by the sweep."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    spec = make_spec("ready-1", status=TaskStatus.ready, dispatched_at=None)
+    spec_path = write_atomic_spec(life, spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "ready-1" in result.dispatched
+    assert len(_noop_dispatcher.calls) == 1
+    assert _noop_dispatcher.calls[0] == spec_path
+
+    # spec.yaml on disk is now status: dispatched-subagent with a watchdog_deadline
+    from orchestrator.dispatch import load_spec
+
+    reloaded = load_spec(spec_path)
+    assert reloaded.status == TaskStatus.dispatched_subagent
+    assert reloaded.watchdog_deadline is not None
+    assert reloaded.dispatched_at is not None
+
+
+def test_sweep_does_not_dispatch_run_bound_specs(tmp_path: Path):
+    """Run-bound specs (run field set) are dispatched by the supervisor, NOT the sweep."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    spec = make_spec(
+        "run-bound-1",
+        status=TaskStatus.ready,
+        run="some-run-id",
+        run_node="node-x",
+    )
+    write_run_bound_spec(life, "lifekit-stack", "some-run-id", spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "run-bound-1" not in result.dispatched
+    assert _noop_dispatcher.calls == []
+
+
+def test_sweep_dispatch_caps_at_per_tick_limit(tmp_path: Path):
+    """N+1 ready atomic specs → only DISPATCH_CAP_PER_TICK get dispatched."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    for i in range(DISPATCH_CAP_PER_TICK + 2):
+        spec = make_spec(f"ready-{i}", status=TaskStatus.ready, dispatched_at=None)
+        write_atomic_spec(life, spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert len(result.dispatched) == DISPATCH_CAP_PER_TICK
+    assert len(_noop_dispatcher.calls) == DISPATCH_CAP_PER_TICK
+
+
+def test_sweep_dispatch_skipped_when_killswitch_set(tmp_path: Path):
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    (life / "system" / "cron-paused").touch()
+    spec = make_spec("ready-1", status=TaskStatus.ready, dispatched_at=None)
+    write_atomic_spec(life, spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert result.skipped_killswitch is True
+    assert result.dispatched == []
+    assert _noop_dispatcher.calls == []
