@@ -31,6 +31,7 @@ from orchestrator.dispatch import (
     persist_spec,
     reap_spec,
 )
+from orchestrator.notify import notify_telegram
 from orchestrator.state.models import TaskSpec, TaskStatus
 
 DISPATCH_CAP_PER_TICK = 3
@@ -204,6 +205,10 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
                 "dispatched ready atomic spec %s (popen=%s)",
                 spec.task_id,
                 run_id_str,
+            )
+            notify_telegram(
+                spec.requester_route.to,
+                f"🚀 dispatched {spec.task_id} (kind={spec.kind.value})",
             )
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"dispatch failed: {spec.task_id} — {exc}")
