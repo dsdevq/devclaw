@@ -17,7 +17,8 @@ from pathlib import Path
 
 from orchestrator.dispatch import load_spec
 from orchestrator.graph import build_task_graph, sqlite_checkpointer
-from orchestrator.state.models import GraphState
+from orchestrator.intake import intake
+from orchestrator.state.models import GraphState, RequesterRoute
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import sweep_once
 
@@ -73,10 +74,36 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_intake(args: argparse.Namespace) -> int:
+    """Convert a natural-language intent into a TaskSpec and write it to disk."""
+    intent = args.intent
+    if intent == "-":
+        intent = sys.stdin.read().strip()
+    if not intent:
+        print("error: intent is empty", file=sys.stderr)
+        return 2
+
+    route = RequesterRoute(channel=args.channel, to=args.to)
+    spec = intake(intent, requester_route=route, life_root=Path(args.life).expanduser())
+    if spec is None:
+        print("error: task_intake failed (see logs)", file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "task_id": spec.task_id,
+                "kind": spec.kind.value,
+                "project": spec.project,
+                "target_repo": spec.target_repo,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_supervise(args: argparse.Namespace) -> int:
     """Run one supervisor heartbeat for the given dag.yaml."""
-    from orchestrator.state.models import RequesterRoute
-
     dag_path = Path(args.dag).expanduser().resolve()
     if not dag_path.is_file():
         print(f"error: dag.yaml not found: {dag_path}", file=sys.stderr)
@@ -94,8 +121,6 @@ def cmd_supervise(args: argparse.Namespace) -> int:
 
 def cmd_supervise_all(args: argparse.Namespace) -> int:
     """Sweep every active Run under ~/.life/projects/*/runs/*/dag.yaml."""
-    from orchestrator.state.models import RequesterRoute
-
     life_root = Path(args.life).expanduser().resolve()
     if not life_root.is_dir():
         print(f"error: --life root not found: {life_root}", file=sys.stderr)
@@ -135,6 +160,23 @@ def main() -> int:
         help="LangGraph thread id (defaults to spec.task_id)",
     )
     p_dispatch.set_defaults(func=cmd_dispatch)
+
+    p_intake = sub.add_parser(
+        "intake",
+        help="convert a natural-language intent into a TaskSpec on disk",
+    )
+    p_intake.add_argument(
+        "intent",
+        help="the natural-language intent, or `-` to read from stdin",
+    )
+    p_intake.add_argument(
+        "--life",
+        default="~/.life",
+        help="root of the ~/.life store",
+    )
+    p_intake.add_argument("--channel", default="telegram")
+    p_intake.add_argument("--to", default="default", help="requester id (e.g. Telegram chat id)")
+    p_intake.set_defaults(func=cmd_intake)
 
     p_sweep = sub.add_parser(
         "sweep",
