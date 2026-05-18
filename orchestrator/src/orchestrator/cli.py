@@ -15,6 +15,7 @@ import logging
 import sys
 from pathlib import Path
 
+from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemon
 from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.graph import build_task_graph, sqlite_checkpointer
 from orchestrator.intake import intake
@@ -156,6 +157,48 @@ def cmd_supervise_all(args: argparse.Namespace) -> int:
     return 1 if any_errors else 0
 
 
+def cmd_daemon(args: argparse.Namespace) -> int:
+    """Long-running scheduler: interleaves sweep (15 min) + supervise-all (30 min).
+
+    Designed to be the entrypoint of a single long-running container — replaces
+    the OpenClaw cron entries `task_dispatch_15m` and `curator_30m` so each tick
+    runs at zero LLM tokens.
+    """
+    import threading
+
+    life_root = Path(args.life).expanduser().resolve()
+    if not life_root.is_dir():
+        print(f"error: --life root not found: {life_root}", file=sys.stderr)
+        return 2
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(threadName)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
+
+    config = DaemonConfig(
+        life_root=life_root,
+        sweep_interval_s=args.sweep_interval,
+        supervise_interval_s=args.supervise_interval,
+        supervise_offset_s=args.supervise_offset,
+        telegram_chat=args.telegram_chat,
+    )
+    shutdown = threading.Event()
+    install_signal_handlers(shutdown)
+
+    logger = logging.getLogger("orchestrator.daemon")
+    logger.info(
+        "daemon start life=%s sweep_interval=%ss supervise_interval=%ss",
+        life_root,
+        config.sweep_interval_s,
+        config.supervise_interval_s,
+    )
+    run_daemon(config, shutdown=shutdown)
+    logger.info("daemon stopped")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="devclaw-orchestrator")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -231,6 +274,32 @@ def main() -> int:
     )
     p_sup_all.add_argument("--telegram-chat", default="default")
     p_sup_all.set_defaults(func=cmd_supervise_all)
+
+    p_daemon = sub.add_parser(
+        "daemon",
+        help="long-running scheduler — sweep every 15 min, supervise every 30 min",
+    )
+    p_daemon.add_argument("--life", default="~/.life", help="root of the ~/.life store")
+    p_daemon.add_argument(
+        "--sweep-interval",
+        type=float,
+        default=15 * 60,
+        help="seconds between sweep ticks (default 900)",
+    )
+    p_daemon.add_argument(
+        "--supervise-interval",
+        type=float,
+        default=30 * 60,
+        help="seconds between supervise-all ticks (default 1800)",
+    )
+    p_daemon.add_argument(
+        "--supervise-offset",
+        type=float,
+        default=60.0,
+        help="seconds to delay first supervise tick after start (stagger from sweep)",
+    )
+    p_daemon.add_argument("--telegram-chat", default="default")
+    p_daemon.set_defaults(func=cmd_daemon)
 
     args = parser.parse_args()
     return args.func(args)
