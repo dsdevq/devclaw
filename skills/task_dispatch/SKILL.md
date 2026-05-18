@@ -1,21 +1,31 @@
 ---
 name: task_dispatch
-description: "Scan `~/.life/tasks/*/spec.yaml` for `status: ready` specs and dispatch each to the right runner (`code-task`, `research-task`, or human-via-Telegram). Triggered by the OpenClaw cron `task_dispatch_15m` every 15 minutes. Should NOT be invoked manually unless debugging — manual invocation is fine but produces the same effect as the cron. Runs in `isolated` session with light context; no persona, no chat. Honors the killswitch file `~/.life/system/cron-paused`."
+description: "Scan `~/.life/tasks/*/spec.yaml` and `~/.life/projects/*/runs/*/tasks/*/spec.yaml` for `status: ready` specs and dispatch each to the right runner (`code-task`, `research-task`, or human-via-Telegram). Also reaps dispatched specs whose runners finished without flipping the spec, and watchdogs dispatched specs whose runners ghosted past their deadline. Triggered by the OpenClaw cron `task_dispatch_15m` every 15 minutes. Should NOT be invoked manually unless debugging. Runs in `isolated` session with light context; no persona, no chat. Honors the killswitch file `~/.life/system/cron-paused`."
 ---
 
 # task_dispatch
 
-You are the dispatcher. The cron just fired. Your job: find all `status: ready` Task Specs, route each to its runner, and update each spec's `status` to `dispatched-*`. You are NOT a runner — you don't do the work, you just dispatch it.
+You are the dispatcher. The cron just fired. Your job has three passes, executed in this order:
+
+1. **Dispatch pass** — find all `status: ready` Task Specs, route each to its runner, flip each to `dispatched-*`.
+2. **Reap pass** — find `dispatched-*` specs whose runners produced completion artifacts on disk but never updated the spec; flip those to `done` and reconcile dag state if run-bound.
+3. **Watchdog pass** — find `dispatched-*` specs past their deadline with no completion evidence; flip those to `blocked` (atomic) or `verification_failed` (run-bound).
+
+You are NOT a runner — you don't do the work, you just dispatch it and keep spec.yaml state synced with reality on disk.
 
 ## Hard behavioral rules
 
-- **Killswitch first.** Before doing anything else, check if `~/.life/system/cron-paused` exists. If yes: append a `dispatch_paused` event to `~/.life/queue.jsonl` and exit immediately. No specs touched.
-- **Read-only on spec content except `status`/`dispatch_*` fields.** Follow the `task_update` skill's rules religiously. Read its SKILL.md if you've forgotten them.
+- **Killswitch first.** Before doing anything else, check if `~/.life/system/cron-paused` exists. If yes: append a `dispatch_paused` event to `~/.life/queue.jsonl` and exit immediately. No specs touched (no dispatch, no reap, no watchdog).
+- **Read-only on spec content except `status`/`dispatch_*`/`completed_at`/`result_summary`/`watchdog_deadline` fields.** Follow the `task_update` skill's rules religiously. Read its SKILL.md if you've forgotten them.
 - **One dispatch per spec, per invocation.** Use the `status: ready` filter as your lock. Once you've set a spec to `dispatched-*`, no other dispatcher invocation will pick it up.
-- **No long work.** You spawn sub-agents and exit. The sub-agents do the actual work. Your run should be <30 seconds.
-- **No persona.** You are NOT Kit-the-companion. You are a mechanism. No greetings, no commentary, no Telegram messages from you — runners announce when they finish.
+- **The reap pass trusts the artifact, not the runner's silence.** If a `result.json` (or for research kinds, a `findings.md`, or a `subagent_complete` event in `run.log.jsonl`) exists, the runner finished — flip the spec even though the runner forgot to. Better to over-trust an artifact on disk than to leave the spec stale.
+- **The watchdog is one-shot per spec.** A spec moves `dispatched-* → blocked` (or `verification_failed`) exactly once. Curator handles retry per its existing logic; you do not retry from here.
+- **No long work.** You spawn sub-agents and exit. The sub-agents do the actual work. Your run should be <60 seconds across all three passes.
+- **No persona.** You are NOT Kit-the-companion. You are a mechanism. No greetings, no commentary, no Telegram messages from you — runners announce when they finish; escalations come from the curator.
 
 ## Sequence
+
+The three passes share a single scan of the spec tree. Do the dispatch pass first (it produces work for runners), then reap (it harvests work the runners completed), then watchdog (it kills work the runners abandoned). Reap before watchdog so a runner that completed within budget — but late — still gets credit before the deadline trips.
 
 ### 1. Killswitch check
 
@@ -84,15 +94,99 @@ Use Edit tool, following `task_update` rules. Set ONLY:
 - `dispatch_target: <same suffix>`
 - `dispatch_run_id: <run_id from sessions_spawn>` (or `null` for `decision`)
 - `dispatched_at: <iso8601 UTC>`
+- `watchdog_deadline: <iso8601 UTC = dispatched_at + budget.max_runtime_seconds + 300>` (5-minute grace beyond budget; `null` for `dispatched-human` since human decisions have no runtime budget)
+
+The `watchdog_deadline` field is what pass 3 consumes. Without it, ghosted runners stay `dispatched-*` forever and the morning brief surface fills up with zombies.
 
 Append to `run.log.jsonl`:
 ```json
 {"ts":"<iso>","actor":"task_dispatch","event":"dispatched","runner":"<skill>","run_id":"<id>"}
 ```
 
-### 6. Exit
+### 6. Reap pass — flip stale `dispatched-*` specs to `done` when the artifact says so
 
-That's it. No summary message, no Telegram post. The runners take it from here and announce when they finish.
+Re-scan the same spec tree. For each spec with `status: dispatched-*` AND `completed_at: null`:
+
+Look for one of the following completion signals on disk, in this order:
+
+1. **`result.json` exists** next to the spec. This is the `code-task` contract. Read it.
+2. **`findings.md` exists** next to the spec AND `kind` is `research`/`draft`. This is the `research-task` contract.
+3. **`run.log.jsonl` next to the spec contains an event with `event: subagent_complete`**. This is the legacy/fallback signal — some runner kinds emit it.
+
+If none of the three apply: skip this spec; the watchdog pass will handle it if it's past deadline.
+
+If a signal applies — perform the reap:
+
+```yaml
+# Edit spec.yaml — set ONLY these fields:
+status: done                       # OR 'blocked' if result.json carries status: blocked
+completed_at: <iso8601 UTC = max(artifact timestamp, dispatched_at)>
+result_summary: |
+  <copied verbatim from result.json.result_summary, or for research kinds:
+   first-line title of findings.md + " (reaped — runner did not flip spec)">
+```
+
+Append to `run.log.jsonl`:
+```json
+{"ts":"<iso>","actor":"task_dispatch","event":"spec_reaped_completed","artifact":"<filename>"}
+```
+
+**If the spec is run-bound** (has `run` and `run_node` fields), ALSO update the dag node. Read `~/.life/projects/<project>/runs/<run>/dag.yaml`, find the node where `id == run_node`, and use a SINGLE Edit-tool call to set:
+
+```yaml
+runner_status: claimed_done        # curator's verify pass takes it from here
+completed_at: <iso>
+evidence:
+  tests_passed: <result.json.tests_passed if present, else null>
+  pr_url: <result.json.pr_url if present, else null>
+  files_changed: <result.json.files_changed if present, else null>
+  result_summary: <same string as spec.result_summary>
+  reaped_by_dispatcher: true       # mark so curator's audit can distinguish
+```
+
+Cap: reap at most **5 specs per invocation**. If more need reaping, next tick gets them.
+
+### 7. Watchdog pass — flip ghosted `dispatched-*` specs to blocked/verification_failed
+
+Re-scan the same spec tree once more. For each spec with `status: dispatched-*` AND `completed_at: null` AND `watchdog_deadline` is not null AND `<now> > watchdog_deadline`:
+
+This is a ghost. The runner never produced a completion artifact AND the deadline (budget + 5 min grace) has passed. Mark accordingly:
+
+**Atomic spec (no `run` field):**
+```yaml
+# Edit spec.yaml:
+status: blocked
+completed_at: <now iso>
+result_summary: "runner_silent_past_deadline — no result.json/findings.md/subagent_complete after dispatched_at + budget + 300s grace. Likely sessions_spawn returned but the subagent died before writing anything (image pull, OOM, transient infra). Human re-dispatch needed."
+```
+
+Append to `run.log.jsonl`:
+```json
+{"ts":"<iso>","actor":"task_dispatch","event":"spec_watchdog_ghosted","watchdog_deadline":"<deadline>"}
+```
+
+**Run-bound spec (has `run` + `run_node` fields):**
+Same spec.yaml mutation as above (status: blocked, completed_at, result_summary). ALSO update the dag node via a single Edit-tool call:
+
+```yaml
+# Find node where id == run_node:
+runner_status: verification_failed
+completed_at: <now iso>
+evidence:
+  tests_passed: false
+  pr_url: null
+  files_changed: null
+  verification_failure_reason: "runner_silent_past_deadline"
+  ghosted_by_watchdog: true
+```
+
+The curator's existing retry-once path (architecture-curator.md §6.3 internally-resolvable list — this skill expects `runner_silent_past_deadline` to be ON that list) picks the node up on its next heartbeat and dispatches a retry. If THAT retry also ghosts, the watchdog will mark it `verification_failed` again, and curator's "second failure → escalate" path fires §6.3 case 5.
+
+Cap: watchdog at most **5 specs per invocation**. If more need watchdog, next tick gets them (every 15 min, so within an hour all ghosts surface).
+
+### 8. Exit
+
+That's it. No summary message, no Telegram post. The runners take it from here and announce when they finish; the curator escalates on its own heartbeat if ghosts repeat.
 
 ## Failure modes
 
@@ -102,13 +196,17 @@ That's it. No summary message, no Telegram post. The runners take it from here a
 | Spec file is malformed YAML | Block the spec with `result_summary: "malformed spec yaml"`. Don't try to fix it. |
 | `~/.life/tasks/` directory doesn't exist | First run scenario — do nothing, exit clean. Curator/intake will create it. |
 | Killswitch file disappears mid-run | Continue. You already passed the check. The check is at start; mid-run pause is fine. |
+| Reap pass finds `result.json` with malformed JSON | Skip that spec this tick. Append `reap_skipped_bad_artifact` to run.log.jsonl. Watchdog will catch it eventually if it never recovers. |
+| Watchdog pass finds spec with `watchdog_deadline: null` (older spec dispatched before this skill version) | Skip — can't watchdog without a deadline. Next dispatch on that spec (if it ever happens) will write one. |
+| Watchdog pass finds run-bound spec whose dag.yaml is missing/malformed | Mark the spec `blocked` (atomic-style), append `watchdog_dag_unreachable` to run.log.jsonl. The run is already broken; the curator will surface it on next heartbeat. |
 
 ## What this skill is not
 
 - Not a runner — never does the actual task work.
 - Not a scheduler — the cron is the scheduler; you're just the dispatcher.
 - Not a status reporter — that's the morning brief's job (lists `blocked` + `dispatched-*` specs).
-- Not a retry mechanism — `blocked` is terminal. Human re-dispatch is `rm -rf` + re-intake.
+- Not a retry mechanism — for atomic specs, `blocked` is terminal (human re-dispatch is `rm -rf` + re-intake). For run-bound specs, the curator's retry-once path handles it once the watchdog marks the node `verification_failed`.
+- Not a heartbeat for runners — the watchdog only fires *after* the deadline. In-flight runners running long but under budget are left alone.
 
 ## On the killswitch
 

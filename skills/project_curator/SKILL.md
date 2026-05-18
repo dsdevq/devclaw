@@ -68,6 +68,7 @@ Read `dag.tasks[i].evidence.verification_failure_reason` and the runner's `resul
 - `precommit_hook_failed` (one retry with context)
 - `merge_conflict` (one retry with context — usually transient if main moved)
 - `time_budget_exceeded` (one retry with double budget; cap at 14400s)
+- `runner_silent_past_deadline` (set by `task_dispatch`'s watchdog pass when a runner ghosts — typically transient infra: image pull, OOM, transient gateway hiccup. One retry with the original budget; second ghost escalates as case 5.)
 
 **NOT internally-resolvable (escalate immediately, first failure):**
 - `verification_setup_failed` (clone/branch/auth problem)
