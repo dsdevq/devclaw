@@ -88,6 +88,16 @@ def write_run_bound_spec(life: Path, project: str, run: str, spec: TaskSpec) -> 
     return spec_path
 
 
+def write_project_bound_atomic_spec(life: Path, project: str, spec: TaskSpec) -> Path:
+    """Spec at projects/<project>/tasks/<task_id>/spec.yaml — what intake produces
+    when the NL intent names a project but doesn't bind to a run."""
+    task_dir = life / "projects" / project / "tasks" / spec.task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = task_dir / "spec.yaml"
+    persist_spec(spec, spec_path)
+    return spec_path
+
+
 # ─── find_dispatched_specs ───────────────────────────────────────────────────
 
 
@@ -105,6 +115,17 @@ def test_find_dispatched_specs_finds_run_bound(tmp_path: Path):
     found = find_dispatched_specs(life)
     assert len(found) == 1
     assert found[0].parent.name == "run-bound-1"
+
+
+def test_find_dispatched_specs_finds_project_bound_atomic(tmp_path: Path):
+    """Specs at projects/<project>/tasks/<id>/spec.yaml — what `intake` produces
+    when the NL intent names a project but isn't run-bound. Previously sweep
+    missed these because the glob only covered run-bound spec paths."""
+    life = setup_life_root(tmp_path)
+    write_project_bound_atomic_spec(life, "lifekit-stack", make_spec("project-atomic-1"))
+    found = find_dispatched_specs(life)
+    assert len(found) == 1
+    assert found[0].parent.name == "project-atomic-1"
 
 
 def test_find_dispatched_specs_finds_both(tmp_path: Path):
