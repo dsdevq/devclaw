@@ -131,4 +131,28 @@ Each markdown skill ports independently:
 5. **Mark the markdown skill deprecated** (frontmatter `deprecated: true`); keep it around until the port has baked for at least 2 weeks of dogfood.
 6. **Delete the markdown skill** once dogfood passes.
 
-Priority order: `task_dispatch` first (already done in v0.0.1 spirit via the new Python `dispatch.py`); then `code_task`; then `verify-task`; then `project_curator`; then the runner kinds (research/draft/chore); then `task_intake` and `propose_change` last (the most LLM-shaped, port last).
+## Status snapshot (2026-05-18, end of day-1 port)
+
+| Markdown skill | Python equivalent | Status |
+|---|---|---|
+| `task_intake` | `orchestrator/intake.py` + `devclaw-orchestrator intake` | ✅ ported |
+| `task_dispatch` (dispatch + reap + watchdog) | `orchestrator/dispatch.py` + `orchestrator/sweep.py` + `devclaw-orchestrator sweep` | ✅ ported |
+| `code-task` | `orchestrator/runners/code_task.py` | ✅ ported (live-smoke-validated) |
+| `research-task` | `orchestrator/runners/research_task.py` | ✅ ported |
+| `propose_change` | `orchestrator/runners/propose_change.py` | ✅ ported |
+| `verify-task` | `orchestrator/nodes/verify.py` | ✅ ported (deterministic AC runner; cognitive-AC variant deferred) |
+| `project_curator` | `orchestrator/supervisor.py` + `devclaw-orchestrator supervise[-all]` | ✅ ported |
+| `task_update` | `orchestrator/dispatch.py::persist_spec` helper | ✅ ported |
+| `define_run` | (not yet — atomic-creation today goes through `intake`; multi-task DAGs come from `propose_change` approval workflow) | 🟡 deferred |
+| `project_init` | (not yet — initial project bootstrap is rare; stays markdown until needed) | 🟡 deferred |
+
+**Cutover** (replacing the markdown crons): not yet. The Python and markdown systems coexist via different intake paths — markdown reads `~/.life/tasks/*/spec.yaml` produced by the markdown `task_intake`; Python reads specs produced by the Python `intake` subcommand. Cutting over the cron entries is a separate VPS-deploy PR.
+
+## Architectural rules (the things that hold across the port)
+
+1. **No API keys.** Every cognition node shells to `claude --print` or (future) `codex exec --json`. Subscription OAuth only.
+2. **Pure-Python orchestration owns all yaml writes.** Cognition nodes return state; deterministic nodes persist. Never write yaml from inside an LLM call.
+3. **Reap > Watchdog > Dispatch order**, every cron tick. A late-but-complete runner keeps credit; ghosts are killed; new ready specs fire last.
+4. **One retry per node, ever**, on the internally-resolvable blocker set. Second failure escalates via §6.3.
+5. **Killswitch wins.** `~/.life/system/cron-paused` short-circuits every cron-fired entry point: sweep, supervise, supervise-all. In-flight subprocesses keep running; only NEW work is blocked.
+6. **Single-writer per file.** `dag.yaml` written only by the supervisor; per-task `spec.yaml` written by intake + dispatch (atomic) or supervisor (run-bound) + sweep (reap/watchdog) + dispatch-CLI (terminal). No two writers race because each phase is gated by status.

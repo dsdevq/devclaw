@@ -15,7 +15,7 @@ import logging
 import sys
 from pathlib import Path
 
-from orchestrator.dispatch import load_spec
+from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.graph import build_task_graph, sqlite_checkpointer
 from orchestrator.intake import intake
 from orchestrator.state.models import GraphState, RequesterRoute
@@ -37,10 +37,23 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     config = {"configurable": {"thread_id": args.thread_id or spec.task_id}}
     final = graph.invoke(GraphState(spec=spec), config=config)
 
-    # Pretty-print the result for human eyes; final["result"] is the structured output.
+    # Persist the final spec back to disk so the world can see status: done|blocked.
+    # Without this, the spec stays at status: dispatched-* on disk and the sweep
+    # watchdog would later misidentify it as a ghost.
+    final_spec = final.get("spec")
+    if final_spec is not None:
+        persist_spec(final_spec, spec_path)
+
+    # Also drop a result.json next to the spec so reaps in mixed-cron environments
+    # (markdown skill + Python orchestrator coexisting during cutover) can recover it.
     result = final.get("result")
     if result is not None:
+        result_json_path = spec_path.parent / "result.json"
+        result_json_path.write_text(
+            json.dumps(result.model_dump(mode="json"), indent=2, default=str)
+        )
         print(json.dumps(result.model_dump(mode="json"), indent=2, default=str))
+
     if final.get("error"):
         return 1
     return 0
