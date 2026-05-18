@@ -17,7 +17,7 @@ from pathlib import Path
 
 from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemon
 from orchestrator.dispatch import load_spec, persist_spec
-from orchestrator.graph import build_task_graph, sqlite_checkpointer
+from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake
 from orchestrator.state.models import GraphState, RequesterRoute
 from orchestrator.supervisor import tick_run
@@ -32,7 +32,10 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     spec = load_spec(spec_path)
 
-    checkpointer = sqlite_checkpointer(Path(args.db).expanduser())
+    if args.db.startswith(("postgres://", "postgresql://")):
+        checkpointer = postgres_checkpointer(args.db)
+    else:
+        checkpointer = sqlite_checkpointer(Path(args.db).expanduser())
     graph = build_task_graph(checkpointer=checkpointer)
 
     config = {"configurable": {"thread_id": args.thread_id or spec.task_id}}
@@ -208,7 +211,10 @@ def main() -> int:
     p_dispatch.add_argument(
         "--db",
         default="~/.life/orchestrator.sqlite",
-        help="SQLite checkpointer path",
+        help=(
+            "Checkpointer location: a SQLite file path, or a "
+            "postgres://... / postgresql://... connection string for the Postgres backend."
+        ),
     )
     p_dispatch.add_argument(
         "--thread-id",
