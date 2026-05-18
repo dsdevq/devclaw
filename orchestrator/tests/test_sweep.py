@@ -26,6 +26,7 @@ from orchestrator.sweep import (
     DISPATCH_CAP_PER_TICK,
     REAP_CAP_PER_TICK,
     WATCHDOG_CAP_PER_TICK,
+    _popen_dispatch_cli,
     find_all_specs,
     find_dispatched_specs,
     is_killswitch_set,
@@ -368,6 +369,38 @@ def test_sweep_dispatch_caps_at_per_tick_limit(tmp_path: Path):
     result = sweep_once(life, dispatcher=_noop_dispatcher)
     assert len(result.dispatched) == DISPATCH_CAP_PER_TICK
     assert len(_noop_dispatcher.calls) == DISPATCH_CAP_PER_TICK
+
+
+def test_popen_dispatch_cli_creates_dispatch_log(tmp_path: Path, monkeypatch):
+    """_popen_dispatch_cli opens dispatch.log beside the spec and hands it to Popen as stdout/stderr."""
+    import subprocess as _subprocess
+
+    spec_dir = tmp_path / "tasks" / "ready-1"
+    spec_dir.mkdir(parents=True)
+    spec_path = spec_dir / "spec.yaml"
+    spec_path.write_text("placeholder")
+
+    captured: dict = {}
+
+    class _FakeProc:
+        pid = 4242
+
+    def _fake_popen(cmd, stdout=None, stderr=None, close_fds=True):
+        captured["cmd"] = cmd
+        captured["stdout"] = stdout
+        captured["stderr"] = stderr
+        return _FakeProc()
+
+    monkeypatch.setattr(_subprocess, "Popen", _fake_popen)
+
+    result = _popen_dispatch_cli(spec_path)
+
+    log_path = spec_dir / "dispatch.log"
+    assert log_path.exists()
+    assert captured["stdout"] is captured["stderr"]
+    assert captured["stdout"].name == str(log_path)
+    assert captured["stdout"].mode == "ab"
+    assert result == "pid:4242"
 
 
 def test_sweep_dispatch_skipped_when_killswitch_set(tmp_path: Path):

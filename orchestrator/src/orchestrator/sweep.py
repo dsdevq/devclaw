@@ -48,11 +48,16 @@ SpecDispatcher = Callable[[Path], Optional[str]]
 
 
 def _popen_dispatch_cli(spec_path: Path) -> str:
-    """Production dispatcher: Popen the `devclaw-orchestrator dispatch` CLI."""
+    """Production dispatcher: Popen the `devclaw-orchestrator dispatch` CLI.
+
+    Per-task output (claude --print stdout/stderr) is appended to a `dispatch.log` next to the spec, so post-mortem debugging can recover what the runner actually said. The fd is intentionally not closed here — Popen retains it for the lifetime of the child.
+    """
+    log_path = spec_path.parent / "dispatch.log"
+    log_fh = open(log_path, "ab")
     proc = subprocess.Popen(
         ["devclaw-orchestrator", "dispatch", str(spec_path)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fh,
+        stderr=log_fh,
         close_fds=True,
     )
     return f"pid:{proc.pid}"
