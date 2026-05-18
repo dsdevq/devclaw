@@ -18,7 +18,7 @@ import subprocess
 from typing import Literal
 
 from orchestrator.dispatch import now_utc
-from orchestrator.state.models import GraphState, Result, RunnerStatus
+from orchestrator.state.models import GraphState, TaskStatus
 
 
 def _run_bash_criterion(criterion: str) -> tuple[bool, str]:
@@ -120,7 +120,7 @@ def complete_node(state: GraphState) -> dict:
         return {}
     updated = spec.model_copy(
         update={
-            "status": "done",
+            "status": TaskStatus.done,
             "completed_at": state.result.completed_at,
             "result_summary": state.result.notes
             or (f"PR: {state.result.pr_url}" if state.result.pr_url else "done"),
@@ -136,7 +136,7 @@ def escalate_node(state: GraphState) -> dict:
         return {"error": "escalate_node called with no result"}
     updated = spec.model_copy(
         update={
-            "status": "blocked",
+            "status": TaskStatus.blocked,
             "completed_at": state.result.completed_at,
             "result_summary": f"escalated: {state.result.blocker or 'unknown'} - {state.result.notes or ''}",
         }
