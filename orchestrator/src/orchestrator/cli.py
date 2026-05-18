@@ -18,6 +18,7 @@ from pathlib import Path
 from orchestrator.dispatch import load_spec
 from orchestrator.graph import build_task_graph, sqlite_checkpointer
 from orchestrator.state.models import GraphState
+from orchestrator.supervisor import tick_run
 from orchestrator.sweep import sweep_once
 
 
@@ -72,6 +73,51 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_supervise(args: argparse.Namespace) -> int:
+    """Run one supervisor heartbeat for the given dag.yaml."""
+    from orchestrator.state.models import RequesterRoute
+
+    dag_path = Path(args.dag).expanduser().resolve()
+    if not dag_path.is_file():
+        print(f"error: dag.yaml not found: {dag_path}", file=sys.stderr)
+        return 2
+
+    route = RequesterRoute(channel="telegram", to=args.telegram_chat)
+    result = tick_run(
+        dag_path,
+        life_root=Path(args.life).expanduser(),
+        requester_route=route,
+    )
+    print(result.summary())
+    return 0
+
+
+def cmd_supervise_all(args: argparse.Namespace) -> int:
+    """Sweep every active Run under ~/.life/projects/*/runs/*/dag.yaml."""
+    from orchestrator.state.models import RequesterRoute
+
+    life_root = Path(args.life).expanduser().resolve()
+    if not life_root.is_dir():
+        print(f"error: --life root not found: {life_root}", file=sys.stderr)
+        return 2
+
+    dags = list(life_root.glob("projects/*/runs/*/dag.yaml"))
+    if not dags:
+        print("supervise-all: no active runs")
+        return 0
+
+    route = RequesterRoute(channel="telegram", to=args.telegram_chat)
+    any_errors = False
+    for dag_path in dags:
+        try:
+            result = tick_run(dag_path, life_root=life_root, requester_route=route)
+            print(result.summary())
+        except Exception as exc:  # noqa: BLE001
+            any_errors = True
+            print(f"error in {dag_path}: {exc}", file=sys.stderr)
+    return 1 if any_errors else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="devclaw-orchestrator")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -101,6 +147,35 @@ def main() -> int:
     )
     p_sweep.add_argument("--quiet", action="store_true", help="suppress per-item logging")
     p_sweep.set_defaults(func=cmd_sweep)
+
+    p_sup = sub.add_parser(
+        "supervise",
+        help="run one supervisor heartbeat for a Run (dispatch ready nodes, reconcile completed)",
+    )
+    p_sup.add_argument("dag", help="path to a runs/<run>/dag.yaml")
+    p_sup.add_argument(
+        "--life",
+        default="~/.life",
+        help="root of the ~/.life store (default ~/.life)",
+    )
+    p_sup.add_argument(
+        "--telegram-chat",
+        default="default",
+        help="Telegram chat id for escalations + run-complete announce",
+    )
+    p_sup.set_defaults(func=cmd_supervise)
+
+    p_sup_all = sub.add_parser(
+        "supervise-all",
+        help="run a supervisor heartbeat for every active Run under ~/.life/projects/*/runs/*",
+    )
+    p_sup_all.add_argument(
+        "--life",
+        default="~/.life",
+        help="root of the ~/.life store (default ~/.life)",
+    )
+    p_sup_all.add_argument("--telegram-chat", default="default")
+    p_sup_all.set_defaults(func=cmd_supervise_all)
 
     args = parser.parse_args()
     return args.func(args)
