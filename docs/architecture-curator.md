@@ -403,10 +403,13 @@ tasks:
     verifier_status: pending | passed | failed
     spec_path: tasks/001-migration/spec.yaml      # filled when Curator generates
     completed_at: null
-    evidence:                              # filled by verify-task
+    evidence:                              # filled by verify-task, the runner, or the watchdog
       tests_passed: null
       pr_url: null
       files_changed: null
+      verification_failure_reason: null    # set by verify-task on AC failure, OR by task_dispatch watchdog (= "runner_silent_past_deadline")
+      reaped_by_dispatcher: null           # set true by task_dispatch reap pass (§6.3.1)
+      ghosted_by_watchdog: null            # set true by task_dispatch watchdog pass (§6.3.1)
 
   - id: 002-cb-class
     title: CircuitBreaker class + unit tests
@@ -452,7 +455,7 @@ last_event: "dispatched 002-cb-class and 003-retry-strategy (parallel)"
 
 (See §2.9.)
 
-### 5.6 Per-task `spec.yaml` (unchanged from Phase 5.5)
+### 5.6 Per-task `spec.yaml` (extends Phase 5.5)
 
 Inherits from Phase 5.5 schema (`~/.life/system/autonomous-overnight-architecture.md` §5.2). New optional fields for project-bound tasks:
 
@@ -460,6 +463,7 @@ Inherits from Phase 5.5 schema (`~/.life/system/autonomous-overnight-architectur
 project: <slug>                            # always present when project-bound
 run: <run-slug>                            # present for run-bound tasks
 github_issue: <number>                     # present when settings.mirror_to_issues triggered
+watchdog_deadline: <iso8601 UTC>           # written by task_dispatch at dispatch time = dispatched_at + budget + 300s grace. consumed by §6.3.1 watchdog pass.
 ```
 
 ---
@@ -504,6 +508,21 @@ Same single-writer / append-only / write-once discipline as Phase 5.5 (`~/.life/
 4. External system unavailable >2 hours
 5. Same task failed verification 2x
 6. Scope of work genuinely unattainable given budget
+
+### 6.3.1 Runner ghosts (added 2026-05-18)
+
+A runner can disappear between `sessions_spawn` returning a `run_id` and the runner's first dag/spec mutation — image pull fails, OOM, container exits before the first Edit-tool call, gateway transient. The dag node sits at `runner_status: dispatched` and the spec sits at `status: dispatched-*` with no progress signal the Curator can interpret. Pure §6.3 cases don't fire because there's no `result.json`, no failed test, no claimed-done node to verify.
+
+**Mechanism (owned by `task_dispatch`, not Curator):**
+
+1. On every dispatch, `task_dispatch` writes `watchdog_deadline: <dispatched_at + budget + 300s grace>` into the spec.yaml. Without this field, the spec is unwatchable — older specs from before this mechanism survive as-is (they only re-trigger the watchdog if they ever get re-dispatched).
+2. On every cron tick (every 15 min), `task_dispatch` runs a **reap pass** before its watchdog pass: any `dispatched-*` spec whose runner produced a `result.json` / `findings.md` / `subagent_complete` event but never flipped the spec gets reaped to `done` with the artifact's values. This catches "runner finished, just forgot to update state" — the dominant failure mode of the Phase 5.7c run-bound research/draft/chore kinds whose skills aren't fully run-aware yet.
+3. Then a **watchdog pass**: any `dispatched-*` spec past `watchdog_deadline` with no completion evidence gets flipped — atomic specs to `status: blocked`, run-bound specs to `status: blocked` AND dag node to `runner_status: verification_failed` with `evidence.verification_failure_reason: runner_silent_past_deadline`.
+4. The Curator's existing retry-once path picks up the `verification_failed` node on its next heartbeat. `runner_silent_past_deadline` is on the internally-resolvable list (one retry with original budget). Second ghost → §6.3 case 5 escalation.
+
+**Why `task_dispatch` and not Curator owns this:** `task_dispatch` already scans every spec on a 15-min cadence and already owns the `status: dispatched-*` write. Splitting the watchdog into a separate skill or moving it to Curator would double the scan and split the write contract.
+
+**Why a watchdog instead of a runner-side heartbeat:** the dominant ghost mode is the runner never starting (image pull, OOM, sessions_spawn-returns-but-process-dies). A heartbeat inside `code-task` can't fire if the runner never gets to its first Bash tool call. The watchdog is external and indifferent to runner liveness.
 
 ### 6.4 Verification gate (Generator/Evaluator pattern)
 
