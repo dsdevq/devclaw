@@ -1,21 +1,24 @@
-"""devclaw-orchestrator CLI — manual entry point for dispatching a single TaskSpec.
+"""devclaw-orchestrator CLI — entry points for dispatching specs and running the periodic sweep.
 
 Usage:
     devclaw-orchestrator dispatch <spec.yaml> [--db ~/.life/orchestrator.sqlite] [--thread-id <id>]
+    devclaw-orchestrator sweep [--life ~/.life] [--quiet]
 
-This is the v0.0.1 invocation surface. Cron-fired sweeps (reap + watchdog over all in-flight specs) will be a separate `devclaw-orchestrator sweep` subcommand once the per-task graph is solid.
+The `sweep` subcommand is intended to be cron-fired every 15 minutes (the same cadence as the markdown `task_dispatch_15m`).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
 from orchestrator.dispatch import load_spec
 from orchestrator.graph import build_task_graph, sqlite_checkpointer
 from orchestrator.state.models import GraphState
+from orchestrator.sweep import sweep_once
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
@@ -41,6 +44,34 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """Run one reap + watchdog tick over all in-flight specs under ~/.life/."""
+    life_root = Path(args.life).expanduser().resolve()
+    if not life_root.is_dir():
+        print(f"error: --life root not found: {life_root}", file=sys.stderr)
+        return 2
+
+    if not args.quiet:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s sweep %(message)s",
+            datefmt="%H:%M:%S",
+        )
+
+    result = sweep_once(life_root)
+    print(result.summary())
+    if result.reaped:
+        print(f"  reaped: {', '.join(result.reaped)}")
+    if result.ghosted:
+        print(f"  ghosted: {', '.join(result.ghosted)}")
+    if result.errors:
+        print(f"  errors:", file=sys.stderr)
+        for e in result.errors:
+            print(f"    - {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="devclaw-orchestrator")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -58,6 +89,18 @@ def main() -> int:
         help="LangGraph thread id (defaults to spec.task_id)",
     )
     p_dispatch.set_defaults(func=cmd_dispatch)
+
+    p_sweep = sub.add_parser(
+        "sweep",
+        help="run one reap + watchdog tick over all in-flight specs (intended for cron)",
+    )
+    p_sweep.add_argument(
+        "--life",
+        default="~/.life",
+        help="root of the ~/.life store (default ~/.life)",
+    )
+    p_sweep.add_argument("--quiet", action="store_true", help="suppress per-item logging")
+    p_sweep.set_defaults(func=cmd_sweep)
 
     args = parser.parse_args()
     return args.func(args)
