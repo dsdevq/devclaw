@@ -101,6 +101,9 @@ class TaskSpec(BaseModel):
     completed_at: datetime | None = None
     result_summary: str | None = None
 
+    contract_class: Literal["atomic", "contract", "architecture"] | None = None
+    merged_at: datetime | None = None
+
 
 class DagNode(BaseModel):
     id: str

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from orchestrator.audits.state_currency import AuditReport, run_and_write as run_state_currency_audit
+from orchestrator.pr_review import run_pr_review
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import is_killswitch_set, sweep_once
 from orchestrator.state.models import RequesterRoute
@@ -52,6 +53,8 @@ class DaemonConfig:
     supervise_offset_s: float = 60.0
     audit_interval_s: float = 24 * 60 * 60
     audit_offset_s: float = 120.0
+    pr_review_interval_s: float = 10 * 60
+    pr_review_offset_s: float = 180.0
     telegram_chat: str = "default"
     announce: AnnounceCallback = field(default=_noop_announce)
 
@@ -59,6 +62,7 @@ class DaemonConfig:
 SweepFn = Callable[[Path], object]
 SuperviseFn = Callable[[Path, RequesterRoute], object]
 AuditFn = Callable[[Path], object]
+PrReviewFn = Callable[[Path], object]
 
 
 _AUDIT_SUMMARY_CAP = 500
@@ -79,6 +83,10 @@ def _build_audit_summary(report: AuditReport, report_path: Path) -> str:
 def _default_audit(life_root: Path) -> object:
     report, report_path = run_state_currency_audit(life_root)
     return report, report_path
+
+
+def _default_pr_review(life_root: Path) -> object:
+    return run_pr_review(life_root)
 
 
 def _default_sweep(life_root: Path) -> object:
@@ -104,6 +112,7 @@ def run_daemon(
     sweep_fn: SweepFn = _default_sweep,
     supervise_fn: SuperviseFn = _default_supervise_all,
     audit_fn: AuditFn = _default_audit,
+    pr_review_fn: PrReviewFn = _default_pr_review,
 ) -> None:
     """Run the sweep + supervise loops until `shutdown` is set.
 
@@ -181,16 +190,46 @@ def run_daemon(
             if shutdown.wait(config.audit_interval_s):
                 return
 
+    def _pr_review_loop() -> None:
+        if shutdown.wait(config.pr_review_offset_s):
+            return
+        while not shutdown.is_set():
+            if is_killswitch_set(config.life_root):
+                logger.info("pr-review skipped: killswitch present")
+            else:
+                try:
+                    result = pr_review_fn(config.life_root)
+                    merged = getattr(result, "merged", [])
+                    considered = getattr(result, "considered", [])
+                    if getattr(result, "circuit_paused", False):
+                        logger.warning(
+                            "pr-review: circuit paused — %s",
+                            getattr(result, "circuit_reason", "unknown"),
+                        )
+                    else:
+                        logger.info(
+                            "pr-review: considered=%d merged=%d",
+                            len(considered),
+                            len(merged),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("pr-review failed: %s", exc)
+            if shutdown.wait(config.pr_review_interval_s):
+                return
+
     t_sweep = threading.Thread(target=_sweep_loop, name="sweep-loop", daemon=True)
     t_super = threading.Thread(target=_supervise_loop, name="supervise-loop", daemon=True)
     t_audit = threading.Thread(target=_audit_loop, name="audit-loop", daemon=True)
+    t_pr = threading.Thread(target=_pr_review_loop, name="pr-review-loop", daemon=True)
     t_sweep.start()
     t_super.start()
     t_audit.start()
+    t_pr.start()
 
     t_sweep.join()
     t_super.join()
     t_audit.join()
+    t_pr.join()
 
 
 def install_signal_handlers(shutdown: threading.Event) -> None:
