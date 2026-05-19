@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from orchestrator.dispatch import now_utc, persist_spec
+from orchestrator.dispatch import load_spec, now_utc, persist_spec
 from orchestrator.runners._subprocess import run_claude
 from orchestrator.state.models import (
     Budget,
@@ -24,6 +24,7 @@ from orchestrator.state.models import (
     TaskSpec,
     TaskStatus,
 )
+from orchestrator.sweep import detect_cycle, find_all_specs
 
 logger = logging.getLogger(__name__)
 
@@ -130,10 +131,31 @@ def intake(
             target_branch=data.get("target_branch", "main") or "main",
             project=data.get("project"),
             status=TaskStatus.ready,
+            depends_on=list(data.get("depends_on") or []),
         )
     except (ValidationError, ValueError) as exc:
         logger.warning("task_intake: claude output failed validation: %s", exc)
         return None
+
+    # If the new spec declares dependencies, refuse to write it on disk when
+    # the resulting graph would contain a cycle. Pure read of existing specs;
+    # no writes happen until this check passes.
+    if spec.depends_on:
+        existing: dict[str, TaskSpec] = {}
+        for sp in find_all_specs(life_root):
+            try:
+                loaded = load_spec(sp)
+            except Exception:  # noqa: BLE001
+                continue
+            existing[loaded.task_id] = loaded
+        cycle = detect_cycle(spec, existing)
+        if cycle is not None:
+            logger.warning(
+                "task_intake: depends_on introduces a cycle %s — refusing to write spec %s",
+                " -> ".join(cycle),
+                spec.task_id,
+            )
+            return None
 
     # Pick the destination directory by looking up target_repo in projects/*/settings.yaml.
     # If target_repo is missing or no project owns it, fall through to the flat bucket.

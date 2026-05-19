@@ -27,6 +27,8 @@ from orchestrator.sweep import (
     REAP_CAP_PER_TICK,
     WATCHDOG_CAP_PER_TICK,
     _popen_dispatch_cli,
+    _ready_to_dispatch,
+    detect_cycle,
     find_all_specs,
     find_dispatched_specs,
     is_killswitch_set,
@@ -414,3 +416,184 @@ def test_sweep_dispatch_skipped_when_killswitch_set(tmp_path: Path):
     assert result.skipped_killswitch is True
     assert result.dispatched == []
     assert _noop_dispatcher.calls == []
+
+
+# ─── depends_on / DAG-aware dispatch ─────────────────────────────────────────
+
+
+def test_sweep_dispatches_spec_with_no_deps(tmp_path: Path):
+    """(a) A spec whose depends_on is empty dispatches exactly as before."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    spec = make_spec(
+        "no-deps", status=TaskStatus.ready, dispatched_at=None, depends_on=[]
+    )
+    write_atomic_spec(life, spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "no-deps" in result.dispatched
+    assert len(_noop_dispatcher.calls) == 1
+
+
+def test_sweep_dispatches_spec_with_met_dep(tmp_path: Path):
+    """(b) A spec whose only dep is already `done` dispatches this tick."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    dep = make_spec(
+        "dep-a",
+        status=TaskStatus.done,
+        dispatched_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
+        completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+    )
+    write_atomic_spec(life, dep)
+
+    spec = make_spec(
+        "needs-a",
+        status=TaskStatus.ready,
+        dispatched_at=None,
+        depends_on=["dep-a"],
+    )
+    write_atomic_spec(life, spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "needs-a" in result.dispatched
+
+
+def test_sweep_skips_spec_with_unmet_dep(tmp_path: Path):
+    """(c) A spec whose dep is still in flight (dispatched-subagent) is skipped."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    dep = make_spec("dep-a", status=TaskStatus.dispatched_subagent)
+    write_atomic_spec(life, dep)
+
+    spec = make_spec(
+        "needs-a",
+        status=TaskStatus.ready,
+        dispatched_at=None,
+        depends_on=["dep-a"],
+    )
+    spec_path = write_atomic_spec(life, spec)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "needs-a" not in result.dispatched
+    assert _noop_dispatcher.calls == []
+
+    from orchestrator.dispatch import load_spec
+
+    reloaded = load_spec(spec_path)
+    assert reloaded.status == TaskStatus.ready
+
+
+def test_sweep_skips_unknown_dep_and_logs_warning_once(tmp_path: Path, caplog):
+    """(d) A spec whose dep doesn't exist on disk stays in `ready` with one
+    warning log line per sweep tick (not per offending spec)."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+
+    for tid in ("orphan-1", "orphan-2"):
+        spec = make_spec(
+            tid,
+            status=TaskStatus.ready,
+            dispatched_at=None,
+            depends_on=["does-not-exist"],
+        )
+        write_atomic_spec(life, spec)
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="orchestrator.sweep"):
+        result = sweep_once(life, dispatcher=_noop_dispatcher)
+
+    assert result.dispatched == []
+    assert _noop_dispatcher.calls == []
+    assert result.errors == []
+
+    unknown_warnings = [
+        rec for rec in caplog.records if "unknown" in rec.getMessage().lower()
+    ]
+    assert len(unknown_warnings) == 1, (
+        f"expected exactly one unknown-dep warning per tick, got {len(unknown_warnings)}"
+    )
+
+    from orchestrator.dispatch import load_spec
+
+    for tid in ("orphan-1", "orphan-2"):
+        reloaded = load_spec(life / "tasks" / tid / "spec.yaml")
+        assert reloaded.status == TaskStatus.ready
+
+
+def test_sweep_same_tick_race_a_dispatches_b_skipped(tmp_path: Path):
+    """(e) Same-tick race: A and B both `ready`, B depends on A. A dispatches
+    this tick (flipping to dispatched-subagent), B is skipped (dep not yet
+    done) and remains in `ready` for the next tick."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+
+    a = make_spec("task-a", status=TaskStatus.ready, dispatched_at=None)
+    b = make_spec(
+        "task-b",
+        status=TaskStatus.ready,
+        dispatched_at=None,
+        depends_on=["task-a"],
+    )
+    a_path = write_atomic_spec(life, a)
+    b_path = write_atomic_spec(life, b)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "task-a" in result.dispatched
+    assert "task-b" not in result.dispatched
+
+    from orchestrator.dispatch import load_spec
+
+    a_reloaded = load_spec(a_path)
+    b_reloaded = load_spec(b_path)
+    assert a_reloaded.status == TaskStatus.dispatched_subagent
+    assert b_reloaded.status == TaskStatus.ready
+
+
+# ─── _ready_to_dispatch helper unit ──────────────────────────────────────────
+
+
+def test_ready_to_dispatch_returns_tuple_shape():
+    """The helper returns (bool, reason: str | None) per the contract."""
+    spec = make_spec("solo", status=TaskStatus.ready, depends_on=[])
+    ok, reason = _ready_to_dispatch(spec, {"solo": spec})
+    assert ok is True
+    assert reason is None
+
+    waiting = make_spec("waiting", status=TaskStatus.ready, depends_on=["missing"])
+    ok, reason = _ready_to_dispatch(waiting, {"waiting": waiting})
+    assert ok is False
+    assert reason == "unknown_dep"
+
+
+# ─── cycle detection ─────────────────────────────────────────────────────────
+
+
+def test_detect_cycle_flags_self_dependency():
+    spec = make_spec("loopy", status=TaskStatus.ready, depends_on=["loopy"])
+    cycle = detect_cycle(spec, {})
+    assert cycle is not None
+    assert cycle[0] == "loopy" and cycle[-1] == "loopy"
+
+
+def test_detect_cycle_flags_indirect_cycle():
+    a = make_spec("a", status=TaskStatus.ready, depends_on=["b"])
+    b = make_spec("b", status=TaskStatus.ready, depends_on=["a"])
+    # Pretend `a` is already on disk; inserting `b` closes the loop.
+    cycle = detect_cycle(b, {"a": a})
+    assert cycle is not None
+    assert set(["a", "b"]).issubset(set(cycle))
+
+
+def test_detect_cycle_allows_acyclic_chain():
+    a = make_spec("a", status=TaskStatus.done, depends_on=[])
+    b = make_spec("b", status=TaskStatus.ready, depends_on=["a"])
+    c = make_spec("c", status=TaskStatus.ready, depends_on=["b"])
+    assert detect_cycle(c, {"a": a, "b": b}) is None
+
+
+def test_detect_cycle_tolerates_unknown_dep():
+    """An unknown dep is not a cycle — sweep handles the unknown-dep case."""
+    spec = make_spec("x", status=TaskStatus.ready, depends_on=["missing"])
+    assert detect_cycle(spec, {}) is None
