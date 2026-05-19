@@ -18,19 +18,30 @@ on the first tick after process start.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import signal
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from orchestrator.audits.state_currency import run_and_write as run_state_currency_audit
+from orchestrator.audits.state_currency import AuditReport, run_and_write as run_state_currency_audit
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import is_killswitch_set, sweep_once
 from orchestrator.state.models import RequesterRoute
 
 logger = logging.getLogger(__name__)
+
+
+AnnounceCallback = Callable[[str, str, str], None]
+"""(channel, target, message) → None. Mirrors supervisor's AnnounceCallback shape but
+also carries the target so the daemon can hand off straight to a per-route delivery
+(e.g. `openclaw message send --channel <c> --target <t>`)."""
+
+
+def _noop_announce(channel: str, target: str, message: str) -> None:  # noqa: ARG001
+    logger.info("announce(%s -> %s): %s", channel, target, message)
 
 
 @dataclass(frozen=True)
@@ -42,11 +53,27 @@ class DaemonConfig:
     audit_interval_s: float = 24 * 60 * 60
     audit_offset_s: float = 120.0
     telegram_chat: str = "default"
+    announce: AnnounceCallback = field(default=_noop_announce)
 
 
 SweepFn = Callable[[Path], object]
 SuperviseFn = Callable[[Path, RequesterRoute], object]
 AuditFn = Callable[[Path], object]
+
+
+_AUDIT_SUMMARY_CAP = 500
+
+
+def _build_audit_summary(report: AuditReport, report_path: Path) -> str:
+    summary = (
+        "⚠️ State-currency drift detected\n"
+        f"• Retired-term hits: {len(report.retired_hits)}\n"
+        f"• Missing components: {len(report.missing_components)}\n"
+        f"Report: {report_path}"
+    )
+    if len(summary) > _AUDIT_SUMMARY_CAP:
+        summary = summary[: _AUDIT_SUMMARY_CAP - 1] + "…"
+    return summary
 
 
 def _default_audit(life_root: Path) -> object:
@@ -127,6 +154,11 @@ def run_daemon(
                 logger.info("audit skipped: killswitch present")
             else:
                 try:
+                    today = dt.date.today().isoformat()
+                    today_report = (
+                        config.life_root / "audits" / f"{today}-state-currency.md"
+                    )
+                    already_announced_today = today_report.exists()
                     result = audit_fn(config.life_root)
                     report, report_path = result
                     if report.has_drift:
@@ -136,6 +168,12 @@ def run_daemon(
                             len(report.missing_components),
                             report_path,
                         )
+                        if not already_announced_today:
+                            summary = _build_audit_summary(report, report_path)
+                            try:
+                                config.announce(route.channel, route.to, summary)
+                            except Exception as exc:  # noqa: BLE001
+                                logger.exception("audit announce failed: %s", exc)
                     else:
                         logger.info("audit: clean (%s)", report_path)
                 except Exception as exc:  # noqa: BLE001
