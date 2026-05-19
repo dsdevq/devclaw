@@ -12,6 +12,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=2.0.0",
     "pydantic>=2.9.0",
     "pyyaml>=6.0.2",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,7 @@ dev = [
 
 [project.scripts]
 devclaw-orchestrator = "orchestrator.cli:main"
+devclaw-mcp = "orchestrator.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

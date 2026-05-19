@@ -19,9 +19,10 @@ from pathlib import Path
 from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemon
 from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
-from orchestrator.intake import intake
+from orchestrator.intake import intake_from_prose
 from orchestrator.notify import notify_telegram
 from orchestrator.state.models import GraphState, RequesterRoute, TaskStatus
+from orchestrator.status import lookup_task_status
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import sweep_once
 
@@ -109,30 +110,60 @@ def cmd_sweep(args: argparse.Namespace) -> int:
 
 
 def cmd_intake(args: argparse.Namespace) -> int:
-    """Convert a natural-language intent into a TaskSpec and write it to disk."""
-    intent = args.intent
-    if intent == "-":
-        intent = sys.stdin.read().strip()
-    if not intent:
-        print("error: intent is empty", file=sys.stderr)
+    """Convert a natural-language intent into a TaskSpec and write it to disk.
+
+    Reads prose from `--prose` if given, otherwise from stdin. Emits a
+    single-line JSON object on stdout; narrates progress on stderr.
+
+    Idempotent: re-running with byte-identical (prose, --from) returns the
+    existing task_id with `state="duplicate"` and does NOT create a second
+    spec on disk.
+    """
+    if args.prose is not None:
+        prose = args.prose
+    else:
+        prose = sys.stdin.read()
+    prose = prose.strip()
+    if not prose:
+        print("error: prose is empty (use --prose or pipe into stdin)", file=sys.stderr)
         return 2
 
-    route = RequesterRoute(channel=args.channel, to=args.to)
-    spec = intake(intent, requester_route=route, life_root=Path(args.life).expanduser())
-    if spec is None:
+    def _say(msg: str) -> None:
+        print(msg, file=sys.stderr, flush=True)
+
+    _say(f"devclaw intake: reading {len(prose)} chars from {'--prose' if args.prose else 'stdin'}")
+
+    result = intake_from_prose(
+        prose,
+        from_surface=args.from_surface,
+        life_root=Path(args.life).expanduser(),
+        progress=_say,
+    )
+    if result is None:
         print("error: task_intake failed (see logs)", file=sys.stderr)
         return 1
-    print(
-        json.dumps(
-            {
-                "task_id": spec.task_id,
-                "kind": spec.kind.value,
-                "project": spec.project,
-                "target_repo": spec.target_repo,
-            },
-            indent=2,
-        )
-    )
+
+    payload = {
+        "task_id": result.task_id,
+        "spec_path": str(result.spec_path),
+        "budget_min": result.budget_min,
+        "target_repo": result.target_repo,
+        "state": result.state,
+    }
+    print(json.dumps(payload))
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    """Look up a task's state by task_id. Reads from spec.yaml + result.json on disk.
+
+    Emits a single-line JSON object on stdout. Exit 0 even if the task is
+    unknown (the JSON carries `state="unknown"`) — the caller decides what to
+    do with that.
+    """
+    life_root = Path(args.life).expanduser()
+    info = lookup_task_status(args.task_id, life_root=life_root)
+    print(json.dumps(info))
     return 0
 
 
@@ -274,19 +305,42 @@ def main() -> int:
     p_intake = sub.add_parser(
         "intake",
         help="convert a natural-language intent into a TaskSpec on disk",
+        description=(
+            "Read prose from stdin (or --prose) and run the intake LangGraph node "
+            "to write a spec.yaml under ~/.life. Idempotent: byte-identical (prose, "
+            "--from) inputs return the same task_id with state=duplicate and do not "
+            "create a second spec on disk."
+        ),
     )
     p_intake.add_argument(
-        "intent",
-        help="the natural-language intent, or `-` to read from stdin",
+        "--prose",
+        default=None,
+        help="prose intent (if omitted, read from stdin)",
+    )
+    p_intake.add_argument(
+        "--from",
+        dest="from_surface",
+        default="cli",
+        help="provenance label (e.g. pc-kit, telegram, cron). Default: cli",
     )
     p_intake.add_argument(
         "--life",
         default="~/.life",
         help="root of the ~/.life store",
     )
-    p_intake.add_argument("--channel", default="telegram")
-    p_intake.add_argument("--to", default="default", help="requester id (e.g. Telegram chat id)")
     p_intake.set_defaults(func=cmd_intake)
+
+    p_status = sub.add_parser(
+        "status",
+        help="look up a task's state by task_id",
+        description=(
+            "Read spec.yaml + result.json under ~/.life/tasks/<id>/ or "
+            "~/.life/projects/*/tasks/<id>/ and emit a single-line JSON status."
+        ),
+    )
+    p_status.add_argument("task_id", help="task id to look up")
+    p_status.add_argument("--life", default="~/.life", help="root of the ~/.life store")
+    p_status.set_defaults(func=cmd_status)
 
     p_sweep = sub.add_parser(
         "sweep",

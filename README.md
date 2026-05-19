@@ -144,6 +144,76 @@ Kit (~2-5 min later):  📚 Reconned <repo>. Wrote ~/.life/projects/<slug>/recon
 
 See [`examples/`](./examples/) for real artifacts produced by this loop.
 
+## PC-side install (devclaw-mcp)
+
+Once devclaw is running on a VPS, you can file tasks against it from your PC
+without going through Telegram by registering the bundled MCP server.
+
+It exposes two tools over stdio MCP:
+
+- `devclaw_intake(prose, from_surface="pc-kit")` — file a task. Returns
+  `{task_id, spec_path, budget_min, target_repo, state}` where `state` is
+  `"new"` or `"duplicate"`. **Note**: the kwarg is `from_surface`, not
+  `from` — `from` is a Python reserved word and most MCP SDKs can't expose
+  it cleanly.
+- `devclaw_status(task_id)` — read the current state from
+  `~/.life/tasks/<id>/spec.yaml` + `result.json` on the VPS. Returns
+  `{state, last_action, pr_url?, completed_at?, ...}`.
+
+Each tool call shells out via Tailscale SSH to the VPS — no new HTTP ports,
+no new auth beyond the SSH key you already use.
+
+### Prerequisites
+
+- Tailscale SSH between your PC and the VPS must already work:
+  ```bash
+  ssh lifekit@lifekit-vps 'true'   # should exit 0 without a password prompt
+  ```
+- `devclaw-orchestrator` must be on the VPS user's `PATH` (it is, if you
+  installed devclaw on the VPS the way `orchestrator/DEPLOY.md` describes).
+- A Claude Code CLI (or any other MCP client) on the PC.
+
+### One-line install
+
+```bash
+pipx install "git+https://github.com/dsdevq/devclaw#subdirectory=orchestrator"
+claude mcp add devclaw devclaw-mcp
+```
+
+That registers a `devclaw` MCP server that points at the `devclaw-mcp`
+console script `pipx` just put on your `PATH`.
+
+### Or: register manually in `~/.claude/settings.json`
+
+```jsonc
+{
+  "mcpServers": {
+    "devclaw": {
+      "command": "python",
+      "args": ["-m", "orchestrator.mcp_server"],
+      "env": {
+        "DEVCLAW_VPS_HOST": "lifekit-vps",
+        "DEVCLAW_VPS_USER": "lifekit"
+      }
+    }
+  }
+}
+```
+
+(If you installed via `pipx`, swap `"python", ["-m", "orchestrator.mcp_server"]`
+for `"devclaw-mcp"` with no args.)
+
+### Configuration
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `DEVCLAW_VPS_HOST` | `lifekit-vps` | Tailnet hostname of the VPS running devclaw. |
+| `DEVCLAW_VPS_USER` | `lifekit` | SSH user on the VPS. |
+
+SSH/transport failures (host unreachable, auth failure, timeout) surface as
+MCP tool errors with a structured `error` field — the server stays alive
+across failed calls. Restart only on config changes.
+
 ## Design principles
 
 Lifted verbatim from the architecture docs; the prose-version is in [`docs/architecture-curator.md`](./docs/architecture-curator.md):

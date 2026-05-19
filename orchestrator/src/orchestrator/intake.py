@@ -7,8 +7,11 @@ Same subprocess shape as the other runners — `claude --print` with a tightly-s
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +30,8 @@ from orchestrator.state.models import (
 from orchestrator.sweep import detect_cycle, find_all_specs
 
 logger = logging.getLogger(__name__)
+
+INTAKE_INDEX_FILE = "intake_index.json"
 
 
 def _short_hex(n: int = 4) -> str:
@@ -178,3 +183,162 @@ def intake(
         spec.target_repo,
     )
     return spec
+
+
+# ─── Shared intake-from-prose surface (CLI + MCP + Telegram) ─────────────────
+
+
+@dataclass
+class IntakeResult:
+    """Return shape of `intake_from_prose` — used by both CLI and MCP surfaces."""
+
+    task_id: str
+    spec_path: Path
+    budget_min: int
+    target_repo: str | None
+    state: str  # "new" | "duplicate"
+
+
+def _intake_hash(prose: str, from_surface: str) -> str:
+    """Stable SHA-256 hash of (prose, from_surface) for idempotency keying.
+
+    We use SHA-256 explicitly because Python's built-in `hash()` is salted
+    per-process (PYTHONHASHSEED) and would produce a different value on every
+    fresh interpreter — useless as a persistent dedup key.
+    """
+    h = hashlib.sha256()
+    h.update(prose.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(from_surface.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _load_intake_index(life_root: Path) -> dict[str, str]:
+    """Read the intake-dedup index. Returns {} if absent or malformed."""
+    idx_path = life_root / INTAKE_INDEX_FILE
+    if not idx_path.is_file():
+        return {}
+    try:
+        data = json.loads(idx_path.read_text())
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("task_intake: failed to read %s: %s", idx_path, exc)
+    return {}
+
+
+def _save_intake_index(life_root: Path, index: dict[str, str]) -> None:
+    idx_path = life_root / INTAKE_INDEX_FILE
+    idx_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = idx_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(index, indent=2, sort_keys=True))
+    tmp.replace(idx_path)
+
+
+def intake_from_prose(
+    prose: str,
+    *,
+    from_surface: str = "cli",
+    life_root: Path | None = None,
+    task_id: str | None = None,
+    progress: callable = None,  # type: ignore[valid-type]
+) -> IntakeResult | None:
+    """Shared intake entrypoint used by every surface (CLI, MCP, Telegram handler).
+
+    Idempotency: a SHA-256 of `prose + from_surface` keys the result. A second
+    call with byte-identical inputs returns the SAME `task_id` and
+    `state="duplicate"` without writing a new spec.yaml.
+
+    `from_surface` is stored as `requester_route.to` for provenance (e.g.
+    `pc-kit`, `telegram`, `cron`). `requester_route.channel` is always `cli`
+    when invoked through this surface, since the validated channel literals
+    are constrained.
+
+    `progress`, if provided, is invoked with one-line human-readable strings
+    at each major step — used by the CLI to narrate to stderr.
+
+    Returns:
+      IntakeResult on success (including duplicate).
+      None if the intake LangGraph couldn't infer a usable spec.
+    """
+    life_root = life_root or Path("~/.life").expanduser()
+    life_root.mkdir(parents=True, exist_ok=True)
+
+    def _say(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+
+    prose = prose.strip()
+    if not prose:
+        _say("intake: empty prose — aborting")
+        return None
+
+    fingerprint = _intake_hash(prose, from_surface)
+    _say(f"intake: fingerprint={fingerprint[:12]} from={from_surface}")
+
+    index = _load_intake_index(life_root)
+    if fingerprint in index:
+        existing_path = Path(index[fingerprint])
+        if existing_path.is_file():
+            _say(f"intake: duplicate — reusing {existing_path}")
+            try:
+                existing = load_spec(existing_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("task_intake: stale index entry %s: %s", existing_path, exc)
+            else:
+                return IntakeResult(
+                    task_id=existing.task_id,
+                    spec_path=existing_path,
+                    budget_min=max(1, existing.budget.max_runtime_seconds // 60),
+                    target_repo=existing.target_repo,
+                    state="duplicate",
+                )
+        # Index pointed at a vanished spec — drop the stale entry and continue.
+        logger.info("task_intake: dropping stale index entry %s", fingerprint)
+        index.pop(fingerprint, None)
+        _save_intake_index(life_root, index)
+
+    _say("intake: invoking LangGraph intake node (claude --print)")
+    route = RequesterRoute(channel="cli", to=from_surface or "cli")
+    spec = intake(
+        prose,
+        requester_route=route,
+        life_root=life_root,
+        task_id=task_id,
+        created_by=f"intake:{from_surface or 'cli'}",
+    )
+    if spec is None:
+        _say("intake: LangGraph returned no usable spec")
+        return None
+
+    # Discover where intake() wrote the spec.
+    spec_path = _locate_spec_path(life_root, spec.task_id)
+    if spec_path is None:
+        logger.error("task_intake: spec persisted for %s but path not found", spec.task_id)
+        _say("intake: spec written but its on-disk path could not be located")
+        return None
+
+    index[fingerprint] = str(spec_path)
+    _save_intake_index(life_root, index)
+
+    _say(
+        f"intake: new spec at {spec_path} "
+        f"(kind={spec.kind.value}, target_repo={spec.target_repo})"
+    )
+    return IntakeResult(
+        task_id=spec.task_id,
+        spec_path=spec_path,
+        budget_min=max(1, spec.budget.max_runtime_seconds // 60),
+        target_repo=spec.target_repo,
+        state="new",
+    )
+
+
+def _locate_spec_path(life_root: Path, task_id: str) -> Path | None:
+    flat = life_root / "tasks" / task_id / "spec.yaml"
+    if flat.is_file():
+        return flat
+    for candidate in life_root.glob(f"projects/*/tasks/{task_id}/spec.yaml"):
+        if candidate.is_file():
+            return candidate
+    return None
