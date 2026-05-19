@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from orchestrator.audits.state_currency import run_and_write as run_state_currency_audit
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import is_killswitch_set, sweep_once
 from orchestrator.state.models import RequesterRoute
@@ -38,11 +39,19 @@ class DaemonConfig:
     sweep_interval_s: float = 15 * 60
     supervise_interval_s: float = 30 * 60
     supervise_offset_s: float = 60.0
+    audit_interval_s: float = 24 * 60 * 60
+    audit_offset_s: float = 120.0
     telegram_chat: str = "default"
 
 
 SweepFn = Callable[[Path], object]
 SuperviseFn = Callable[[Path, RequesterRoute], object]
+AuditFn = Callable[[Path], object]
+
+
+def _default_audit(life_root: Path) -> object:
+    report, report_path = run_state_currency_audit(life_root)
+    return report, report_path
 
 
 def _default_sweep(life_root: Path) -> object:
@@ -67,6 +76,7 @@ def run_daemon(
     shutdown: threading.Event | None = None,
     sweep_fn: SweepFn = _default_sweep,
     supervise_fn: SuperviseFn = _default_supervise_all,
+    audit_fn: AuditFn = _default_audit,
 ) -> None:
     """Run the sweep + supervise loops until `shutdown` is set.
 
@@ -109,13 +119,40 @@ def run_daemon(
             if shutdown.wait(config.supervise_interval_s):
                 return
 
+    def _audit_loop() -> None:
+        if shutdown.wait(config.audit_offset_s):
+            return
+        while not shutdown.is_set():
+            if is_killswitch_set(config.life_root):
+                logger.info("audit skipped: killswitch present")
+            else:
+                try:
+                    result = audit_fn(config.life_root)
+                    report, report_path = result
+                    if report.has_drift:
+                        logger.warning(
+                            "audit: drift detected — %d retired-term hits, %d missing components (%s)",
+                            len(report.retired_hits),
+                            len(report.missing_components),
+                            report_path,
+                        )
+                    else:
+                        logger.info("audit: clean (%s)", report_path)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("audit failed: %s", exc)
+            if shutdown.wait(config.audit_interval_s):
+                return
+
     t_sweep = threading.Thread(target=_sweep_loop, name="sweep-loop", daemon=True)
     t_super = threading.Thread(target=_supervise_loop, name="supervise-loop", daemon=True)
+    t_audit = threading.Thread(target=_audit_loop, name="audit-loop", daemon=True)
     t_sweep.start()
     t_super.start()
+    t_audit.start()
 
     t_sweep.join()
     t_super.join()
+    t_audit.join()
 
 
 def install_signal_handlers(shutdown: threading.Event) -> None:
