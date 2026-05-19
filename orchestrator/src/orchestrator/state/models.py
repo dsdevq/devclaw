@@ -104,6 +104,8 @@ class TaskSpec(BaseModel):
     contract_class: Literal["atomic", "contract", "architecture"] | None = None
     merged_at: datetime | None = None
 
+    depends_on: list[str] = Field(default_factory=list)
+
 
 class DagNode(BaseModel):
     id: str

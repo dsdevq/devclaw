@@ -184,6 +184,16 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
 
     # Pass 3: dispatch ready atomic specs.
     # Run-bound specs are dispatched by the supervisor, not here, so this pass only fires for specs whose `run` field is null.
+    # Build an id→spec map once so the readiness gate can look up dep status without re-reading disk per spec.
+    specs_by_id: dict[str, TaskSpec] = {}
+    for spec_path in all_specs:
+        try:
+            s = load_spec(spec_path)
+        except Exception:  # noqa: BLE001
+            continue
+        specs_by_id[s.task_id] = s
+
+    unknown_dep_warning_emitted = False
     for spec_path in all_specs:
         if len(result.dispatched) >= DISPATCH_CAP_PER_TICK:
             break
@@ -195,9 +205,19 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
         if spec.status != TaskStatus.ready or spec.run is not None:
             continue
 
+        ready, reason = _ready_to_dispatch(spec, specs_by_id)
+        if not ready:
+            if reason == "unknown_dep" and not unknown_dep_warning_emitted:
+                logger.warning(
+                    "sweep: one or more ready specs reference unknown deps; leaving in ready"
+                )
+                unknown_dep_warning_emitted = True
+            continue
+
         try:
             dispatched = _mark_atomic_dispatched(spec)
             persist_spec(dispatched, spec_path)
+            specs_by_id[spec.task_id] = dispatched  # keep map current within the tick
             run_id_str = dispatcher(spec_path) or ""
             result.dispatched.append(spec.task_id)
             logger.info(
@@ -209,6 +229,62 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
             result.errors.append(f"dispatch failed: {spec.task_id} — {exc}")
 
     return result
+
+
+def _ready_to_dispatch(
+    spec: TaskSpec, all_specs_by_id: dict[str, TaskSpec]
+) -> tuple[bool, str | None]:
+    """Decide whether a `ready` spec is dispatch-eligible given current dep state.
+
+    Returns (True, None) iff every `depends_on` entry resolves to a known spec
+    whose status is `done`. Otherwise returns (False, reason) where reason is
+    one of: "unknown_dep" (a listed dep id has no matching spec on disk),
+    "dep_not_done" (a listed dep exists but hasn't reached `done` yet).
+    Empty depends_on trivially passes — backward-compatible with pre-DAG specs.
+    """
+    for dep_id in spec.depends_on:
+        dep = all_specs_by_id.get(dep_id)
+        if dep is None:
+            return (False, "unknown_dep")
+        if dep.status != TaskStatus.done:
+            return (False, "dep_not_done")
+    return (True, None)
+
+
+def detect_cycle(
+    spec: TaskSpec, all_specs_by_id: dict[str, TaskSpec]
+) -> list[str] | None:
+    """If adding `spec` to the DAG introduces a cycle, return the cycle path; else None.
+
+    The returned list reads as the offending chain (e.g. ["a", "b", "a"]). Used by
+    `task_intake` (and any other writer) to reject a spec before it lands on disk.
+    """
+    graph = dict(all_specs_by_id)
+    graph[spec.task_id] = spec
+
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {tid: WHITE for tid in graph}
+
+    def visit(node: str, stack: list[str]) -> list[str] | None:
+        color[node] = GRAY
+        stack.append(node)
+        for dep in graph[node].depends_on:
+            if dep not in graph:
+                continue  # unknown deps aren't a cycle; sweep handles them
+            if color[dep] == GRAY:
+                idx = stack.index(dep)
+                return stack[idx:] + [dep]
+            if color[dep] == WHITE:
+                found = visit(dep, stack)
+                if found is not None:
+                    return found
+        stack.pop()
+        color[node] = BLACK
+        return None
+
+    # Only need to search from the newly-introduced node — the existing graph
+    # is assumed acyclic (each prior insertion went through this check).
+    return visit(spec.task_id, [])
 
 
 def _mark_atomic_dispatched(spec: TaskSpec) -> TaskSpec:
