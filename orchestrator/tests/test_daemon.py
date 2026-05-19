@@ -6,12 +6,15 @@ asserts the loop ticked the expected number of times before shutdown.
 
 from __future__ import annotations
 
+import datetime as dt
 import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from orchestrator.audits.state_currency import AuditReport, RetiredHit
 from orchestrator.daemon import DaemonConfig, run_daemon
 from orchestrator.state.models import RequesterRoute
 
@@ -190,3 +193,125 @@ def test_run_daemon_supervise_offset_delays_first_tick(tmp_path: Path) -> None:
 
     assert sweep_before_offset >= 1
     assert super_before_offset == 0, "supervise tick fired before its offset window"
+
+
+def _stub_audit_fn(report: AuditReport, life_root: Path):
+    """Build an audit_fn that returns the given report and writes a dated stub file."""
+    audits = life_root / "audits"
+    audits.mkdir(parents=True, exist_ok=True)
+    report_path = audits / f"{dt.date.today().isoformat()}-state-currency.md"
+
+    def fake_audit(p: Path):
+        report_path.write_text("stub report")
+        return report, report_path
+
+    return fake_audit, report_path
+
+
+def test_audit_loop_clean_report_does_not_announce(tmp_path: Path) -> None:
+    life = _make_life(tmp_path)
+    clean = AuditReport(generated_at="2026-05-19T00:00:00+00:00")
+    assert not clean.has_drift
+    audit_fn, _ = _stub_audit_fn(clean, life)
+
+    announce = MagicMock()
+    shutdown = threading.Event()
+    config = DaemonConfig(
+        life_root=life,
+        sweep_interval_s=60.0,
+        supervise_interval_s=60.0,
+        supervise_offset_s=60.0,
+        audit_interval_s=0.05,
+        audit_offset_s=0.0,
+        telegram_chat="123456",
+        announce=announce,
+    )
+
+    runner = threading.Thread(
+        target=run_daemon,
+        kwargs={
+            "config": config,
+            "shutdown": shutdown,
+            "sweep_fn": lambda p: "scanned=0",
+            "supervise_fn": lambda p, r: [],
+            "audit_fn": audit_fn,
+        },
+    )
+    runner.start()
+    time.sleep(0.2)
+    shutdown.set()
+    runner.join(timeout=2.0)
+
+    assert announce.call_count == 0, (
+        f"announce must NOT fire on a clean report; got {announce.call_args_list!r}"
+    )
+
+
+def test_audit_loop_drift_report_announces_once(tmp_path: Path) -> None:
+    life = _make_life(tmp_path)
+    drift = AuditReport(
+        generated_at="2026-05-19T00:00:00+00:00",
+        retired_hits=[
+            RetiredHit(
+                term="swarm-langgraph",
+                file="docs/architecture.md",
+                line_no=42,
+                line="the swarm-langgraph service…",
+                replacement="devclaw-orchestrator",
+                retired_on="2026-03-01",
+                reason="container renamed",
+            ),
+            RetiredHit(
+                term="swarm-langgraph",
+                file="docs/architecture.md",
+                line_no=99,
+                line="another mention",
+                replacement="devclaw-orchestrator",
+                retired_on="2026-03-01",
+                reason="container renamed",
+            ),
+        ],
+    )
+    assert drift.has_drift
+    audit_fn, report_path = _stub_audit_fn(drift, life)
+
+    announce = MagicMock()
+    shutdown = threading.Event()
+    config = DaemonConfig(
+        life_root=life,
+        sweep_interval_s=60.0,
+        supervise_interval_s=60.0,
+        supervise_offset_s=60.0,
+        audit_interval_s=0.05,
+        audit_offset_s=0.0,
+        telegram_chat="987654",
+        announce=announce,
+    )
+
+    runner = threading.Thread(
+        target=run_daemon,
+        kwargs={
+            "config": config,
+            "shutdown": shutdown,
+            "sweep_fn": lambda p: "scanned=0",
+            "supervise_fn": lambda p, r: [],
+            "audit_fn": audit_fn,
+        },
+    )
+    runner.start()
+    time.sleep(0.25)
+    shutdown.set()
+    runner.join(timeout=2.0)
+
+    # Idempotent per day: even though _audit_loop iterates many times in 0.25s, only
+    # the first tick (when no prior `<today>-state-currency.md` exists) announces.
+    assert announce.call_count == 1, (
+        f"expected exactly one announce, got {announce.call_count}: "
+        f"{announce.call_args_list!r}"
+    )
+    channel, target, message = announce.call_args.args
+    assert channel == "telegram"
+    assert target == "987654"
+    assert "2" in message  # retired-hit count
+    assert str(report_path) in message
+    assert len(message) <= 500

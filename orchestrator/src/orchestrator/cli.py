@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
@@ -160,6 +161,36 @@ def cmd_supervise_all(args: argparse.Namespace) -> int:
     return 1 if any_errors else 0
 
 
+def _openclaw_announce(channel: str, target: str, message: str) -> None:
+    """Real announce: shell out to `openclaw message send`. Failures are logged, not raised."""
+    log = logging.getLogger("orchestrator.daemon.announce")
+    try:
+        result = subprocess.run(
+            args=[
+                "openclaw",
+                "message",
+                "send",
+                "--channel",
+                channel,
+                "--target",
+                target,
+                "--message",
+                message,
+            ],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "openclaw message send rc=%s stderr=%s",
+                result.returncode,
+                result.stderr.decode("utf-8", "replace").strip()[:200],
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("openclaw message send failed: %s", exc)
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     """Long-running scheduler: interleaves sweep (15 min) + supervise-all (30 min).
 
@@ -186,6 +217,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         supervise_interval_s=args.supervise_interval,
         supervise_offset_s=args.supervise_offset,
         telegram_chat=args.telegram_chat,
+        announce=_openclaw_announce,
     )
     shutdown = threading.Event()
     install_signal_handlers(shutdown)
