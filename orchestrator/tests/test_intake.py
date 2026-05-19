@@ -10,10 +10,18 @@ from unittest.mock import patch
 
 import pytest
 
-from orchestrator.dispatch import load_spec
+from datetime import datetime, timezone
+
+from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.intake import intake
 from orchestrator.runners._subprocess import SubprocessResult
-from orchestrator.state.models import RequesterRoute, TaskKind, TaskStatus
+from orchestrator.state.models import (
+    Budget,
+    RequesterRoute,
+    TaskKind,
+    TaskSpec,
+    TaskStatus,
+)
 
 
 def _mock_claude_json(payload: dict, *, status: str = "done"):
@@ -341,3 +349,200 @@ def test_intake_picks_most_recent_settings_when_target_repo_matches_multiple(tmp
         "matched multiple projects" in rec.message and "newer-project" in rec.message
         for rec in caplog.records
     )
+
+
+# ─── Parallel-frontend-conflict guard ────────────────────────────────────────
+
+
+def _seed_sibling_spec(
+    life: Path,
+    *,
+    task_id: str,
+    target_repo: str,
+    verbatim_intent: str,
+    acceptance_criteria: list[str] | None = None,
+    status: TaskStatus = TaskStatus.ready,
+    project_slug: str | None = None,
+) -> Path:
+    """Write a sibling spec.yaml under either projects/<slug>/tasks/ or tasks/."""
+    spec = TaskSpec(
+        task_id=task_id,
+        created_at=datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc),
+        created_by="test",
+        requester_route=RequesterRoute(channel="test", to="t"),
+        verbatim_intent=verbatim_intent,
+        kind=TaskKind.code,
+        acceptance_criteria=acceptance_criteria or [],
+        budget=Budget(max_runtime_seconds=1800),
+        target_repo=target_repo,
+        target_branch="main",
+        project=project_slug,
+        status=status,
+    )
+    if project_slug:
+        task_dir = life / "projects" / project_slug / "tasks" / task_id
+    else:
+        task_dir = life / "tasks" / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = task_dir / "spec.yaml"
+    persist_spec(spec, spec_path)
+    return spec_path
+
+
+def test_parallel_frontend_guard_triggers(tmp_path: Path):
+    """Two in-flight code specs against the same repo, both mentioning App.tsx,
+    should force the new spec to depend on the prior one and gain a guard note."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _write_project_settings(life, "lifekit-dashboard", "dsdevq/lifekit-dashboard")
+    _seed_sibling_spec(
+        life,
+        task_id="2026-05-19-task5-spa",
+        target_repo="dsdevq/lifekit-dashboard",
+        verbatim_intent="add a ToastProvider to App.tsx for global error toasts",
+        project_slug="lifekit-dashboard",
+    )
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/lifekit-dashboard",
+                "project": None,
+                "acceptance_criteria": ["App.tsx wires up the new QueryClient"],
+                "budget_seconds": 1800,
+            }
+        ),
+    ):
+        spec = intake(
+            "wire up react-query in App.tsx",
+            requester_route=RequesterRoute(channel="test", to="t"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    assert "2026-05-19-task5-spa" in spec.depends_on
+    assert any(
+        "parallel-frontend-guard" in n and "2026-05-19-task5-spa" in n
+        for n in spec.notes
+    )
+    # And that note made it to disk
+    expected = (
+        life / "projects" / "lifekit-dashboard" / "tasks" / spec.task_id / "spec.yaml"
+    )
+    reloaded = load_spec(expected)
+    assert "2026-05-19-task5-spa" in reloaded.depends_on
+    assert reloaded.notes
+
+
+def test_parallel_frontend_guard_skipped_for_different_repos(tmp_path: Path):
+    """A sibling against a different repo must NOT trigger the guard."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _write_project_settings(life, "lifekit-dashboard", "dsdevq/lifekit-dashboard")
+    _write_project_settings(life, "other-app", "dsdevq/other-app")
+    _seed_sibling_spec(
+        life,
+        task_id="other-spa-task",
+        target_repo="dsdevq/other-app",
+        verbatim_intent="refactor App.tsx routing in other-app",
+        project_slug="other-app",
+    )
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/lifekit-dashboard",
+                "project": None,
+                "acceptance_criteria": ["App.tsx wires up the new QueryClient"],
+                "budget_seconds": 1800,
+            }
+        ),
+    ):
+        spec = intake(
+            "wire up react-query in App.tsx",
+            requester_route=RequesterRoute(channel="test", to="t"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    assert spec.depends_on == []
+    assert spec.notes == []
+
+
+def test_parallel_frontend_guard_override(tmp_path: Path):
+    """parallel_safe: true on the new spec bypasses the guard even with overlap."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _write_project_settings(life, "lifekit-dashboard", "dsdevq/lifekit-dashboard")
+    _seed_sibling_spec(
+        life,
+        task_id="prior-spa-task",
+        target_repo="dsdevq/lifekit-dashboard",
+        verbatim_intent="add a ToastProvider to App.tsx",
+        project_slug="lifekit-dashboard",
+    )
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/lifekit-dashboard",
+                "project": None,
+                "acceptance_criteria": ["App.tsx wires up the new QueryClient"],
+                "budget_seconds": 1800,
+                "parallel_safe": True,
+            }
+        ),
+    ):
+        spec = intake(
+            "wire up react-query in App.tsx",
+            requester_route=RequesterRoute(channel="test", to="t"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    assert spec.parallel_safe is True
+    assert spec.depends_on == []
+    assert spec.notes == []
+
+
+def test_parallel_frontend_guard_no_false_positive_on_backend_only(tmp_path: Path):
+    """Backend-only intents (no SPA-root markers) must not be serialized."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _write_project_settings(life, "lifekit-dashboard", "dsdevq/lifekit-dashboard")
+    _seed_sibling_spec(
+        life,
+        task_id="backend-other-task",
+        target_repo="dsdevq/lifekit-dashboard",
+        verbatim_intent="add a new column to the users table migration",
+        acceptance_criteria=["alembic revision applies cleanly"],
+        project_slug="lifekit-dashboard",
+    )
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/lifekit-dashboard",
+                "project": None,
+                "acceptance_criteria": ["pytest passes for orchestrator/audits/"],
+                "budget_seconds": 1800,
+            }
+        ),
+    ):
+        spec = intake(
+            "tighten the orchestrator audit for stale dispatch entries",
+            requester_route=RequesterRoute(channel="test", to="t"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    assert spec.depends_on == []
+    assert spec.notes == []
