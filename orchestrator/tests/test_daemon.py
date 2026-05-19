@@ -315,3 +315,124 @@ def test_audit_loop_drift_report_announces_once(tmp_path: Path) -> None:
     assert "2" in message  # retired-hit count
     assert str(report_path) in message
     assert len(message) <= 500
+
+
+# ─── events_announce wiring (PR-#21 audit announce unchanged) ────────────────
+
+
+def test_daemon_default_sweep_threads_events_announce_into_sweep_once(tmp_path: Path):
+    """run_daemon's default sweep_fn must close over config.events_announce/events_chat
+    so task-lifecycle events fire from inside sweep_once."""
+    from unittest.mock import patch
+
+    life = _make_life(tmp_path)
+    events_announce = MagicMock()
+
+    captured: dict = {}
+
+    def fake_sweep_once(life_root, **kwargs):  # noqa: ARG001
+        captured["events_announce"] = kwargs.get("events_announce")
+        captured["events_chat"] = kwargs.get("events_chat")
+
+        class _R:
+            def summary(self) -> str:
+                return "scanned=0"
+
+        return _R()
+
+    shutdown = threading.Event()
+    config = DaemonConfig(
+        life_root=life,
+        sweep_interval_s=0.05,
+        supervise_interval_s=60.0,
+        supervise_offset_s=60.0,
+        audit_interval_s=60.0,
+        audit_offset_s=60.0,
+        pr_review_interval_s=60.0,
+        pr_review_offset_s=60.0,
+        events_announce=events_announce,
+        events_chat="EVENTS-987",
+    )
+
+    with patch("orchestrator.daemon.sweep_once", side_effect=fake_sweep_once):
+        runner = threading.Thread(
+            target=run_daemon,
+            kwargs={
+                "config": config,
+                "shutdown": shutdown,
+                # supervise/audit/pr_review stubbed out — only sweep matters here
+                "supervise_fn": lambda p, r: [],
+                "audit_fn": lambda p: (
+                    AuditReport(generated_at="2026-05-19T00:00:00+00:00"),
+                    p / "audits" / "stub.md",
+                ),
+                "pr_review_fn": lambda p: type(
+                    "R", (), {"merged": [], "considered": [], "circuit_paused": False}
+                )(),
+            },
+        )
+        runner.start()
+        time.sleep(0.15)
+        shutdown.set()
+        runner.join(timeout=2.0)
+
+    assert captured.get("events_announce") is events_announce
+    assert captured.get("events_chat") == "EVENTS-987"
+
+
+def test_daemon_events_announce_does_not_collide_with_audit_announce(tmp_path: Path):
+    """events_announce and the PR-#21 audit `announce` are independent callbacks.
+    Firing events from sweep must not invoke `audit.announce`, and vice versa."""
+    life = _make_life(tmp_path)
+    drift = AuditReport(
+        generated_at="2026-05-19T00:00:00+00:00",
+        retired_hits=[
+            RetiredHit(
+                term="swarm-langgraph",
+                file="docs/architecture.md",
+                line_no=1,
+                line="x",
+                replacement="devclaw-orchestrator",
+                retired_on="2026-03-01",
+                reason="renamed",
+            )
+        ],
+    )
+    audit_fn, _ = _stub_audit_fn(drift, life)
+
+    audit_announce = MagicMock()
+    events_announce = MagicMock()
+
+    shutdown = threading.Event()
+    config = DaemonConfig(
+        life_root=life,
+        sweep_interval_s=60.0,
+        supervise_interval_s=60.0,
+        supervise_offset_s=60.0,
+        audit_interval_s=0.05,
+        audit_offset_s=0.0,
+        announce=audit_announce,
+        events_announce=events_announce,
+        telegram_chat="AUDIT-CHAT",
+        events_chat="EVENTS-CHAT",
+    )
+
+    runner = threading.Thread(
+        target=run_daemon,
+        kwargs={
+            "config": config,
+            "shutdown": shutdown,
+            "sweep_fn": lambda p: "scanned=0",
+            "supervise_fn": lambda p, r: [],
+            "audit_fn": audit_fn,
+        },
+    )
+    runner.start()
+    time.sleep(0.2)
+    shutdown.set()
+    runner.join(timeout=2.0)
+
+    # Audit drift announces to AUDIT-CHAT via the audit `announce` field, NOT events_announce.
+    assert audit_announce.call_count == 1
+    assert audit_announce.call_args.args[1] == "AUDIT-CHAT"
+    assert events_announce.call_count == 0

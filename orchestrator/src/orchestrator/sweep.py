@@ -31,6 +31,12 @@ from orchestrator.dispatch import (
     persist_spec,
     reap_spec,
 )
+from orchestrator.events import (
+    AnnounceCallback,
+    emit_dispatched,
+    emit_done,
+    emit_terminal_failure,
+)
 from orchestrator.notify import notify_telegram
 from orchestrator.state.models import TaskSpec, TaskStatus
 
@@ -121,7 +127,13 @@ def is_killswitch_set(life_root: Path) -> bool:
     return (life_root / "system" / "cron-paused").exists()
 
 
-def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_cli) -> SweepResult:
+def sweep_once(
+    life_root: Path,
+    *,
+    dispatcher: SpecDispatcher = _popen_dispatch_cli,
+    events_announce: AnnounceCallback | None = None,
+    events_chat: str | None = None,
+) -> SweepResult:
     """Run one sweep tick: reap → watchdog → dispatch.
 
     Order rationale:
@@ -160,6 +172,27 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
             persist_spec(reaped, spec_path)
             result.reaped.append(spec.task_id)
             logger.info("reaped %s via %s", spec.task_id, artifact.name)
+            # Event 3/4/5: reap is the recovery path where the runner subprocess
+            # died before persisting its terminal state. We owe the event the
+            # subprocess would have fired.
+            if events_announce is not None:
+                target = events_chat or "default"
+                if reaped.status == TaskStatus.done:
+                    pr_url = _extract_pr_url(spec_path.parent, reaped)
+                    emit_done(
+                        events_announce,
+                        target,
+                        task_id=reaped.task_id,
+                        pr_url=pr_url,
+                    )
+                else:
+                    emit_terminal_failure(
+                        events_announce,
+                        target,
+                        task_id=reaped.task_id,
+                        new_state="failed",
+                        reason=reaped.result_summary,
+                    )
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"reap failed: {spec.task_id} — {exc}")
 
@@ -180,6 +213,17 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
             persist_spec(blocked, spec_path)
             result.ghosted.append(spec.task_id)
             logger.info("watchdog ghosted %s", spec.task_id)
+            # Event 5: watchdog flipped a silent runner to blocked — surface
+            # it as "abandoned" so operators can tell it apart from a runner-
+            # reported failure.
+            if events_announce is not None:
+                emit_terminal_failure(
+                    events_announce,
+                    events_chat or "default",
+                    task_id=blocked.task_id,
+                    new_state="abandoned",
+                    reason=blocked.result_summary,
+                )
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"watchdog failed: {spec.task_id} — {exc}")
 
@@ -230,6 +274,14 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
                 spec.requester_route.to,
                 f"🚀 dispatched {spec.task_id} (kind={spec.kind.value})",
             )
+            # Event 2: ready → dispatched-* transition.
+            if events_announce is not None:
+                emit_dispatched(
+                    events_announce,
+                    events_chat or "default",
+                    task_id=dispatched.task_id,
+                    runner_kind=dispatched.dispatch_target or "subagent",
+                )
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"dispatch failed: {spec.task_id} — {exc}")
 
@@ -308,6 +360,33 @@ def _mark_atomic_dispatched(spec: TaskSpec) -> TaskSpec:
             ),
         }
     )
+
+
+def _extract_pr_url(task_dir: Path, reaped_spec: TaskSpec) -> str | None:
+    """Find a pr_url for a reaped spec without forcing the caller to re-parse
+    result.json.
+
+    Search order: `result_summary` of the reaped spec (reap_spec embeds
+    `PR: <url>` when result.json had one) → `task_dir/result.json` → None.
+    """
+    summary = reaped_spec.result_summary or ""
+    if summary.startswith("PR: "):
+        candidate = summary[len("PR: ") :].strip()
+        if candidate:
+            return candidate
+
+    result_json = task_dir / "result.json"
+    if result_json.is_file():
+        try:
+            import json
+
+            data = json.loads(result_json.read_text())
+            url = data.get("pr_url")
+            if isinstance(url, str) and url.strip():
+                return url.strip()
+        except (OSError, ValueError):
+            return None
+    return None
 
 
 # Backwards-compatible alias — older callers use `find_dispatched_specs`.

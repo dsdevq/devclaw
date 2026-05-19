@@ -18,12 +18,65 @@ from pathlib import Path
 
 from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemon
 from orchestrator.dispatch import load_spec, persist_spec
+from orchestrator.events import (
+    AnnounceCallback,
+    emit_done,
+    emit_terminal_failure,
+    resolve_events_chat,
+)
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake
 from orchestrator.notify import notify_telegram
 from orchestrator.state.models import GraphState, RequesterRoute, TaskStatus
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import sweep_once
+
+
+def _resolve_events_announce() -> tuple[AnnounceCallback, str]:
+    """Pick the events_announce callable + target chat for a one-shot CLI command.
+
+    If the Telegram chat env var is set we wire the real openclaw subprocess;
+    otherwise we fall through to a no-op log-only callback so unit-test
+    invocations don't shell out. Returns (callable, target).
+    """
+    import os
+
+    from orchestrator.events import EVENTS_CHAT_ENV, FALLBACK_CHAT_ENV, _noop_announce
+
+    target = resolve_events_chat()
+    if os.environ.get(EVENTS_CHAT_ENV) or os.environ.get(FALLBACK_CHAT_ENV):
+        return _openclaw_announce, target
+    return _noop_announce, target
+
+
+def _openclaw_announce(channel: str, target: str, message: str) -> None:
+    """Real announce: shell out to `openclaw message send`. Failures are logged, not raised."""
+    log = logging.getLogger("orchestrator.daemon.announce")
+    try:
+        result = subprocess.run(
+            args=[
+                "openclaw",
+                "message",
+                "send",
+                "--channel",
+                channel,
+                "--target",
+                target,
+                "--message",
+                message,
+            ],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "openclaw message send rc=%s stderr=%s",
+                result.returncode,
+                result.stderr.decode("utf-8", "replace").strip()[:200],
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        log.warning("openclaw message send failed: %s", exc)
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
@@ -47,6 +100,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     # Without this, the spec stays at status: dispatched-* on disk and the sweep
     # watchdog would later misidentify it as a ghost.
     final_spec = final.get("spec")
+    events_announce, events_target = _resolve_events_announce()
     if final_spec is not None:
         persist_spec(final_spec, spec_path)
         chat_id = final_spec.requester_route.to
@@ -57,12 +111,30 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                 chat_id,
                 f"✅ done {final_spec.task_id} — {pr_url or 'no PR'}",
             )
+            # Event 3/4: task_runner → done (with or without pr_url).
+            emit_done(
+                events_announce,
+                events_target,
+                task_id=final_spec.task_id,
+                pr_url=pr_url,
+            )
         elif final_spec.status == TaskStatus.blocked:
             result_obj = final.get("result")
             blocker = result_obj.blocker if result_obj is not None else None
             notify_telegram(
                 chat_id,
                 f"🚫 blocked {final_spec.task_id} — {blocker or 'unknown'}",
+            )
+            # Event 5: task_runner → failed. The watchdog path emits "abandoned"
+            # — the runner subprocess only reaches this branch when it
+            # self-blocked, so we label it "failed".
+            reason = blocker or final_spec.result_summary
+            emit_terminal_failure(
+                events_announce,
+                events_target,
+                task_id=final_spec.task_id,
+                new_state="failed",
+                reason=reason,
             )
 
     # Also drop a result.json next to the spec so reaps in mixed-cron environments
@@ -94,7 +166,12 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             datefmt="%H:%M:%S",
         )
 
-    result = sweep_once(life_root)
+    events_announce, events_target = _resolve_events_announce()
+    result = sweep_once(
+        life_root,
+        events_announce=events_announce,
+        events_chat=events_target,
+    )
     print(result.summary())
     if result.reaped:
         print(f"  reaped: {', '.join(result.reaped)}")
@@ -118,7 +195,14 @@ def cmd_intake(args: argparse.Namespace) -> int:
         return 2
 
     route = RequesterRoute(channel=args.channel, to=args.to)
-    spec = intake(intent, requester_route=route, life_root=Path(args.life).expanduser())
+    events_announce, events_target = _resolve_events_announce()
+    spec = intake(
+        intent,
+        requester_route=route,
+        life_root=Path(args.life).expanduser(),
+        events_announce=events_announce,
+        events_chat=events_target,
+    )
     if spec is None:
         print("error: task_intake failed (see logs)", file=sys.stderr)
         return 1
@@ -177,36 +261,6 @@ def cmd_supervise_all(args: argparse.Namespace) -> int:
     return 1 if any_errors else 0
 
 
-def _openclaw_announce(channel: str, target: str, message: str) -> None:
-    """Real announce: shell out to `openclaw message send`. Failures are logged, not raised."""
-    log = logging.getLogger("orchestrator.daemon.announce")
-    try:
-        result = subprocess.run(
-            args=[
-                "openclaw",
-                "message",
-                "send",
-                "--channel",
-                channel,
-                "--target",
-                target,
-                "--message",
-                message,
-            ],
-            check=False,
-            capture_output=True,
-            timeout=15,
-        )
-        if result.returncode != 0:
-            log.warning(
-                "openclaw message send rc=%s stderr=%s",
-                result.returncode,
-                result.stderr.decode("utf-8", "replace").strip()[:200],
-            )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("openclaw message send failed: %s", exc)
-
-
 def cmd_daemon(args: argparse.Namespace) -> int:
     """Long-running scheduler: interleaves sweep (15 min) + supervise-all (30 min).
 
@@ -227,6 +281,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         datefmt="%Y-%m-%dT%H:%M:%S%z",
     )
 
+    events_chat = resolve_events_chat(default=args.telegram_chat)
     config = DaemonConfig(
         life_root=life_root,
         sweep_interval_s=args.sweep_interval,
@@ -234,6 +289,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         supervise_offset_s=args.supervise_offset,
         telegram_chat=args.telegram_chat,
         announce=_openclaw_announce,
+        events_announce=_openclaw_announce,
+        events_chat=events_chat,
     )
     shutdown = threading.Event()
     install_signal_handlers(shutdown)

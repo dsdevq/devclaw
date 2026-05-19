@@ -109,3 +109,78 @@ def test_dispatch_file_path_still_uses_sqlite(tmp_path: Path, spec_path: Path):
 
     m_sqlite.assert_called_once_with(Path(str(db_path)).expanduser())
     m_pg.assert_not_called()
+
+
+# ─── _openclaw_announce: subprocess wrapper used by events_announce ──────────
+
+
+def test_openclaw_announce_logs_when_subprocess_returns_nonzero(caplog):
+    import logging
+    import subprocess as _subprocess
+
+    fake_proc = mock.MagicMock()
+    fake_proc.returncode = 2
+    fake_proc.stderr = b"openclaw: bad request"
+
+    with mock.patch.object(_subprocess, "run", return_value=fake_proc), \
+         caplog.at_level(logging.WARNING, logger="orchestrator.daemon.announce"):
+        # Must not raise.
+        cli._openclaw_announce("telegram", "123", "hi")
+
+    assert any(
+        "openclaw message send rc=2" in rec.message for rec in caplog.records
+    )
+
+
+def test_openclaw_announce_swallows_subprocess_timeout(caplog):
+    import logging
+    import subprocess as _subprocess
+
+    def _raise_timeout(*a, **kw):
+        raise _subprocess.TimeoutExpired(cmd="openclaw", timeout=15)
+
+    with mock.patch.object(_subprocess, "run", side_effect=_raise_timeout), \
+         caplog.at_level(logging.WARNING, logger="orchestrator.daemon.announce"):
+        cli._openclaw_announce("telegram", "123", "hi")  # must not raise
+
+    assert any("openclaw message send failed" in rec.message for rec in caplog.records)
+
+
+def test_openclaw_announce_swallows_oserror(caplog):
+    import logging
+    import subprocess as _subprocess
+
+    with mock.patch.object(_subprocess, "run", side_effect=OSError("no such binary")), \
+         caplog.at_level(logging.WARNING, logger="orchestrator.daemon.announce"):
+        cli._openclaw_announce("telegram", "123", "hi")  # must not raise
+
+    assert any("openclaw message send failed" in rec.message for rec in caplog.records)
+
+
+# ─── _resolve_events_announce: env-var fallback chain ────────────────────────
+
+
+def test_resolve_events_announce_uses_real_when_events_env_set(monkeypatch):
+    monkeypatch.setenv("LIFEKIT_TELEGRAM_EVENTS_CHAT", "EVENTS-123")
+    monkeypatch.delenv("LIFEKIT_TELEGRAM_CHAT", raising=False)
+    fn, target = cli._resolve_events_announce()
+    assert fn is cli._openclaw_announce
+    assert target == "EVENTS-123"
+
+
+def test_resolve_events_announce_falls_back_to_telegram_chat(monkeypatch):
+    monkeypatch.delenv("LIFEKIT_TELEGRAM_EVENTS_CHAT", raising=False)
+    monkeypatch.setenv("LIFEKIT_TELEGRAM_CHAT", "FALLBACK-456")
+    fn, target = cli._resolve_events_announce()
+    assert fn is cli._openclaw_announce
+    assert target == "FALLBACK-456"
+
+
+def test_resolve_events_announce_returns_noop_when_neither_env_set(monkeypatch):
+    from orchestrator import events as events_mod
+
+    monkeypatch.delenv("LIFEKIT_TELEGRAM_EVENTS_CHAT", raising=False)
+    monkeypatch.delenv("LIFEKIT_TELEGRAM_CHAT", raising=False)
+    fn, target = cli._resolve_events_announce()
+    assert fn is events_mod._noop_announce
+    assert target == "default"

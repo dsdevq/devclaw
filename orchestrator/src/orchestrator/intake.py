@@ -16,6 +16,7 @@ import yaml
 from pydantic import ValidationError
 
 from orchestrator.dispatch import load_spec, now_utc, persist_spec
+from orchestrator.events import AnnounceCallback, emit_spec_created
 from orchestrator.runners._subprocess import run_claude
 from orchestrator.state.models import (
     Budget,
@@ -97,6 +98,8 @@ def intake(
     life_root: Path | None = None,
     task_id: str | None = None,
     created_by: str = "task_intake",
+    events_announce: AnnounceCallback | None = None,
+    events_chat: str | None = None,
 ) -> TaskSpec | None:
     """Convert NL intent into a TaskSpec and write it under ~/.life/tasks/.
 
@@ -177,4 +180,14 @@ def intake(
         project_slug or spec.project,
         spec.target_repo,
     )
+
+    # Event 1: task_intake → spec_created.
+    if events_announce is not None:
+        emit_spec_created(
+            events_announce,
+            events_chat or "default",
+            task_id=spec.task_id,
+            target_repo=spec.target_repo,
+        )
+
     return spec

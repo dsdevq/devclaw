@@ -27,22 +27,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from orchestrator.audits.state_currency import AuditReport, run_and_write as run_state_currency_audit
+from orchestrator.events import AnnounceCallback, _noop_announce
 from orchestrator.pr_review import run_pr_review
+from orchestrator.state.models import RequesterRoute
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import is_killswitch_set, sweep_once
-from orchestrator.state.models import RequesterRoute
 
 logger = logging.getLogger(__name__)
-
-
-AnnounceCallback = Callable[[str, str, str], None]
-"""(channel, target, message) → None. Mirrors supervisor's AnnounceCallback shape but
-also carries the target so the daemon can hand off straight to a per-route delivery
-(e.g. `openclaw message send --channel <c> --target <t>`)."""
-
-
-def _noop_announce(channel: str, target: str, message: str) -> None:  # noqa: ARG001
-    logger.info("announce(%s -> %s): %s", channel, target, message)
 
 
 @dataclass(frozen=True)
@@ -57,6 +48,11 @@ class DaemonConfig:
     pr_review_offset_s: float = 180.0
     telegram_chat: str = "default"
     announce: AnnounceCallback = field(default=_noop_announce)
+    # Task-lifecycle announces (spec_created / dispatched / done / failed / abandoned).
+    # Same callback shape as `announce`; separate field so audit and lifecycle messages
+    # can route to different chats if the operator wants them split.
+    events_announce: AnnounceCallback = field(default=_noop_announce)
+    events_chat: str = "default"
 
 
 SweepFn = Callable[[Path], object]
@@ -93,6 +89,22 @@ def _default_sweep(life_root: Path) -> object:
     return sweep_once(life_root)
 
 
+def _sweep_with_events(
+    events_announce: AnnounceCallback, events_chat: str
+) -> SweepFn:
+    """Bind events_announce/events_chat into a SweepFn so the daemon can fire
+    task-lifecycle events from inside sweep_once."""
+
+    def _bound(life_root: Path) -> object:
+        return sweep_once(
+            life_root,
+            events_announce=events_announce,
+            events_chat=events_chat,
+        )
+
+    return _bound
+
+
 def _default_supervise_all(life_root: Path, route: RequesterRoute) -> object:
     dags = list(life_root.glob("projects/*/runs/*/dag.yaml"))
     summaries: list[str] = []
@@ -109,7 +121,7 @@ def run_daemon(
     config: DaemonConfig,
     *,
     shutdown: threading.Event | None = None,
-    sweep_fn: SweepFn = _default_sweep,
+    sweep_fn: SweepFn | None = None,
     supervise_fn: SuperviseFn = _default_supervise_all,
     audit_fn: AuditFn = _default_audit,
     pr_review_fn: PrReviewFn = _default_pr_review,
@@ -121,6 +133,11 @@ def run_daemon(
     """
     shutdown = shutdown or threading.Event()
     route = RequesterRoute(channel="telegram", to=config.telegram_chat)
+    # Default sweep_fn binds the events_announce callback so task-lifecycle
+    # events fire from inside sweep_once. Tests inject their own sweep_fn and
+    # opt out of event firing.
+    if sweep_fn is None:
+        sweep_fn = _sweep_with_events(config.events_announce, config.events_chat)
 
     def _sweep_loop() -> None:
         while not shutdown.is_set():

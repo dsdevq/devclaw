@@ -148,6 +148,54 @@ Each markdown skill ports independently:
 
 **Cutover** (replacing the markdown crons): not yet. The Python and markdown systems coexist via different intake paths — markdown reads `~/.life/tasks/*/spec.yaml` produced by the markdown `task_intake`; Python reads specs produced by the Python `intake` subcommand. Cutting over the cron entries is a separate VPS-deploy PR.
 
+## Task-lifecycle Telegram announces
+
+Five state transitions in the atomic-task pipeline fire a one-line Telegram
+message via the daemon's `events_announce` callback. The callback is the same
+`AnnounceCallback` type the audit loop already uses (PR #21) — there is one
+announce abstraction, two configured callbacks on `DaemonConfig`:
+
+| Field | Purpose |
+|---|---|
+| `DaemonConfig.announce` | audit-loop drift announce (PR #21) |
+| `DaemonConfig.events_announce` | the five task-lifecycle events below |
+
+Each message is capped at 300 characters; long reasons are truncated with `…`.
+
+### The five events
+
+| # | Trigger | Source | Format |
+|---|---|---|---|
+| 1 | `task_intake → spec_created` | `intake.py` after `persist_spec` succeeds | `📋 Queued: <task_id> → <target_repo or '(project-less)'>` |
+| 2 | `task_dispatch → dispatched-*` | `sweep.py` dispatch pass | `🚀 Dispatched: <task_id> (<runner_kind>)` |
+| 3 | `task_runner → done` (with `pr_url`) | `cli.py:cmd_dispatch` (or `sweep.py` reap recovery) | `✅ Done: <task_id>\n<pr_url>` |
+| 4 | `task_runner → done` (no `pr_url`) | same as #3 | `✅ Done: <task_id>` |
+| 5 | `task_runner → failed \| abandoned` | `cmd_dispatch` → `failed`; sweep watchdog → `abandoned` | `❌ <new_state>: <task_id>\n<reason or 'no reason captured'>` |
+
+Each event fires exactly once per state transition. The reap pathway only
+fires events 3/4/5 when it had to recover a spec the runner subprocess died
+without persisting — the runner's own terminal write is the primary owner.
+
+### Env-var fallback chain
+
+The daemon (and one-shot `intake` / `dispatch` CLI commands) resolve the
+Telegram chat id with this precedence:
+
+1. `LIFEKIT_TELEGRAM_EVENTS_CHAT` — preferred (task-lifecycle target)
+2. `LIFEKIT_TELEGRAM_CHAT` — fallback (shared with other narration)
+3. The `--telegram-chat` flag's default (or `"default"`) — last-resort default
+
+If neither env var is set, the one-shot CLI commands fall back to a
+log-only no-op so unit-test invocations don't shell out to `openclaw`.
+The long-running `daemon` always wires the real `openclaw message send`
+subprocess (failures logged at WARN, never raised).
+
+### Compose env wiring
+
+Wiring `LIFEKIT_TELEGRAM_EVENTS_CHAT` into the production docker-compose
+environment is a **separate follow-up on `lifekit-stack`** — that repo
+owns the orchestrator's container env block.
+
 ## Architectural rules (the things that hold across the port)
 
 1. **No API keys.** Every cognition node shells to `claude --print` or (future) `codex exec --json`. Subscription OAuth only.
