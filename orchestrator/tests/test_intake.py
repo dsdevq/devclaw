@@ -38,9 +38,19 @@ def _mock_claude_failure(blocker: str = "no_parseable_result_json"):
     )
 
 
+def _write_project_settings(life: Path, slug: str, github_repo: str) -> Path:
+    """Create a stub project at life/projects/<slug>/settings.yaml with the given github_repo."""
+    project_dir = life / "projects" / slug
+    project_dir.mkdir(parents=True, exist_ok=True)
+    settings = project_dir / "settings.yaml"
+    settings.write_text(f"github_repo: {github_repo}\n")
+    return settings
+
+
 def test_intake_creates_code_spec_for_repo_intent(tmp_path: Path):
     life = tmp_path / "life"
     life.mkdir()
+    _write_project_settings(life, "lifekit-stack", "dsdevq/lifekit-stack")
 
     with patch(
         "orchestrator.intake.run_claude",
@@ -188,3 +198,146 @@ def test_intake_writes_verbatim_intent(tmp_path: Path):
 
     assert spec is not None
     assert spec.verbatim_intent == intent
+
+
+# ─── Project-routing by target_repo lookup in projects/*/settings.yaml ───────
+
+
+def test_intake_routes_to_project_bucket_when_target_repo_matches(tmp_path: Path):
+    """target_repo matches a project's settings.yaml → spec lands in projects/<slug>/tasks/."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _write_project_settings(life, "devclaw", "dsdevq/devclaw")
+    # an unrelated project to make sure we don't accidentally match it
+    _write_project_settings(life, "finance-sentry", "dsdevq/finance-sentry")
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/devclaw",
+                "target_branch": "main",
+                "project": None,  # Claude did NOT set project — we derive it from the filesystem
+                "acceptance_criteria": ["foo"],
+                "budget_seconds": 1800,
+            }
+        ),
+    ):
+        spec = intake(
+            "tweak something in devclaw",
+            requester_route=RequesterRoute(channel="telegram", to="123"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    project_path = life / "projects" / "devclaw" / "tasks" / spec.task_id / "spec.yaml"
+    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    assert project_path.is_file()
+    assert not flat_path.exists()
+
+
+def test_intake_routes_to_flat_bucket_when_target_repo_has_no_project_match(tmp_path: Path):
+    """target_repo is set but no project's settings.yaml claims it → falls back to flat bucket."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _write_project_settings(life, "lifekit-stack", "dsdevq/lifekit-stack")
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "someone-else/unknown-repo",
+                "target_branch": "main",
+                "project": None,
+                "acceptance_criteria": ["something"],
+            }
+        ),
+    ):
+        spec = intake(
+            "patch some external repo we don't track",
+            requester_route=RequesterRoute(channel="telegram", to="123"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    assert flat_path.is_file()
+    # no project bucket got created for this spec
+    assert list(life.glob("projects/*/tasks/*/spec.yaml")) == []
+
+
+def test_intake_routes_to_flat_bucket_when_target_repo_missing(tmp_path: Path):
+    """No target_repo at all (e.g. chore/research) → spec always lands in flat bucket."""
+    life = tmp_path / "life"
+    life.mkdir()
+    # a known project exists — we should NOT route to it without a target_repo signal
+    _write_project_settings(life, "devclaw", "dsdevq/devclaw")
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "research",
+                "target_repo": None,
+                "project": None,
+                "acceptance_criteria": ["findings.md exists"],
+            }
+        ),
+    ):
+        spec = intake(
+            "research distributed durable execution engines",
+            requester_route=RequesterRoute(channel="telegram", to="123"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    assert flat_path.is_file()
+    assert list(life.glob("projects/*/tasks/*/spec.yaml")) == []
+
+
+def test_intake_picks_most_recent_settings_when_target_repo_matches_multiple(tmp_path: Path, caplog):
+    """If two projects' settings.yaml both claim the same github_repo, pick the newer one and WARN."""
+    import logging
+    import os
+    import time
+
+    life = tmp_path / "life"
+    life.mkdir()
+
+    older = _write_project_settings(life, "older-project", "dsdevq/shared-repo")
+    # ensure distinct mtimes regardless of filesystem granularity
+    old_time = time.time() - 3600
+    os.utime(older, (old_time, old_time))
+    newer = _write_project_settings(life, "newer-project", "dsdevq/shared-repo")
+    new_time = time.time()
+    os.utime(newer, (new_time, new_time))
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/shared-repo",
+                "project": None,
+                "acceptance_criteria": ["x"],
+            }
+        ),
+    ), caplog.at_level(logging.WARNING, logger="orchestrator.intake"):
+        spec = intake(
+            "do stuff in shared-repo",
+            requester_route=RequesterRoute(channel="telegram", to="123"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    expected = life / "projects" / "newer-project" / "tasks" / spec.task_id / "spec.yaml"
+    assert expected.is_file()
+    assert not (life / "projects" / "older-project" / "tasks" / spec.task_id / "spec.yaml").exists()
+    # a WARN was emitted naming the conflict
+    assert any(
+        "matched multiple projects" in rec.message and "newer-project" in rec.message
+        for rec in caplog.records
+    )
