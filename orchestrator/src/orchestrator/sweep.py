@@ -8,8 +8,11 @@ Caps per invocation (architecture §6.2 spirit):
   - dispatch at most 3 ready atomic specs
   - reap at most 5 dispatched-with-artifact specs
   - watchdog at most 5 ghosted specs
+  - reconcile-merges at most 5 done-but-unstamped specs per tick
 
-Order: reap first (give credit to late-but-complete runners) → watchdog (kill ghosts) → dispatch (fire new ready specs). This ensures a tick that picks up a freshly-dispatched ghost-then-reaper-then-redispatch state behaves correctly.
+Order: reap → watchdog → reconcile-merges → dispatch.
+
+Reap first gives credit to late-but-complete runners before their deadline trips. Watchdog kills ghosts. Reconcile-merges runs BEFORE dispatch so a parent whose PR was just manually merged stamps `merged_at` in the same tick that releases its DAG-gated children (see `_ready_to_dispatch` for the merged_at gate added 2026-05-19).
 """
 
 from __future__ import annotations
@@ -21,6 +24,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+import json
+import re
+
 from orchestrator.dispatch import (
     compute_watchdog_deadline,
     find_completion_artifact,
@@ -30,6 +36,7 @@ from orchestrator.dispatch import (
     now_utc,
     persist_spec,
     reap_spec,
+    stamp_merged_at,
 )
 from orchestrator.notify import notify_telegram
 from orchestrator.state.models import TaskSpec, TaskStatus
@@ -37,6 +44,9 @@ from orchestrator.state.models import TaskSpec, TaskStatus
 DISPATCH_CAP_PER_TICK = 3
 REAP_CAP_PER_TICK = 5
 WATCHDOG_CAP_PER_TICK = 5
+RECONCILE_CAP_PER_TICK = 5
+
+_PR_URL_RE = re.compile(r"https?://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
 
 DISPATCHED_STATUSES = {
     TaskStatus.dispatched_subagent,
@@ -46,6 +56,20 @@ DISPATCHED_STATUSES = {
 
 # Dispatch abstraction so tests don't fork real processes.
 SpecDispatcher = Callable[[Path], Optional[str]]
+
+# `gh` shell-out abstraction for the reconciliation pass. Same shape as
+# pr_review.GhRunner but kept local to avoid importing pr_review into sweep.
+GhRunner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
+
+
+def _default_gh(args: list[str]) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(
+        ["gh", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
 
 
 def _popen_dispatch_cli(spec_path: Path) -> str:
@@ -74,6 +98,7 @@ class SweepResult:
     dispatched: list[str] = field(default_factory=list)
     reaped: list[str] = field(default_factory=list)
     ghosted: list[str] = field(default_factory=list)
+    reconciled_merges: list[str] = field(default_factory=list)
     skipped_killswitch: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -83,6 +108,7 @@ class SweepResult:
         return (
             f"scanned={self.scanned} dispatched={len(self.dispatched)} "
             f"reaped={len(self.reaped)} ghosted={len(self.ghosted)} "
+            f"reconciled_merges={len(self.reconciled_merges)} "
             f"errors={len(self.errors)}"
         )
 
@@ -121,12 +147,21 @@ def is_killswitch_set(life_root: Path) -> bool:
     return (life_root / "system" / "cron-paused").exists()
 
 
-def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_cli) -> SweepResult:
-    """Run one sweep tick: reap → watchdog → dispatch.
+def sweep_once(
+    life_root: Path,
+    *,
+    dispatcher: SpecDispatcher = _popen_dispatch_cli,
+    gh: GhRunner = _default_gh,
+) -> SweepResult:
+    """Run one sweep tick: reap → watchdog → reconcile-merges → dispatch.
 
     Order rationale:
       - Reap first: a late-but-complete runner gets credit before its deadline trips.
       - Watchdog second: kill anything past deadline with no artifact.
+      - Reconcile merges third: stamp `merged_at` on specs whose PRs were
+        merged manually (or by anything outside pr_review_loop). This must
+        happen BEFORE dispatch so newly-stamped parents unblock their
+        DAG-gated children in the same tick.
       - Dispatch last: fire new `ready` specs; if a spec just-reaped is `ready` again (it isn't, but logically) it could be redispatched in the same tick.
     """
     result = SweepResult()
@@ -183,7 +218,50 @@ def sweep_once(life_root: Path, *, dispatcher: SpecDispatcher = _popen_dispatch_
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"watchdog failed: {spec.task_id} — {exc}")
 
-    # Pass 3: dispatch ready atomic specs.
+    # Pass 3: reconcile manual merges — for any spec.status==done with
+    # target_repo set, merged_at null, and a discoverable PR URL, ask GitHub
+    # whether the PR is merged; if so, stamp merged_at locally.
+    for spec_path in all_specs:
+        if len(result.reconciled_merges) >= RECONCILE_CAP_PER_TICK:
+            break
+        try:
+            spec = load_spec(spec_path)
+        except Exception:  # noqa: BLE001
+            continue
+
+        if not _needs_merge_reconciliation(spec):
+            continue
+
+        pr_info = _extract_pr_url(spec, spec_path.parent)
+        if pr_info is None:
+            continue
+        repo, number = pr_info
+
+        try:
+            merged_at = _gh_pr_merged_at(repo, number, gh=gh)
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(
+                f"reconcile failed: {spec.task_id} — {exc}"
+            )
+            continue
+
+        if merged_at is None:
+            continue
+
+        try:
+            stamp_merged_at(spec_path, when=merged_at, source="reconcile")
+            result.reconciled_merges.append(spec.task_id)
+            logger.info(
+                "reconciled merge for %s (gh said merged at %s)",
+                spec.task_id,
+                merged_at.isoformat(timespec="seconds"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.errors.append(
+                f"reconcile stamp failed: {spec.task_id} — {exc}"
+            )
+
+    # Pass 4: dispatch ready atomic specs.
     # Run-bound specs are dispatched by the supervisor, not here, so this pass only fires for specs whose `run` field is null.
     # Build an id→spec map once so the readiness gate can look up dep status without re-reading disk per spec.
     specs_by_id: dict[str, TaskSpec] = {}
@@ -242,9 +320,19 @@ def _ready_to_dispatch(
     """Decide whether a `ready` spec is dispatch-eligible given current dep state.
 
     Returns (True, None) iff every `depends_on` entry resolves to a known spec
-    whose status is `done`. Otherwise returns (False, reason) where reason is
-    one of: "unknown_dep" (a listed dep id has no matching spec on disk),
-    "dep_not_done" (a listed dep exists but hasn't reached `done` yet).
+    whose status is `done` AND — for code-bearing parents (those with a
+    `target_repo` set) — whose `merged_at` is non-null. The merged_at gate
+    closes the window where a parent's runner has finished and opened a PR
+    but the PR isn't on `main` yet, which previously caused children's
+    runners to fail because their assumed-existing code wasn't there.
+
+    Otherwise returns (False, reason) where reason is one of:
+      - "unknown_dep": listed dep id has no matching spec on disk
+      - "dep_not_done": dep exists but hasn't reached `done` yet
+      - "dep_not_merged": dep is done but its PR hasn't been merged (only
+        applies when the parent has `target_repo` set — research / chore
+        parents with no code output skip this check)
+
     Empty depends_on trivially passes — backward-compatible with pre-DAG specs.
     """
     for dep_id in spec.depends_on:
@@ -253,7 +341,70 @@ def _ready_to_dispatch(
             return (False, "unknown_dep")
         if dep.status != TaskStatus.done:
             return (False, "dep_not_done")
+        if dep.target_repo and dep.merged_at is None:
+            return (False, "dep_not_merged")
     return (True, None)
+
+
+def _needs_merge_reconciliation(spec: TaskSpec) -> bool:
+    """A code-bearing spec that is done but whose PR isn't stamped as merged."""
+    return (
+        spec.status == TaskStatus.done
+        and spec.target_repo is not None
+        and spec.merged_at is None
+    )
+
+
+def _extract_pr_url(spec: TaskSpec, task_dir: Path) -> tuple[str, int] | None:
+    """Find the (repo, pr_number) for `spec` if recorded anywhere on disk.
+
+    Looks first at `result.json` next to the spec (the canonical runner output),
+    then falls back to scanning `spec.result_summary` for a GitHub PR URL.
+    Returns None if no URL is recoverable.
+    """
+    result_json = task_dir / "result.json"
+    if result_json.is_file():
+        try:
+            data = json.loads(result_json.read_text())
+            pr_url = data.get("pr_url")
+            if isinstance(pr_url, str):
+                m = _PR_URL_RE.search(pr_url)
+                if m:
+                    return (m.group(1), int(m.group(2)))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if spec.result_summary:
+        m = _PR_URL_RE.search(spec.result_summary)
+        if m:
+            return (m.group(1), int(m.group(2)))
+
+    return None
+
+
+def _gh_pr_merged_at(repo: str, number: int, *, gh: GhRunner) -> datetime | None:
+    """Return the merge timestamp from `gh pr view`, or None if not merged.
+
+    Raises RuntimeError on a non-zero gh exit so the caller records it as an error
+    (a transient gh failure should be surfaced, not silently ignored).
+    """
+    cp = gh(["pr", "view", str(number), "--repo", repo, "--json", "mergedAt"])
+    if cp.returncode != 0:
+        raise RuntimeError(
+            f"gh pr view {repo}#{number} failed: {(cp.stderr or '').strip()[:200]}"
+        )
+    try:
+        data = json.loads(cp.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh pr view {repo}#{number} produced unparseable JSON") from exc
+    merged_at = data.get("mergedAt")
+    if not merged_at:
+        return None
+    # gh returns RFC3339 with trailing 'Z'; datetime.fromisoformat handles that on 3.11+.
+    try:
+        return datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"gh pr view {repo}#{number} bad mergedAt: {merged_at!r}") from exc
 
 
 def detect_cycle(

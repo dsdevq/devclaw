@@ -191,3 +191,67 @@ def persist_spec(spec: TaskSpec, spec_path: Path) -> None:
 def load_spec(spec_path: Path) -> TaskSpec:
     """Load a TaskSpec from disk. Used at boundary points (cron-fired sweeps)."""
     return TaskSpec.model_validate(yaml.safe_load(spec_path.read_text()))
+
+
+# ─── merged_at helpers ──────────────────────────────────────────────────────
+
+
+def find_spec_for_task(life_root: Path, task_id: str) -> Path | None:
+    """Locate spec.yaml for `task_id` anywhere under `life_root`.
+
+    Mirrors the lookup pattern used by pr_review.find_spec_for_task — kept here so
+    `dispatch` callers don't need to import from pr_review.
+    """
+    for glob_pattern in (
+        f"tasks/{task_id}/spec.yaml",
+        f"projects/*/tasks/{task_id}/spec.yaml",
+        f"projects/*/runs/*/tasks/{task_id}/spec.yaml",
+    ):
+        for hit in life_root.glob(glob_pattern):
+            return hit
+    return None
+
+
+def stamp_merged_at(
+    spec_path: Path,
+    *,
+    when: datetime | None = None,
+    source: str = "manual",
+) -> TaskSpec:
+    """Stamp `merged_at` on the spec at `spec_path` and extend `result_summary`.
+
+    Source values in use: "manual" (operator ran `gh pr merge`), "auto" (the
+    pr_review_loop merged), "reconcile" (the sweep noticed an already-merged
+    PR on GitHub whose spec was unstamped).
+    """
+    spec = load_spec(spec_path)
+    when = when or now_utc()
+    suffix = f"{source}-merged at {when.isoformat(timespec='seconds')}"
+    summary = spec.result_summary or ""
+    new_summary = f"{summary} | {suffix}".lstrip(" |") if summary else suffix
+    updated = spec.model_copy(update={"merged_at": when, "result_summary": new_summary})
+    persist_spec(updated, spec_path)
+    return updated
+
+
+def record_manual_merge(
+    task_id: str,
+    *,
+    life_root: Path | None = None,
+    when: datetime | None = None,
+) -> Path:
+    """Stamp `merged_at` on the spec for `task_id` (manual-merge path).
+
+    Call this after `gh pr merge` on a code-bearing task whose `depends_on` will
+    later release children — without it, the DAG gate stays closed because
+    `_ready_to_dispatch` requires `merged_at` for parents that produced code.
+    Returns the path to the spec that was updated.
+    """
+    root = life_root if life_root is not None else Path("~/.life").expanduser()
+    spec_path = find_spec_for_task(root, task_id)
+    if spec_path is None:
+        raise FileNotFoundError(
+            f"spec.yaml for task_id={task_id!r} not found under {root}"
+        )
+    stamp_merged_at(spec_path, when=when, source="manual")
+    return spec_path
