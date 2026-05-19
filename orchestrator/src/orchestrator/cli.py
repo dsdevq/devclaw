@@ -20,7 +20,8 @@ from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemo
 from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake
-from orchestrator.state.models import GraphState, RequesterRoute
+from orchestrator.notify import notify_telegram
+from orchestrator.state.models import GraphState, RequesterRoute, TaskStatus
 from orchestrator.supervisor import tick_run
 from orchestrator.sweep import sweep_once
 
@@ -48,6 +49,21 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     final_spec = final.get("spec")
     if final_spec is not None:
         persist_spec(final_spec, spec_path)
+        chat_id = final_spec.requester_route.to
+        if final_spec.status == TaskStatus.done:
+            result_obj = final.get("result")
+            pr_url = result_obj.pr_url if result_obj is not None else None
+            notify_telegram(
+                chat_id,
+                f"✅ done {final_spec.task_id} — {pr_url or 'no PR'}",
+            )
+        elif final_spec.status == TaskStatus.blocked:
+            result_obj = final.get("result")
+            blocker = result_obj.blocker if result_obj is not None else None
+            notify_telegram(
+                chat_id,
+                f"🚫 blocked {final_spec.task_id} — {blocker or 'unknown'}",
+            )
 
     # Also drop a result.json next to the spec so reaps in mixed-cron environments
     # (markdown skill + Python orchestrator coexisting during cutover) can recover it.
