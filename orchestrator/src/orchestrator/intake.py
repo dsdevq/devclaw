@@ -12,6 +12,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
 from pydantic import ValidationError
 
 from orchestrator.dispatch import now_utc, persist_spec
@@ -29,6 +30,40 @@ logger = logging.getLogger(__name__)
 
 def _short_hex(n: int = 4) -> str:
     return secrets.token_hex(n // 2)
+
+
+def _find_project_for_repo(life_root: Path, target_repo: str) -> str | None:
+    """Look up which project owns `target_repo` via `projects/*/settings.yaml`'s `github_repo` field.
+
+    Returns the project slug (directory name) or None if no match.
+    On multiple matches, picks the project whose settings.yaml was modified most recently
+    and logs a WARN.
+    """
+    matches: list[tuple[float, str]] = []
+    for settings_path in life_root.glob("projects/*/settings.yaml"):
+        try:
+            data = yaml.safe_load(settings_path.read_text()) or {}
+        except (yaml.YAMLError, OSError) as exc:
+            logger.warning("task_intake: failed to read %s: %s", settings_path, exc)
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("github_repo") == target_repo:
+            matches.append((settings_path.stat().st_mtime, settings_path.parent.name))
+
+    if not matches:
+        return None
+    if len(matches) > 1:
+        matches.sort(reverse=True)
+        chosen = matches[0][1]
+        logger.warning(
+            "task_intake: target_repo=%s matched multiple projects %s; picking most recent: %s",
+            target_repo,
+            [m[1] for m in matches],
+            chosen,
+        )
+        return chosen
+    return matches[0][1]
 
 
 def _build_intake_prompt(verbatim_intent: str) -> str:
@@ -100,18 +135,24 @@ def intake(
         logger.warning("task_intake: claude output failed validation: %s", exc)
         return None
 
-    # Pick the destination directory based on whether the spec is project-bound.
-    if spec.project:
-        task_dir = life_root / "projects" / spec.project / "tasks" / spec.task_id
+    # Pick the destination directory by looking up target_repo in projects/*/settings.yaml.
+    # If target_repo is missing or no project owns it, fall through to the flat bucket.
+    project_slug: str | None = None
+    if spec.target_repo:
+        project_slug = _find_project_for_repo(life_root, spec.target_repo)
+
+    if project_slug:
+        task_dir = life_root / "projects" / project_slug / "tasks" / spec.task_id
     else:
         task_dir = life_root / "tasks" / spec.task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     persist_spec(spec, task_dir / "spec.yaml")
 
     logger.info(
-        "task_intake: spec written at %s (kind=%s, project=%s)",
+        "task_intake: spec written at %s (kind=%s, project=%s, target_repo=%s)",
         task_dir / "spec.yaml",
         spec.kind.value,
-        spec.project,
+        project_slug or spec.project,
+        spec.target_repo,
     )
     return spec
