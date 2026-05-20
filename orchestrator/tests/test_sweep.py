@@ -436,7 +436,12 @@ def test_sweep_dispatches_spec_with_no_deps(tmp_path: Path):
 
 
 def test_sweep_dispatches_spec_with_met_dep(tmp_path: Path):
-    """(b) A spec whose only dep is already `done` dispatches this tick."""
+    """(b) A spec whose only dep is `done` AND merged dispatches this tick.
+
+    The merged_at requirement applies because the dep has target_repo set
+    (default in make_spec). Specs whose dep has no target_repo are covered by
+    `test_sweep_dispatches_when_non_code_dep_done`.
+    """
     _reset_noop()
     life = setup_life_root(tmp_path)
     dep = make_spec(
@@ -444,6 +449,7 @@ def test_sweep_dispatches_spec_with_met_dep(tmp_path: Path):
         status=TaskStatus.done,
         dispatched_at=datetime(2026, 5, 18, 10, 0, tzinfo=timezone.utc),
         completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        merged_at=datetime(2026, 5, 18, 11, 30, tzinfo=timezone.utc),
     )
     write_atomic_spec(life, dep)
 
@@ -597,3 +603,167 @@ def test_detect_cycle_tolerates_unknown_dep():
     """An unknown dep is not a cycle — sweep handles the unknown-dep case."""
     spec = make_spec("x", status=TaskStatus.ready, depends_on=["missing"])
     assert detect_cycle(spec, {}) is None
+
+
+# ─── merged_at-aware DAG gate (bug fix from 2026-05-19) ──────────────────────
+
+
+def test_sweep_dispatches_when_code_dep_done_and_merged(tmp_path: Path):
+    """A child whose code-bearing parent is `done` AND `merged_at` set dispatches.
+
+    Reproduces the happy path of the merged_at gate added 2026-05-19.
+    """
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    dep = make_spec(
+        "code-dep",
+        status=TaskStatus.done,
+        completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        target_repo="dsdevq/lifekit-stack",
+        merged_at=datetime(2026, 5, 18, 11, 30, tzinfo=timezone.utc),
+    )
+    write_atomic_spec(life, dep)
+
+    child = make_spec(
+        "needs-code",
+        status=TaskStatus.ready,
+        dispatched_at=None,
+        depends_on=["code-dep"],
+    )
+    write_atomic_spec(life, child)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "needs-code" in result.dispatched
+
+
+def test_sweep_skips_when_code_dep_done_but_not_merged(tmp_path: Path):
+    """A child whose code-bearing parent is `done` but `merged_at` is null is skipped.
+
+    This is the bug from 2026-05-19: parent's runner finished and opened a PR,
+    but the PR isn't on `main`, so the child's runner can't reference the
+    parent's code. Gate must keep the child waiting.
+    """
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    dep = make_spec(
+        "code-dep",
+        status=TaskStatus.done,
+        completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        target_repo="dsdevq/lifekit-stack",
+        merged_at=None,
+    )
+    write_atomic_spec(life, dep)
+
+    child = make_spec(
+        "needs-code",
+        status=TaskStatus.ready,
+        dispatched_at=None,
+        depends_on=["code-dep"],
+    )
+    spec_path = write_atomic_spec(life, child)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "needs-code" not in result.dispatched
+    assert _noop_dispatcher.calls == []
+
+    from orchestrator.dispatch import load_spec
+
+    assert load_spec(spec_path).status == TaskStatus.ready
+
+    ok, reason = _ready_to_dispatch(
+        load_spec(spec_path),
+        {"code-dep": dep, "needs-code": load_spec(spec_path)},
+    )
+    assert ok is False
+    assert reason == "dep_not_merged"
+
+
+def test_sweep_dispatches_when_non_code_dep_done(tmp_path: Path):
+    """A child whose research/chore parent (no target_repo) is `done` dispatches
+    without a merged_at requirement — those parents produce only artifacts."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    dep = make_spec(
+        "research-dep",
+        kind=TaskKind.research,
+        status=TaskStatus.done,
+        completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        target_repo=None,
+        merged_at=None,
+    )
+    write_atomic_spec(life, dep)
+
+    child = make_spec(
+        "needs-research",
+        status=TaskStatus.ready,
+        dispatched_at=None,
+        depends_on=["research-dep"],
+    )
+    write_atomic_spec(life, child)
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert "needs-research" in result.dispatched
+
+
+def test_record_manual_merge_stamps_merged_at(tmp_path: Path):
+    """`record_manual_merge(task_id)` finds the spec by id and stamps merged_at."""
+    from orchestrator.dispatch import load_spec, record_manual_merge
+
+    life = setup_life_root(tmp_path)
+    spec = make_spec(
+        "manually-merged",
+        status=TaskStatus.done,
+        completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        target_repo="dsdevq/devclaw",
+        merged_at=None,
+    )
+    spec_path = write_atomic_spec(life, spec)
+
+    when = datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
+    returned = record_manual_merge("manually-merged", life_root=life, when=when)
+
+    assert returned == spec_path
+    reloaded = load_spec(spec_path)
+    assert reloaded.merged_at == when
+    assert "manual-merged" in (reloaded.result_summary or "")
+
+
+def test_sweep_reconciles_merge_via_gh(tmp_path: Path):
+    """Reconciliation pass: `gh pr view` says the PR is merged → spec gets stamped."""
+    import json as _json
+    import subprocess
+
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    spec = make_spec(
+        "reconcile-me",
+        status=TaskStatus.done,
+        completed_at=datetime(2026, 5, 18, 11, 0, tzinfo=timezone.utc),
+        target_repo="dsdevq/devclaw",
+        merged_at=None,
+        result_summary="PR: https://github.com/dsdevq/devclaw/pull/99",
+    )
+    spec_path = write_atomic_spec(life, spec)
+
+    gh_calls: list[list[str]] = []
+
+    def fake_gh(args: list[str]) -> subprocess.CompletedProcess:
+        gh_calls.append(args)
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=_json.dumps({"mergedAt": "2026-05-19T10:00:00Z"}),
+            stderr="",
+        )
+
+    result = sweep_once(life, dispatcher=_noop_dispatcher, gh=fake_gh)
+
+    assert "reconcile-me" in result.reconciled_merges
+    assert any("pr" in c and "view" in c and "99" in c for c in gh_calls)
+
+    from orchestrator.dispatch import load_spec
+
+    reloaded = load_spec(spec_path)
+    assert reloaded.merged_at is not None
+    assert reloaded.merged_at == datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
+    assert "reconcile-merged" in (reloaded.result_summary or "")

@@ -349,16 +349,10 @@ def comment_pr(repo: str, number: int, body: str, gh: GhRunner = _default_gh) ->
 
 
 def record_merge_on_spec(spec_path: Path, *, when: dt.datetime | None = None) -> None:
-    """Stamp merged_at and extend result_summary on the spec."""
-    spec = load_spec(spec_path)
-    when = when or dt.datetime.now(dt.timezone.utc)
-    suffix = f"auto-merged by pr_review_loop at {when.isoformat(timespec='seconds')}"
-    summary = spec.result_summary or ""
-    new_summary = f"{summary} | {suffix}".lstrip(" |") if summary else suffix
-    persist_spec(
-        spec.model_copy(update={"merged_at": when, "result_summary": new_summary}),
-        spec_path,
-    )
+    """Stamp merged_at and extend result_summary on the spec (auto-merge path)."""
+    from orchestrator.dispatch import stamp_merged_at
+
+    stamp_merged_at(spec_path, when=when, source="auto")
 
 
 # ─── Circuit breaker ────────────────────────────────────────────────────────

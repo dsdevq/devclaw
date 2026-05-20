@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemon
-from orchestrator.dispatch import load_spec, persist_spec
+from orchestrator.dispatch import load_spec, persist_spec, record_manual_merge
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake_from_prose
 from orchestrator.notify import notify_telegram
@@ -238,6 +238,27 @@ def _openclaw_announce(channel: str, target: str, message: str) -> None:
         log.warning("openclaw message send failed: %s", exc)
 
 
+def cmd_record_manual_merge(args: argparse.Namespace) -> int:
+    """Stamp `merged_at` on a spec.yaml after a manual `gh pr merge`.
+
+    Call this when you've merged a PR by hand (or any path other than
+    pr_review_loop). Without it, any child spec whose `depends_on` points at
+    this task will stay gated by the DAG-aware sweep — `_ready_to_dispatch`
+    requires `merged_at` for parents that produced code, not just `status: done`.
+    """
+    life_root = Path(args.life).expanduser().resolve()
+    if not life_root.is_dir():
+        print(f"error: --life root not found: {life_root}", file=sys.stderr)
+        return 2
+    try:
+        spec_path = record_manual_merge(args.task_id, life_root=life_root)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"stamped merged_at on {spec_path}")
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     """Long-running scheduler: interleaves sweep (15 min) + supervise-all (30 min).
 
@@ -382,6 +403,24 @@ def main() -> int:
     )
     p_sup_all.add_argument("--telegram-chat", default="default")
     p_sup_all.set_defaults(func=cmd_supervise_all)
+
+    p_record_merge = sub.add_parser(
+        "record-manual-merge",
+        help=(
+            "stamp merged_at on a spec.yaml after a manual `gh pr merge` — "
+            "needed so DAG-gated children unblock"
+        ),
+    )
+    p_record_merge.add_argument(
+        "task_id",
+        help="task_id of the spec whose PR was merged manually",
+    )
+    p_record_merge.add_argument(
+        "--life",
+        default="~/.life",
+        help="root of the ~/.life store (default ~/.life)",
+    )
+    p_record_merge.set_defaults(func=cmd_record_manual_merge)
 
     p_daemon = sub.add_parser(
         "daemon",
