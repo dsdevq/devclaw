@@ -84,6 +84,15 @@ def _noop_announce(channel: str, message: str) -> None:  # noqa: ARG001
     logger.info("announce(%s): %s", channel, message)
 
 
+# Lifecycle events use PR #21's (channel, target, message) shape — distinct from
+# the supervisor's escalate-only `AnnounceCallback` above.
+EventsAnnounce = Callable[[str, str, str], None]
+
+
+def _noop_events_announce(channel: str, target: str, message: str) -> None:  # noqa: ARG001
+    return None
+
+
 # ─── Dispatch abstraction (so tests don't fork real processes) ───────────────
 
 
@@ -334,6 +343,8 @@ def _dispatch_ready_nodes(
     requester_route: RequesterRoute,
     dispatcher: SpecDispatcher,
     result: SupervisorResult,
+    events_announce: EventsAnnounce = _noop_events_announce,
+    events_chat_id: str = "default",
 ) -> None:
     """For each ready node (up to the per-tick cap), generate spec + dispatch."""
     ready = find_ready_nodes(run)
@@ -365,6 +376,19 @@ def _dispatch_ready_nodes(
             ) + f" [dispatch_run={run_id_str}]"
 
         result.dispatched.append(node.id)
+        try:
+            from orchestrator.events import emit_dispatched
+
+            emit_dispatched(
+                task_id=spec.task_id,
+                runner_kind=spec.dispatch_target or "subagent",
+                chat_id=events_chat_id,
+                announce=events_announce,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "events emit_dispatched failed for %s: %s", spec.task_id, exc
+            )
 
 
 # ─── one tick ────────────────────────────────────────────────────────────────
@@ -381,6 +405,8 @@ def tick_run(
     requester_route: RequesterRoute | None = None,
     dispatcher: SpecDispatcher = _popen_per_task_cli,
     announce: AnnounceCallback = _noop_announce,
+    events_announce: EventsAnnounce = _noop_events_announce,
+    events_chat_id: str = "default",
 ) -> SupervisorResult:
     """Run one supervisor heartbeat for one Run.
 
@@ -414,6 +440,8 @@ def tick_run(
             requester_route=requester_route,
             dispatcher=dispatcher,
             result=out,
+            events_announce=events_announce,
+            events_chat_id=events_chat_id,
         )
 
     if all_verified_done(run):

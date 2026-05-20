@@ -18,6 +18,11 @@ from pathlib import Path
 
 from orchestrator.daemon import DaemonConfig, install_signal_handlers, run_daemon
 from orchestrator.dispatch import load_spec, persist_spec, record_manual_merge
+from orchestrator.events import (
+    emit_done,
+    emit_terminal_failure,
+    resolve_events_chat,
+)
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake_from_prose
 from orchestrator.notify import notify_telegram
@@ -51,6 +56,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if final_spec is not None:
         persist_spec(final_spec, spec_path)
         chat_id = final_spec.requester_route.to
+        events_chat = resolve_events_chat(chat_id)
         if final_spec.status == TaskStatus.done:
             result_obj = final.get("result")
             pr_url = result_obj.pr_url if result_obj is not None else None
@@ -58,12 +64,25 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
                 chat_id,
                 f"✅ done {final_spec.task_id} — {pr_url or 'no PR'}",
             )
+            emit_done(
+                task_id=final_spec.task_id,
+                pr_url=pr_url,
+                chat_id=events_chat,
+                announce=_openclaw_announce,
+            )
         elif final_spec.status == TaskStatus.blocked:
             result_obj = final.get("result")
             blocker = result_obj.blocker if result_obj is not None else None
             notify_telegram(
                 chat_id,
                 f"🚫 blocked {final_spec.task_id} — {blocker or 'unknown'}",
+            )
+            emit_terminal_failure(
+                task_id=final_spec.task_id,
+                new_state="blocked",
+                reason=blocker or final_spec.result_summary,
+                chat_id=events_chat,
+                announce=_openclaw_announce,
             )
 
     # Also drop a result.json next to the spec so reaps in mixed-cron environments
@@ -138,6 +157,8 @@ def cmd_intake(args: argparse.Namespace) -> int:
         from_surface=args.from_surface,
         life_root=Path(args.life).expanduser(),
         progress=_say,
+        events_announce=_openclaw_announce,
+        events_chat_id=resolve_events_chat(),
     )
     if result is None:
         print("error: task_intake failed (see logs)", file=sys.stderr)
@@ -286,6 +307,8 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         supervise_offset_s=args.supervise_offset,
         telegram_chat=args.telegram_chat,
         announce=_openclaw_announce,
+        events_announce=_openclaw_announce,
+        telegram_events_chat=resolve_events_chat(args.telegram_chat),
     )
     shutdown = threading.Event()
     install_signal_handlers(shutdown)

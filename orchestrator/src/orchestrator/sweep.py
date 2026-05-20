@@ -41,6 +41,16 @@ from orchestrator.dispatch import (
 from orchestrator.notify import notify_telegram
 from orchestrator.state.models import TaskSpec, TaskStatus
 
+# Events-callback signature is intentionally identical to PR #21's
+# daemon.AnnounceCallback. Inlined as a Callable here to avoid a daemon→sweep
+# import cycle. The daemon passes its `events_announce` field down through
+# `sweep_once`'s kwargs.
+EventsAnnounce = Callable[[str, str, str], None]
+
+
+def _noop_events_announce(channel: str, target: str, message: str) -> None:  # noqa: ARG001
+    return None
+
 DISPATCH_CAP_PER_TICK = 3
 REAP_CAP_PER_TICK = 5
 WATCHDOG_CAP_PER_TICK = 5
@@ -152,6 +162,8 @@ def sweep_once(
     *,
     dispatcher: SpecDispatcher = _popen_dispatch_cli,
     gh: GhRunner = _default_gh,
+    events_announce: EventsAnnounce = _noop_events_announce,
+    events_chat_id: str = "default",
 ) -> SweepResult:
     """Run one sweep tick: reap → watchdog → reconcile-merges → dispatch.
 
@@ -308,6 +320,19 @@ def sweep_once(
                 spec.requester_route.to,
                 f"🚀 dispatched {spec.task_id} (kind={spec.kind.value})",
             )
+            # Lifecycle event — see orchestrator.events. Wrapped in its own
+            # try-block so an announce failure can never abort the dispatch loop.
+            try:
+                from orchestrator.events import emit_dispatched
+
+                emit_dispatched(
+                    task_id=spec.task_id,
+                    runner_kind=dispatched.dispatch_target or "subagent",
+                    chat_id=events_chat_id,
+                    announce=events_announce,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("events emit_dispatched failed for %s: %s", spec.task_id, exc)
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"dispatch failed: {spec.task_id} — {exc}")
 

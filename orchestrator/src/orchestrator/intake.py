@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,17 @@ from orchestrator.sweep import detect_cycle, find_all_specs
 logger = logging.getLogger(__name__)
 
 INTAKE_INDEX_FILE = "intake_index.json"
+
+
+# Events announce callback shape — matches PR #21's daemon.AnnounceCallback
+# (channel, target, message). Imported lazily inside the function bodies to
+# avoid a top-level daemon import (intake is imported by mcp_server, which
+# should not pull in the daemon's threading machinery).
+_EventsAnnounce = Callable[[str, str, str], None]
+
+
+def _noop_events_announce(channel: str, target: str, message: str) -> None:  # noqa: ARG001
+    return None
 
 
 # Markers that indicate a code task is likely to touch the shared SPA root —
@@ -356,6 +368,8 @@ def intake_from_prose(
     life_root: Path | None = None,
     task_id: str | None = None,
     progress: callable = None,  # type: ignore[valid-type]
+    events_announce: _EventsAnnounce = _noop_events_announce,
+    events_chat_id: str = "default",
 ) -> IntakeResult | None:
     """Shared intake entrypoint used by every surface (CLI, MCP, Telegram handler).
 
@@ -439,6 +453,20 @@ def intake_from_prose(
         f"intake: new spec at {spec_path} "
         f"(kind={spec.kind.value}, target_repo={spec.target_repo})"
     )
+    # Lifecycle event: task_intake → spec_created. Fires only on the
+    # state="new" path so a duplicate intake doesn't re-announce.
+    try:
+        from orchestrator.events import emit_queued
+
+        emit_queued(
+            task_id=spec.task_id,
+            target_repo=spec.target_repo,
+            chat_id=events_chat_id,
+            announce=events_announce,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("events emit_queued failed for %s: %s", spec.task_id, exc)
+
     return IntakeResult(
         task_id=spec.task_id,
         spec_path=spec_path,
