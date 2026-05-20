@@ -29,3 +29,11 @@ Markdown skills under `../skills/` remain authoritative until each one is ported
 ## Architecture
 
 See `../docs/architecture-orchestrator-port.md` for the full design rationale (mechanism/cognition split, LangGraph port reasoning, gotchas to design around, comparison to alternatives considered).
+
+## PR labeling convention
+
+Every PR opened by the runner gets the `devclaw` label, attached at PR-creation time. The label makes runner-opened PRs trivially filterable in the GitHub UI and on the CLI (`gh pr list --label devclaw`), and visually distinguishes them from human commits, fleet siblings, and other automation.
+
+- The label is ensured idempotently on the target repo before each PR is opened (`gh label create devclaw --force`), so adding a new `target_repo` requires no manual repo setup.
+- Color `#1f6feb` (devclaw blue); description references the `kit/<task_id>-*` branch convention and the spec path.
+- A one-shot backfill script for existing PRs lives at `../scripts/backfill_devclaw_label.sh`.

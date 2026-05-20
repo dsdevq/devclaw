@@ -37,8 +37,12 @@ EXECUTION:
   3. git checkout -b kit/{spec.task_id}
   4. Implement against the acceptance criteria.
   5. git add -A && git commit -m "<concise present-tense title>" && git push -u origin kit/{spec.task_id}
-  6. gh pr create --base {spec.target_branch} --title "<title>" --body "<body>"
-  7. Print a JSON object to stdout on the LAST line of your output (and nothing after it) with this exact shape:
+  6. Idempotently ensure the `devclaw` label exists on {spec.target_repo} (safe to re-run):
+       gh label create devclaw --repo {spec.target_repo} --color 1f6feb \\
+         --description "Opened by the devclaw autonomous orchestrator. Branch pattern: kit/<task_id>-*. See ~/.life/projects/<project>/tasks/<id>/spec.yaml for the spec." \\
+         --force 2>/dev/null || true
+  7. gh pr create --base {spec.target_branch} --label devclaw --title "<title>" --body "<body>"
+  8. Print a JSON object to stdout on the LAST line of your output (and nothing after it) with this exact shape:
        {{"status": "done" | "blocked", "pr_url": "<url or null>", "branch": "kit/{spec.task_id}", "files_changed": [...], "tests_passed": true|false|null, "notes": "<one line>", "blocker": "<if blocked>"}}
 
 Stay inside the budget. If acceptance can't be met, stop and emit `status: blocked` with a blocker reason.
