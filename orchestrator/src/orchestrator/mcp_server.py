@@ -54,15 +54,24 @@ class SshConfig:
 
 
 def _ssh_argv(cfg: SshConfig, remote_cmd: str) -> list[str]:
-    """Build the argv to invoke `ssh user@host -- /bin/sh -c '<remote_cmd>'`."""
+    """Build the argv to invoke `ssh user@host '<remote_cmd>'`.
+
+    The remote command MUST be a single argv element. OpenSSH joins every
+    argv element after the host with spaces and sends the result as one
+    command string to the remote sshd, which feeds it to the user's login
+    shell. Splitting `remote_cmd` across multiple argv elements (e.g.
+    `["/bin/sh", "-c", remote_cmd]`) collapses to
+    `/bin/sh -c devclaw-orchestrator status <id>` on the wire — and
+    `sh -c` only takes the NEXT token as its script, so the rest of the
+    command becomes positional args ($0, $1, ...) and is silently lost.
+    """
     return [
         cfg.ssh_bin,
         "-o", "BatchMode=yes",            # don't prompt for password
         "-o", "ConnectTimeout=10",
         "-o", "StrictHostKeyChecking=accept-new",
         f"{cfg.user}@{cfg.host}",
-        "--",
-        "/bin/sh", "-c", remote_cmd,
+        remote_cmd,
     ]
 
 
