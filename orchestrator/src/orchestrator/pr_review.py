@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 import yaml
 
+from orchestrator.atomic_check import is_truly_atomic, load_rules as load_atomic_rules
 from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.runners._subprocess import run_claude
 
@@ -183,7 +184,7 @@ def get_pr_status(repo: str, number: int, gh: GhRunner = _default_gh) -> dict:
     cp = gh([
         "pr", "view", str(number),
         "--repo", repo,
-        "--json", "mergeable,mergeStateStatus,statusCheckRollup,files",
+        "--json", "mergeable,mergeStateStatus,statusCheckRollup,files,additions,deletions",
     ])
     if cp.returncode != 0:
         return {}
@@ -540,6 +541,27 @@ def run_pr_review(
                 continue
             if not ci_green(status, known_noise):
                 report.skipped.append({"repo": repo, "number": pr.number, "reason": "CI not green"})
+                continue
+
+            # Tightened atomic-merge gate. Deterministic; cheaper than cognition,
+            # so run it first — a PR that fails any of the 8 rules is surfaced
+            # for human review and never reaches the merge call.
+            pr_metadata = {
+                "files": status.get("files") or [],
+                "author": pr.author,
+            }
+            atomic_ok, atomic_reason = is_truly_atomic(pr_metadata, rules=load_atomic_rules())
+            if not atomic_ok:
+                comment_pr(
+                    repo, pr.number,
+                    f"Surfaced for review by pr_review_loop: not auto-merge eligible — {atomic_reason}",
+                    gh=gh,
+                )
+                report.actions.append(PrAction(
+                    pr_number=pr.number, repo=repo, action="surface",
+                    reason=f"atomic_check failed: {atomic_reason}",
+                ))
+                reviewed += 1
                 continue
 
             diff = get_pr_diff(repo, pr.number, gh=gh)
