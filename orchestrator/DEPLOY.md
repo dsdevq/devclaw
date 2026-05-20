@@ -24,6 +24,13 @@ On the VPS host (assumes `denys@<vps>` SSH access via Tailscale):
 - [ ] `claude --version` runs cleanly and reports an authenticated session under `~/.claude/` (the container mounts this in for the subagent dispatch path)
 - [ ] `/srv/life/` (canonical) is reachable and writable on the host — it bind-mounts into the container as `/home/node/.life`
 - [ ] `dsdevq/lifekit-stack` and `dsdevq/devclaw` are both checked out at the canonical host paths used by the compose file (typically `/srv/openclaw/lifekit-stack` and `/srv/openclaw/workspace/devclaw`)
+- [ ] The `devclaw` label exists on every repo in the runner's scope. The runner ensures this idempotently before each `gh pr create`, so no manual step is required for existing repos; when adding a *new* `target_repo`, the first PR creates the label. To preseed manually:
+  ```bash
+  gh label create devclaw --repo <org>/<repo> --color 1f6feb \
+    --description "Opened by the devclaw autonomous orchestrator. Branch pattern: kit/<task_id>-*. See ~/.life/projects/<project>/tasks/<id>/spec.yaml for the spec." \
+    --force
+  ```
+  The bundled `scripts/backfill_devclaw_label.sh` does this for the default repo set and also retroactively labels every historical `kit/*` PR.
 
 ## Step 1 — Build the `lifekit-openclaw:local` image
 

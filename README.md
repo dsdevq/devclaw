@@ -6,7 +6,7 @@
 
 - **Project understanding** — recons existing repos, runs Socratic planning for new ones, refuses to act on code it doesn't understand.
 - **Design review boundary** — non-atomic work goes through an RFC-style proposal you approve before anything autonomous runs.
-- **Bounded autonomous coding** — clones target repo, branches, implements, runs tests, opens a PR, all inside the agent's budget.
+- **Bounded autonomous coding** — clones target repo, branches, implements, runs tests, opens a PR (tagged with the `devclaw` label so runner-opened PRs are trivially filterable), all inside the agent's budget.
 - **Independent verification** — every claimed-done task in a Run gets re-checked against its evidence in a fresh environment before the orchestrator counts it done.
 - **Quiet by default** — chat pings only on PR-opens (atomic) or Run completions (proposal-bound). Internal failures are retried silently; only the narrow set of real blockers escalate.
 

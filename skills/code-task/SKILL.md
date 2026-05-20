@@ -92,6 +92,18 @@ Append meaningful events to `run.log.jsonl` (e.g. `event: tests_passed`, `event:
 
 ### 3. Commit + push + open PR
 
+Before opening the PR, **idempotently ensure the `devclaw` label exists on the target repo**. The `--force` flag makes `gh label create` create-or-update without erroring on already-exists, so this is safe to run every time:
+
+```bash
+gh label create devclaw \
+  --repo "${target_repo}" \
+  --color 1f6feb \
+  --description "Opened by the devclaw autonomous orchestrator. Branch pattern: kit/<task_id>-*. See ~/.life/projects/<project>/tasks/<id>/spec.yaml for the spec." \
+  --force 2>/dev/null || true
+```
+
+Then commit, push, and open the PR. The `--label devclaw` flag MUST be passed to `gh pr create` at creation time (not via a later `gh pr edit`) so the label is atomic with the PR open — that way label-filtered queries (`gh pr list --label devclaw`) and label-keyed automation never see a window where a runner-opened PR is unlabeled.
+
 ```bash
 cd "$WORK"
 git add -A
@@ -105,7 +117,7 @@ Refs: ~/.life/tasks/${TASK_ID}/
 EOF
 )"
 git push -u origin "kit/${TASK_ID}-<short-slug>"
-gh pr create --base "${target_branch}" --title "<short title>" --body "$(cat <<EOF
+gh pr create --base "${target_branch}" --label devclaw --title "<short title>" --body "$(cat <<EOF
 ## Summary
 <1–3 bullets>
 
