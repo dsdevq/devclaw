@@ -58,6 +58,11 @@ class DaemonConfig:
     telegram_chat: str = "default"
     announce: AnnounceCallback = field(default=_noop_announce)
 
+    # Task-lifecycle events (queued/dispatched/done/failed) — see orchestrator.events.
+    # Kept distinct from `announce` (audit-loop) so the two pathways stay additive.
+    events_announce: AnnounceCallback = field(default=_noop_announce)
+    telegram_events_chat: str = "default"
+
 
 SweepFn = Callable[[Path], object]
 SuperviseFn = Callable[[Path, RequesterRoute], object]
@@ -105,12 +110,48 @@ def _default_supervise_all(life_root: Path, route: RequesterRoute) -> object:
     return summaries
 
 
+def _events_wired_sweep(config: DaemonConfig) -> SweepFn:
+    """Default sweep_fn that hands the config's events_announce into sweep_once."""
+
+    def _sweep(life_root: Path) -> object:
+        return sweep_once(
+            life_root,
+            events_announce=config.events_announce,
+            events_chat_id=config.telegram_events_chat,
+        )
+
+    return _sweep
+
+
+def _events_wired_supervise(config: DaemonConfig) -> SuperviseFn:
+    """Default supervise_fn that hands the config's events_announce into tick_run."""
+
+    def _supervise(life_root: Path, route: RequesterRoute) -> object:
+        dags = list(life_root.glob("projects/*/runs/*/dag.yaml"))
+        summaries: list[str] = []
+        for dag_path in dags:
+            try:
+                result = tick_run(
+                    dag_path,
+                    life_root=life_root,
+                    requester_route=route,
+                    events_announce=config.events_announce,
+                    events_chat_id=config.telegram_events_chat,
+                )
+                summaries.append(result.summary())
+            except Exception as exc:  # noqa: BLE001
+                summaries.append(f"error in {dag_path}: {exc}")
+        return summaries
+
+    return _supervise
+
+
 def run_daemon(
     config: DaemonConfig,
     *,
     shutdown: threading.Event | None = None,
-    sweep_fn: SweepFn = _default_sweep,
-    supervise_fn: SuperviseFn = _default_supervise_all,
+    sweep_fn: SweepFn | None = None,
+    supervise_fn: SuperviseFn | None = None,
     audit_fn: AuditFn = _default_audit,
     pr_review_fn: PrReviewFn = _default_pr_review,
 ) -> None:
@@ -121,6 +162,10 @@ def run_daemon(
     """
     shutdown = shutdown or threading.Event()
     route = RequesterRoute(channel="telegram", to=config.telegram_chat)
+    if sweep_fn is None:
+        sweep_fn = _events_wired_sweep(config)
+    if supervise_fn is None:
+        supervise_fn = _events_wired_supervise(config)
 
     def _sweep_loop() -> None:
         while not shutdown.is_set():

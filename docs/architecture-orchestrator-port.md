@@ -156,3 +156,29 @@ Each markdown skill ports independently:
 4. **One retry per node, ever**, on the internally-resolvable blocker set. Second failure escalates via §6.3.
 5. **Killswitch wins.** `~/.life/system/cron-paused` short-circuits every cron-fired entry point: sweep, supervise, supervise-all. In-flight subprocesses keep running; only NEW work is blocked.
 6. **Single-writer per file.** `dag.yaml` written only by the supervisor; per-task `spec.yaml` written by intake + dispatch (atomic) or supervisor (run-bound) + sweep (reap/watchdog) + dispatch-CLI (terminal). No two writers race because each phase is gated by status.
+
+## Task-lifecycle Telegram announces
+
+Operators with a phone but no terminal need to see what the daemon is doing without tailing logs. Five state-transition events fire through the `orchestrator.events` module:
+
+| # | Transition                               | Fired from                              | Message format                                             |
+|---|------------------------------------------|-----------------------------------------|------------------------------------------------------------|
+| 1 | `task_intake` → `spec_created`           | `intake.intake_from_prose` (state="new")| `📋 Queued: <task_id> → <target_repo or '(project-less)'>` |
+| 2 | `task_dispatch` → `dispatched-*`         | `sweep.sweep_once`, `supervisor.tick_run`| `🚀 Dispatched: <task_id> (<runner_kind>)`                  |
+| 3 | `task_runner` → `done` WITH `pr_url`     | `cli.cmd_dispatch`                      | `✅ Done: <task_id>\n<pr_url>`                              |
+| 4 | `task_runner` → `done` WITHOUT `pr_url`  | `cli.cmd_dispatch`                      | `✅ Done: <task_id>`                                        |
+| 5 | `task_runner` → `failed`/`abandoned`     | `cli.cmd_dispatch` (terminal-blocked)   | `❌ <new_state>: <task_id>\n<reason or 'no reason captured'>`|
+
+Each emitted message is capped at 300 chars (truncated with `…`). Each transition fires exactly once because the orchestrator is the single writer of each state and only one site flips each transition. The duplicate-intake path (`state="duplicate"`) intentionally **does not** re-announce.
+
+The emitters reuse PR #21's `AnnounceCallback = Callable[[str, str, str], None]` shape — there is no separate transport. `DaemonConfig.events_announce` is **additive** to `DaemonConfig.announce` (which remains dedicated to the audit-loop). `cli.py daemon` wires both to `_openclaw_announce`, which shells out to `openclaw message send` (`check=False, timeout=15`); subprocess failures log at WARN and never raise.
+
+### Chat-id resolution
+
+The lifecycle events resolve their Telegram chat id through `events.resolve_events_chat()`:
+
+1. **`LIFEKIT_TELEGRAM_EVENTS_CHAT`** — lifecycle-specific override (set this in the docker-compose env to send events to a side channel).
+2. **`LIFEKIT_TELEGRAM_CHAT`** — shared fallback (re-used from the existing audit/escalate wiring).
+3. **`default`** — caller-supplied last resort.
+
+Out of scope for this port slice: wiring `LIFEKIT_TELEGRAM_EVENTS_CHAT` into `lifekit-stack`'s docker-compose env — a sibling follow-up.
