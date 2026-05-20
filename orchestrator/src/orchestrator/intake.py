@@ -34,6 +34,86 @@ logger = logging.getLogger(__name__)
 INTAKE_INDEX_FILE = "intake_index.json"
 
 
+# Markers that indicate a code task is likely to touch the shared SPA root —
+# editing any of these from two parallel branches reliably produces a merge
+# conflict. Compared case-insensitively against verbatim_intent and
+# acceptance_criteria of both the new and prior specs. See
+# proposals-approved/2026-05-19-intake-parallel-frontend-guard.md.
+SPA_ROOT_MARKERS: tuple[str, ...] = (
+    "app.tsx",
+    "app.jsx",
+    "main.tsx",
+    "index.tsx",
+    "api.ts",
+    "api.js",
+    "client.ts",
+    "fetch.ts",
+    "routes/",
+    "router.tsx",
+    "auth middleware",
+    "auth header",
+    "fetch wrapper",
+    "toastprovider",
+    "queryclient",
+    "context provider",
+    "theme provider",
+)
+
+# Statuses that count as "in flight" for the purposes of the parallel guard —
+# a sibling spec in any of these is still occupying the shared SPA root.
+_ACTIVE_STATUSES: set[TaskStatus] = {
+    TaskStatus.ready,
+    TaskStatus.dispatched_subagent,
+    TaskStatus.dispatched_build,
+    TaskStatus.dispatched_human,
+}
+
+
+def _spec_text_blob(spec: TaskSpec) -> str:
+    parts = [spec.verbatim_intent or ""]
+    parts.extend(spec.acceptance_criteria or [])
+    return "\n".join(parts).lower()
+
+
+def _mentions_spa_root(spec: TaskSpec) -> bool:
+    blob = _spec_text_blob(spec)
+    return any(marker in blob for marker in SPA_ROOT_MARKERS)
+
+
+def _find_parallel_frontend_conflict(
+    spec: TaskSpec, existing_by_id: dict[str, TaskSpec]
+) -> str | None:
+    """Return the task_id of the most-recent sibling spec that would conflict
+    on the SPA root, or None if no conflict.
+
+    Triggers when:
+      - new spec has a target_repo, and
+      - new spec's intent / acceptance criteria mention a SPA-root marker, and
+      - at least one in-flight sibling spec (same target_repo) also mentions one.
+    """
+    if not spec.target_repo:
+        return None
+    if not _mentions_spa_root(spec):
+        return None
+
+    candidates: list[TaskSpec] = []
+    for other_id, other in existing_by_id.items():
+        if other_id == spec.task_id:
+            continue
+        if other.target_repo != spec.target_repo:
+            continue
+        if other.status not in _ACTIVE_STATUSES:
+            continue
+        if not _mentions_spa_root(other):
+            continue
+        candidates.append(other)
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda s: s.created_at, reverse=True)
+    return candidates[0].task_id
+
+
 def _short_hex(n: int = 4) -> str:
     return secrets.token_hex(n // 2)
 
@@ -137,10 +217,44 @@ def intake(
             project=data.get("project"),
             status=TaskStatus.ready,
             depends_on=list(data.get("depends_on") or []),
+            parallel_safe=bool(data.get("parallel_safe", False)),
         )
     except (ValidationError, ValueError) as exc:
         logger.warning("task_intake: claude output failed validation: %s", exc)
         return None
+
+    # Parallel-frontend-conflict guard: code tasks that touch the React SPA
+    # root from two parallel branches reliably produce merge conflicts (see
+    # 2026-05-19 lifekit-dashboard Tasks 5+6 incident). Force serial dispatch
+    # via depends_on when we detect overlap with an in-flight sibling, unless
+    # the operator explicitly opted in with parallel_safe: true.
+    if spec.kind == TaskKind.code and not spec.parallel_safe:
+        existing_by_id: dict[str, TaskSpec] = {}
+        for sp in find_all_specs(life_root):
+            try:
+                loaded = load_spec(sp)
+            except Exception:  # noqa: BLE001
+                continue
+            existing_by_id[loaded.task_id] = loaded
+        prior_id = _find_parallel_frontend_conflict(spec, existing_by_id)
+        if prior_id is not None:
+            new_depends_on = list(spec.depends_on)
+            if prior_id not in new_depends_on:
+                new_depends_on.append(prior_id)
+            new_notes = list(spec.notes)
+            new_notes.append(
+                f"Forced serial via parallel-frontend-guard: detected shared "
+                f"SPA-root references with {prior_id}. Set parallel_safe: true "
+                f"to override."
+            )
+            spec = spec.model_copy(
+                update={"depends_on": new_depends_on, "notes": new_notes}
+            )
+            logger.info(
+                "task_intake: parallel-frontend-guard forced %s to wait on %s",
+                spec.task_id,
+                prior_id,
+            )
 
     # If the new spec declares dependencies, refuse to write it on disk when
     # the resulting graph would contain a cycle. Pure read of existing specs;

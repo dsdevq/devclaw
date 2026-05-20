@@ -105,6 +105,8 @@ class TaskSpec(BaseModel):
     merged_at: datetime | None = None
 
     depends_on: list[str] = Field(default_factory=list)
+    parallel_safe: bool = False
+    notes: list[str] = Field(default_factory=list)
 
 
 class DagNode(BaseModel):

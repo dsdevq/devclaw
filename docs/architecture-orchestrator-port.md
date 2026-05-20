@@ -135,7 +135,7 @@ Each markdown skill ports independently:
 
 | Markdown skill | Python equivalent | Status |
 |---|---|---|
-| `task_intake` | `orchestrator/intake.py` + `devclaw-orchestrator intake` | ✅ ported |
+| `task_intake` | `orchestrator/intake.py` + `devclaw-orchestrator intake` | ✅ ported (incl. parallel-frontend-conflict guard — forces serial dispatch when two in-flight code specs target the same repo and both mention shared SPA-root markers; bypass with `parallel_safe: true`) |
 | `task_dispatch` (dispatch + reap + watchdog) | `orchestrator/dispatch.py` + `orchestrator/sweep.py` + `devclaw-orchestrator sweep` | ✅ ported |
 | `code-task` | `orchestrator/runners/code_task.py` | ✅ ported (live-smoke-validated) |
 | `research-task` | `orchestrator/runners/research_task.py` | ✅ ported |
