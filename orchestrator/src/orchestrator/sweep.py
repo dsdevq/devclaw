@@ -39,7 +39,8 @@ from orchestrator.dispatch import (
     stamp_merged_at,
 )
 from orchestrator.notify import notify_telegram
-from orchestrator.state.models import TaskSpec, TaskStatus
+from orchestrator.run_summary import record_run
+from orchestrator.state.models import Result, TaskSpec, TaskStatus
 
 # Events-callback signature is intentionally identical to PR #21's
 # daemon.AnnounceCallback. Inlined as a Callable here to avoid a daemon→sweep
@@ -207,6 +208,7 @@ def sweep_once(
             persist_spec(reaped, spec_path)
             result.reaped.append(spec.task_id)
             logger.info("reaped %s via %s", spec.task_id, artifact.name)
+            _emit_summary_for_reap(reaped, artifact)
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"reap failed: {spec.task_id} — {exc}")
 
@@ -227,6 +229,13 @@ def sweep_once(
             persist_spec(blocked, spec_path)
             result.ghosted.append(spec.task_id)
             logger.info("watchdog ghosted %s", spec.task_id)
+            record_run(
+                spec=blocked,
+                result=None,
+                status="watchdog_killed",
+                retries=0,
+                verifier_result=None,
+            )
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"watchdog failed: {spec.task_id} — {exc}")
 
@@ -337,6 +346,29 @@ def sweep_once(
             result.errors.append(f"dispatch failed: {spec.task_id} — {exc}")
 
     return result
+
+
+def _emit_summary_for_reap(reaped_spec: TaskSpec, artifact: Path) -> None:
+    """Append a runs.jsonl row for a spec that the reap pass just flipped.
+
+    If the artifact is a `result.json` we can recover pr_url + verifier hint
+    from it; otherwise (findings.md / run.log.jsonl) we fall back to a
+    None-Result row whose verifier_result is "skipped".
+    """
+    parsed: Result | None = None
+    if artifact.name == "result.json":
+        try:
+            parsed = Result.model_validate(json.loads(artifact.read_text()))
+        except (json.JSONDecodeError, OSError, ValueError):
+            parsed = None
+
+    run_status = "done" if reaped_spec.status == TaskStatus.done else "failed"
+    record_run(
+        spec=reaped_spec,
+        result=parsed,
+        status=run_status,
+        retries=0,
+    )
 
 
 def _ready_to_dispatch(

@@ -26,6 +26,11 @@ from orchestrator.events import (
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake_from_prose
 from orchestrator.notify import notify_telegram
+from orchestrator.run_summary import (
+    format_tail,
+    read_summaries,
+    record_run,
+)
 from orchestrator.state.models import GraphState, RequesterRoute, TaskStatus
 from orchestrator.status import lookup_task_status
 from orchestrator.supervisor import tick_run
@@ -94,6 +99,22 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
             json.dumps(result.model_dump(mode="json"), indent=2, default=str)
         )
         print(json.dumps(result.model_dump(mode="json"), indent=2, default=str))
+
+    # Append one row to ~/.life/state/devclaw/runs.jsonl so consumers (lifekit-dashboard
+    # etc.) can ingest devclaw activity without parsing free-form result_summary.
+    if final_spec is not None:
+        if final_spec.status == TaskStatus.done:
+            run_status = "done"
+        elif final_spec.status == TaskStatus.blocked:
+            run_status = "failed"
+        else:
+            run_status = "failed"
+        record_run(
+            spec=final_spec,
+            result=result,
+            status=run_status,
+            retries=int(final.get("retry_count") or 0),
+        )
 
     if final.get("error"):
         return 1
@@ -280,6 +301,27 @@ def cmd_record_manual_merge(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_runs_tail(args: argparse.Namespace) -> int:
+    """Pretty-print the last N entries of ~/.life/state/devclaw/runs.jsonl.
+
+    Used by ops eyeballs ("how did the last 20 tasks go?") and as a reference
+    impl for downstream consumers like lifekit-dashboard.
+    """
+    path = Path(args.path).expanduser() if args.path else None
+    rows = read_summaries(
+        path=path,
+        limit=args.limit,
+        kind=args.kind,
+        status=args.status,
+    )
+    if args.json:
+        for row in rows:
+            print(json.dumps(row, separators=(",", ":")))
+        return 0
+    print(format_tail(rows))
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     """Long-running scheduler: interleaves sweep (15 min) + supervise-all (30 min).
 
@@ -444,6 +486,44 @@ def main() -> int:
         help="root of the ~/.life store (default ~/.life)",
     )
     p_record_merge.set_defaults(func=cmd_record_manual_merge)
+
+    p_runs = sub.add_parser(
+        "runs",
+        help="inspect the per-task run-summary JSONL (~/.life/state/devclaw/runs.jsonl)",
+    )
+    runs_sub = p_runs.add_subparsers(dest="runs_cmd", required=True)
+    p_runs_tail = runs_sub.add_parser(
+        "tail",
+        help="pretty-print the last N entries from runs.jsonl",
+    )
+    p_runs_tail.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="number of rows to show (default 20). Negative or 0 → show all.",
+    )
+    p_runs_tail.add_argument(
+        "--kind",
+        default=None,
+        help="filter by kind (code, research, draft, chore, decision, ...)",
+    )
+    p_runs_tail.add_argument(
+        "--status",
+        default=None,
+        choices=["done", "failed", "watchdog_killed"],
+        help="filter by run status",
+    )
+    p_runs_tail.add_argument(
+        "--path",
+        default=None,
+        help="override JSONL path (default ~/.life/state/devclaw/runs.jsonl)",
+    )
+    p_runs_tail.add_argument(
+        "--json",
+        action="store_true",
+        help="emit each matching row as JSON instead of the human-readable table",
+    )
+    p_runs_tail.set_defaults(func=cmd_runs_tail)
 
     p_daemon = sub.add_parser(
         "daemon",
