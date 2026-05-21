@@ -56,6 +56,15 @@ REAP_CAP_PER_TICK = 5
 WATCHDOG_CAP_PER_TICK = 5
 RECONCILE_CAP_PER_TICK = 5
 
+# Defense-in-depth cap on simultaneous claude subprocesses across all sweep
+# ticks. The VPS has ~3.7 GiB RAM and a single claude --print with 1M context
+# peaks at 1–1.5 GiB; two or three in parallel push us into swap-thrash + OOM
+# territory. The container memory cap was bumped to 2 GiB on 2026-05-21
+# (separate TaskSpec against dsdevq/lifekit-stack), but we want this
+# orchestrator-level guard so a future config slip can't bring back the freeze
+# risk. Applies to ALL task kinds since every kind spawns claude.
+DEFAULT_MAX_CONCURRENT_CLAUDES = 1
+
 _PR_URL_RE = re.compile(r"https?://[^/\s]+/([^/\s]+/[^/\s]+)/pull/(\d+)")
 
 DISPATCHED_STATUSES = {
@@ -164,6 +173,7 @@ def sweep_once(
     gh: GhRunner = _default_gh,
     events_announce: EventsAnnounce = _noop_events_announce,
     events_chat_id: str = "default",
+    max_concurrent_claudes: int = DEFAULT_MAX_CONCURRENT_CLAUDES,
 ) -> SweepResult:
     """Run one sweep tick: reap → watchdog → reconcile-merges → dispatch.
 
@@ -284,9 +294,29 @@ def sweep_once(
             continue
         specs_by_id[s.task_id] = s
 
+    # Count claudes already in flight from earlier ticks. The cap below is a
+    # global ceiling, not per-tick: if two long-running specs are still
+    # dispatched-* on disk, this tick must not start a third.
+    in_flight = sum(1 for s in specs_by_id.values() if s.status in DISPATCHED_STATUSES)
+
     unknown_dep_warning_emitted = False
+    concurrency_skip_logged = False
     for spec_path in all_specs:
         if len(result.dispatched) >= DISPATCH_CAP_PER_TICK:
+            break
+        if in_flight >= max_concurrent_claudes:
+            # Defense-in-depth memory cap reached. Leave the spec untouched —
+            # do NOT flip to dispatched, do NOT flip to blocked. Next sweep
+            # tick picks it up once an in-flight one finishes (reap or
+            # watchdog flips the dispatched-* spec away).
+            if not concurrency_skip_logged:
+                logger.info(
+                    "sweep: max_concurrent_claudes=%d reached (in_flight=%d); "
+                    "deferring remaining ready specs to next tick",
+                    max_concurrent_claudes,
+                    in_flight,
+                )
+                concurrency_skip_logged = True
             break
         try:
             spec = load_spec(spec_path)
@@ -309,6 +339,7 @@ def sweep_once(
             dispatched = _mark_atomic_dispatched(spec)
             persist_spec(dispatched, spec_path)
             specs_by_id[spec.task_id] = dispatched  # keep map current within the tick
+            in_flight += 1  # newly-dispatched spec counts against the cap
             run_id_str = dispatcher(spec_path) or ""
             result.dispatched.append(spec.task_id)
             logger.info(

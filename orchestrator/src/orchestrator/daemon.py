@@ -29,7 +29,11 @@ from pathlib import Path
 from orchestrator.audits.state_currency import AuditReport, run_and_write as run_state_currency_audit
 from orchestrator.pr_review import run_pr_review
 from orchestrator.supervisor import tick_run
-from orchestrator.sweep import is_killswitch_set, sweep_once
+from orchestrator.sweep import (
+    DEFAULT_MAX_CONCURRENT_CLAUDES,
+    is_killswitch_set,
+    sweep_once,
+)
 from orchestrator.state.models import RequesterRoute
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,12 @@ class DaemonConfig:
     # Kept distinct from `announce` (audit-loop) so the two pathways stay additive.
     events_announce: AnnounceCallback = field(default=_noop_announce)
     telegram_events_chat: str = "default"
+
+    # Global cap on concurrent in-flight claude subprocesses across the
+    # orchestrator. Default 1 — see sweep.DEFAULT_MAX_CONCURRENT_CLAUDES for
+    # the memory-budget rationale. Bumping this above 1 requires the
+    # orchestrator container to have headroom for N * 1.5 GiB peak.
+    max_concurrent_claudes: int = DEFAULT_MAX_CONCURRENT_CLAUDES
 
 
 SweepFn = Callable[[Path], object]
@@ -118,6 +128,7 @@ def _events_wired_sweep(config: DaemonConfig) -> SweepFn:
             life_root,
             events_announce=config.events_announce,
             events_chat_id=config.telegram_events_chat,
+            max_concurrent_claudes=config.max_concurrent_claudes,
         )
 
     return _sweep
