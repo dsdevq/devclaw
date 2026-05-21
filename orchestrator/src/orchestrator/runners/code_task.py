@@ -1,6 +1,19 @@
 """code_task — LangGraph node that runs a `kind: code` spec via Claude Code CLI.
 
-The agent loop happens INSIDE `claude --print`. From LangGraph's perspective this is one opaque cognition step.
+The agent loop happens INSIDE `claude --print`. From LangGraph's perspective this
+is one opaque cognition step. From the *sandbox's* perspective everything Claude
+shells out to inside that loop (`git clone`, `git checkout -b`, editor calls,
+`pytest`, `git push`, `gh pr create`) is also confined to the sandbox — which is
+the whole point of routing the claude invocation through `Sandbox.run` instead
+of a bare `subprocess.run`.
+
+Prior to this refactor the runner shelled out directly to `subprocess.run` (via
+`_subprocess.run_claude`), giving the agent the orchestrator container's
+ambient authority. Now the spec's `sandbox` field selects either:
+  - `bare`       — legacy /tmp/<task_id> behaviour (default)
+  - `sandcastle` — per-task Sandcastle-managed container
+
+See `orchestrator.sandbox` for the protocol and both implementations.
 """
 
 from __future__ import annotations
@@ -8,8 +21,18 @@ from __future__ import annotations
 from datetime import timezone
 
 from orchestrator.dispatch import now_utc
-from orchestrator.runners._subprocess import run_claude
-from orchestrator.state.models import GraphState, Result
+from orchestrator.runners._subprocess import (
+    CLAUDE_BIN,
+    DEFAULT_ALLOWED_TOOLS,
+    SubprocessResult,
+    _parse_last_json_line,
+)
+from orchestrator.sandbox import (
+    Sandbox,
+    SandcastleNotInstalledError,
+    make_sandbox,
+)
+from orchestrator.state.models import GraphState, Result, TaskSpec
 
 
 def _build_prompt(state: GraphState) -> str:
@@ -49,6 +72,98 @@ Stay inside the budget. If acceptance can't be met, stop and emit `status: block
 """
 
 
+def _run_claude_in_sandbox(
+    prompt: str,
+    *,
+    sandbox: Sandbox,
+    timeout_seconds: int,
+    allowed_tools: str = DEFAULT_ALLOWED_TOOLS,
+    permission_mode: str = "acceptEdits",
+) -> SubprocessResult:
+    """Drive `claude --print` through `sandbox.run` and parse its JSON tail.
+
+    Mirrors what `_subprocess.run_claude` used to do directly — same exit-code
+    handling, same JSON-line parsing, same blocker reasons — but every byte
+    of execution happens via the Sandbox protocol.
+    """
+    cmd = [
+        CLAUDE_BIN,
+        "--print",
+        "--allowed-tools",
+        allowed_tools,
+        "--permission-mode",
+        permission_mode,
+        prompt,
+    ]
+
+    completed = sandbox.run(cmd, timeout=timeout_seconds)
+
+    if completed.timed_out:
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=-1,
+            timed_out=True,
+            blocker="time_budget_exceeded",
+        )
+
+    if completed.returncode != 0:
+        # -1 + an empty stderr is what BareTmpdirSandbox returns when the
+        # claude binary is absent (FileNotFoundError translated to non-zero).
+        if completed.returncode != 0 and (
+            "command not found" in completed.stderr.lower()
+            or f"{CLAUDE_BIN}: not found" in completed.stderr.lower()
+            or (completed.returncode == 127)
+        ):
+            return SubprocessResult(
+                status="blocked",
+                parsed_json=None,
+                raw_stdout=completed.stdout,
+                raw_stderr=completed.stderr or f"{CLAUDE_BIN}: command not found",
+                returncode=completed.returncode,
+                blocker="claude_cli_not_found",
+            )
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=completed.returncode,
+            blocker=f"claude_cli_exit_{completed.returncode}",
+        )
+
+    parsed = _parse_last_json_line(completed.stdout)
+    if parsed is None:
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=0,
+            blocker="no_parseable_result_json",
+        )
+
+    return SubprocessResult(
+        status=parsed.get("status", "blocked"),
+        parsed_json=parsed,
+        raw_stdout=completed.stdout,
+        raw_stderr=completed.stderr,
+        returncode=0,
+        blocker=parsed.get("blocker") if parsed.get("status") == "blocked" else None,
+    )
+
+
+def _build_sandbox(spec: TaskSpec) -> Sandbox:
+    """Pinch-point for sandbox construction.
+
+    Tests monkey-patch this to inject a fake; production wires straight through
+    to `make_sandbox`.
+    """
+    return make_sandbox(spec.task_id, kind=spec.sandbox)
+
+
 def code_task_node(state: GraphState) -> dict:
     """LangGraph node — invoke Claude Code CLI for one code task."""
     spec = state.spec
@@ -64,7 +179,27 @@ def code_task_node(state: GraphState) -> dict:
             ),
         }
 
-    sub = run_claude(_build_prompt(state), timeout_seconds=spec.budget.max_runtime_seconds)
+    try:
+        sandbox = _build_sandbox(spec)
+    except SandcastleNotInstalledError as exc:
+        return {
+            "result": Result(
+                task_id=spec.task_id,
+                status="blocked",
+                completed_at=now_utc(),
+                blocker="sandcastle_not_available",
+                notes=str(exc)[:500],
+            ),
+        }
+
+    try:
+        sub = _run_claude_in_sandbox(
+            _build_prompt(state),
+            sandbox=sandbox,
+            timeout_seconds=spec.budget.max_runtime_seconds,
+        )
+    finally:
+        sandbox.teardown()
 
     if not sub.ok:
         return {
