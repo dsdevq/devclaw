@@ -295,26 +295,6 @@ have been removed.
 - **GitHub-CLI-bound.** PRs go through `gh`. GitLab / Forgejo support is contributor territory.
 - **English-only triggers.** Skill descriptions trigger on English phrases. Multilingual triggers haven't been tested.
 
-## Optional release feedback loop
-
-Devclaw owns repo work, tasks, proposals, verification, and PRs. If a Run ships
-a public change and you want to track or draft X/Twitter follow-up from the same
-OpenClaw workspace, install [TweetClaw](https://github.com/Xquik-dev/tweetclaw)
-as a separate OpenClaw plugin:
-
-```bash
-openclaw plugins install @xquik/tweetclaw
-openclaw config set tools.alsoAllow '["explore", "tweetclaw"]'
-```
-
-Use TweetClaw after the PR review boundary to search tweets, search tweet
-replies, monitor tweets, export followers, look up users, inspect media, run
-giveaway draws, or post reviewed release updates and replies. Keep Xquik API
-keys or MPP signing keys in OpenClaw plugin config, not in devclaw task specs,
-run logs, proposals, or PR bodies. The
-[ClawHub listing](https://clawhub.ai/plugins/@xquik/tweetclaw) is useful for
-discovery, but the npm install command above is the canonical runtime setup.
-
 ## Contributing
 
 This is early. Real bugs > drive-by polish. If you run it for a day and something breaks, open an issue with the spec.yaml + run.log.jsonl + result.json that captured the failure. If you find a skill that's missing a contract (an unhandled status transition, a missing acceptance-criterion shape), that's the most valuable kind of report.
