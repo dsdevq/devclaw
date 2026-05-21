@@ -1,0 +1,44 @@
+# Sandbox port configuration.
+#
+# `adapter:` picks which Sandbox port implementation the orchestrator uses to
+# spawn an agent for a `code` task. `in_process` is the safety-net fallback
+# (no isolation; today's behaviour). `sandcastle` spins up an ephemeral
+# per-task Docker container via npx-installed sandcastle CLI.
+#
+# Decision context: ~/.life/system/proposals.md entry
+# 2026-05-17-sandbox-adapter-choice-sandcastle.
+#
+# Bumping the pinned sandcastle version: re-run the smoke (see
+# acceptance criteria on PR), then bump `sandcastle.version` below in the
+# same PR. The orchestrator Dockerfile reads this version too.
+adapter: sandcastle
+
+sandcastle:
+  # Pinned because sandcastle is pre-1.0 and we have seen flag drift between
+  # patch releases. ALWAYS bump this with a matching smoke-test PR.
+  version: "0.5.2"
+
+  # Image must contain: git, gh, node, claude CLI, the orchestrator's pip-installed
+  # entrypoint. The lifekit-stack image already covers this — see
+  # dsdevq/lifekit-stack: compose/openclaw-gateway/Dockerfile.
+  image: "lifekit-openclaw:local"
+
+  # gVisor user-space kernel. Phase 1 host setup must `apt install runsc` and
+  # register it in /etc/docker/daemon.json before this takes effect.
+  # If runsc is not registered with Docker at run time, the adapter falls
+  # back to `fallback_runtime` and emits a WARN.
+  runtime: runsc
+  fallback_runtime: runc
+
+# Default per-task timeout if the spec didn't supply one.
+timeout_default: 1800
+
+# Host paths mounted READ-ONLY into the container. These are the credentials
+# the agent needs to git push / gh pr create / authenticate Claude — nothing
+# else should leak in. Order matters only for log readability; the adapter
+# sorts them deterministically.
+readonly_mounts:
+  /home/node/.credentials.json: /home/node/.credentials.json
+  /home/node/.config/gh: /home/node/.config/gh
+  /home/node/.gitconfig: /home/node/.gitconfig
+  /home/node/.claude: /home/node/.claude
