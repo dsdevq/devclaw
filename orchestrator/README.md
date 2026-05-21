@@ -37,3 +37,24 @@ Every PR opened by the runner gets the `devclaw` label, attached at PR-creation 
 - The label is ensured idempotently on the target repo before each PR is opened (`gh label create devclaw --force`), so adding a new `target_repo` requires no manual repo setup.
 - Color `#1f6feb` (devclaw blue); description references the `kit/<task_id>-*` branch convention and the spec path.
 - A one-shot backfill script for existing PRs lives at `../scripts/backfill_devclaw_label.sh`.
+
+## Concurrency cap (`max_concurrent_claudes`)
+
+The sweep dispatcher enforces a global ceiling on the number of in-flight `claude --print` subprocesses across all task kinds (`code`, `research`, `propose_change`, `intake` — every kind spawns claude). When the cap is reached, the sweep's dispatch pass **leaves** the next-eligible `ready` TaskSpec on disk (no status flip, no `blocked`) and re-evaluates it on the next sweep tick once an in-flight runner finishes.
+
+| Surface | Where it lives | Default |
+|---|---|---|
+| `DaemonConfig.max_concurrent_claudes` | `orchestrator.daemon` | `1` |
+| `sweep_once(..., max_concurrent_claudes=N)` | `orchestrator.sweep` | `1` |
+| `devclaw-orchestrator sweep --max-concurrent-claudes N` | CLI | `1` |
+| `devclaw-orchestrator daemon --max-concurrent-claudes N` | CLI | `1` |
+
+### Why default 1
+
+The VPS has ~3.7 GiB physical RAM + 2 GiB swap. A single `claude --print` with the 1M-context flag peaks at ~1–1.5 GiB resident; two or three in parallel exceed host capacity even with swap, and the orchestrator container's memory cap (bumped to 2 GiB on 2026-05-21) is sized for one. The default is set to `1` so a future config slip cannot bring back the freeze risk.
+
+Raising this above `1` requires the container to have headroom for `N × ~1.5 GiB` peak. It is *not* a global lock across containers — each orchestrator instance enforces its own cap.
+
+In-flight is counted from spec state on disk (`status: dispatched-subagent` or `dispatched-build`), so the cap survives orchestrator restarts: after a restart, the sweep counts pre-existing dispatched-* specs against the cap until they reap or watchdog out.
+
+Note that `cmd_dispatch` (the per-spec CLI runner that the sweep `Popen`s) does not independently re-check the cap — it is a worker that executes whatever the sweep has already gated. Direct manual invocations of `devclaw-orchestrator dispatch <spec>` bypass the cap by design, since they are operator-driven one-offs.

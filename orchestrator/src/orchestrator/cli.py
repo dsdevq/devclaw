@@ -29,7 +29,7 @@ from orchestrator.notify import notify_telegram
 from orchestrator.state.models import GraphState, RequesterRoute, TaskStatus
 from orchestrator.status import lookup_task_status
 from orchestrator.supervisor import tick_run
-from orchestrator.sweep import sweep_once
+from orchestrator.sweep import DEFAULT_MAX_CONCURRENT_CLAUDES, sweep_once
 
 
 def cmd_dispatch(args: argparse.Namespace) -> int:
@@ -114,7 +114,7 @@ def cmd_sweep(args: argparse.Namespace) -> int:
             datefmt="%H:%M:%S",
         )
 
-    result = sweep_once(life_root)
+    result = sweep_once(life_root, max_concurrent_claudes=args.max_concurrent_claudes)
     print(result.summary())
     if result.reaped:
         print(f"  reaped: {', '.join(result.reaped)}")
@@ -309,6 +309,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         announce=_openclaw_announce,
         events_announce=_openclaw_announce,
         telegram_events_chat=resolve_events_chat(args.telegram_chat),
+        max_concurrent_claudes=args.max_concurrent_claudes,
     )
     shutdown = threading.Event()
     install_signal_handlers(shutdown)
@@ -396,6 +397,16 @@ def main() -> int:
         help="root of the ~/.life store (default ~/.life)",
     )
     p_sweep.add_argument("--quiet", action="store_true", help="suppress per-item logging")
+    p_sweep.add_argument(
+        "--max-concurrent-claudes",
+        type=int,
+        default=DEFAULT_MAX_CONCURRENT_CLAUDES,
+        help=(
+            "global cap on in-flight claude subprocesses across the orchestrator "
+            "(default %(default)s — chosen for VPSes with ~3.7 GiB RAM where a "
+            "single claude --print peaks at 1–1.5 GiB)"
+        ),
+    )
     p_sweep.set_defaults(func=cmd_sweep)
 
     p_sup = sub.add_parser(
@@ -469,6 +480,16 @@ def main() -> int:
         help="seconds to delay first supervise tick after start (stagger from sweep)",
     )
     p_daemon.add_argument("--telegram-chat", default="default")
+    p_daemon.add_argument(
+        "--max-concurrent-claudes",
+        type=int,
+        default=DEFAULT_MAX_CONCURRENT_CLAUDES,
+        help=(
+            "global cap on in-flight claude subprocesses (default %(default)s). "
+            "Each in-flight claude --print can peak at ~1.5 GiB; raise only "
+            "after confirming the orchestrator container has N * 1.5 GiB headroom."
+        ),
+    )
     p_daemon.set_defaults(func=cmd_daemon)
 
     args = parser.parse_args()

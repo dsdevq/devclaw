@@ -361,14 +361,20 @@ def test_sweep_does_not_dispatch_run_bound_specs(tmp_path: Path):
 
 
 def test_sweep_dispatch_caps_at_per_tick_limit(tmp_path: Path):
-    """N+1 ready atomic specs → only DISPATCH_CAP_PER_TICK get dispatched."""
+    """N+1 ready atomic specs → only DISPATCH_CAP_PER_TICK get dispatched.
+
+    Passes max_concurrent_claudes high so this test isolates the per-tick
+    cap; the concurrent-claudes cap is exercised by its own tests below.
+    """
     _reset_noop()
     life = setup_life_root(tmp_path)
     for i in range(DISPATCH_CAP_PER_TICK + 2):
         spec = make_spec(f"ready-{i}", status=TaskStatus.ready, dispatched_at=None)
         write_atomic_spec(life, spec)
 
-    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    result = sweep_once(
+        life, dispatcher=_noop_dispatcher, max_concurrent_claudes=100
+    )
     assert len(result.dispatched) == DISPATCH_CAP_PER_TICK
     assert len(_noop_dispatcher.calls) == DISPATCH_CAP_PER_TICK
 
@@ -767,3 +773,112 @@ def test_sweep_reconciles_merge_via_gh(tmp_path: Path):
     assert reloaded.merged_at is not None
     assert reloaded.merged_at == datetime(2026, 5, 19, 10, 0, tzinfo=timezone.utc)
     assert "reconcile-merged" in (reloaded.result_summary or "")
+
+
+# ─── max_concurrent_claudes global cap ───────────────────────────────────────
+
+
+def test_sweep_max_concurrent_claudes_two_dispatches_two_queues_one(tmp_path: Path):
+    """cap=2 + three back-to-back ready specs → 2 dispatched, 1 left in ready.
+
+    The deferred spec stays at status=ready and is NOT marked blocked, so the
+    next sweep tick can pick it up once capacity frees.
+    """
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    spec_paths: list[Path] = []
+    for i in range(3):
+        spec = make_spec(f"ready-{i}", status=TaskStatus.ready, dispatched_at=None)
+        spec_paths.append(write_atomic_spec(life, spec))
+
+    result = sweep_once(
+        life, dispatcher=_noop_dispatcher, max_concurrent_claudes=2
+    )
+    assert len(result.dispatched) == 2
+    assert len(_noop_dispatcher.calls) == 2
+
+    from orchestrator.dispatch import load_spec
+
+    statuses = [load_spec(p).status for p in spec_paths]
+    assert statuses.count(TaskStatus.dispatched_subagent) == 2
+    assert statuses.count(TaskStatus.ready) == 1
+    # The deferred one is NOT blocked — it must remain dispatchable next tick.
+    assert TaskStatus.blocked not in statuses
+
+
+def test_sweep_max_concurrent_claudes_default_is_one(tmp_path: Path):
+    """Default cap=1 → only one ready spec dispatches per tick even when many wait."""
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    spec_paths: list[Path] = []
+    for i in range(3):
+        spec = make_spec(f"ready-{i}", status=TaskStatus.ready, dispatched_at=None)
+        spec_paths.append(write_atomic_spec(life, spec))
+
+    # No max_concurrent_claudes kwarg → default applies. Asserts the default
+    # value is 1, not just that cap-of-1 behaves correctly.
+    result = sweep_once(life, dispatcher=_noop_dispatcher)
+    assert len(result.dispatched) == 1
+    assert len(_noop_dispatcher.calls) == 1
+
+    from orchestrator.dispatch import load_spec
+
+    statuses = [load_spec(p).status for p in spec_paths]
+    assert statuses.count(TaskStatus.dispatched_subagent) == 1
+    assert statuses.count(TaskStatus.ready) == 2
+    assert TaskStatus.blocked not in statuses
+
+
+def test_sweep_queued_spec_dispatches_after_in_flight_completes(tmp_path: Path):
+    """Queued spec dispatches on the next sweep tick once capacity frees.
+
+    Models the realistic flow: tick 1 dispatches A (cap=1) and leaves B queued.
+    Between ticks, A's runner writes result.json. Tick 2 reaps A (freeing the
+    slot) and then dispatches B in the same tick (reap pass runs before
+    dispatch pass).
+    """
+    _reset_noop()
+    life = setup_life_root(tmp_path)
+    a = make_spec("task-a", status=TaskStatus.ready, dispatched_at=None)
+    b = make_spec("task-b", status=TaskStatus.ready, dispatched_at=None)
+    a_path = write_atomic_spec(life, a)
+    b_path = write_atomic_spec(life, b)
+    paths_by_id = {"task-a": a_path, "task-b": b_path}
+
+    # Tick 1: cap=1 — exactly one dispatches; the other stays in ready.
+    # find_all_specs uses glob order which is filesystem-dependent, so we
+    # accept whichever spec wins this tick and follow up on the loser.
+    result1 = sweep_once(life, dispatcher=_noop_dispatcher, max_concurrent_claudes=1)
+    assert len(result1.dispatched) == 1
+    assert len(_noop_dispatcher.calls) == 1
+
+    first = result1.dispatched[0]
+    second = "task-b" if first == "task-a" else "task-a"
+    first_path = paths_by_id[first]
+    second_path = paths_by_id[second]
+
+    from orchestrator.dispatch import load_spec
+
+    assert load_spec(first_path).status == TaskStatus.dispatched_subagent
+    assert load_spec(second_path).status == TaskStatus.ready
+
+    # Between ticks: the in-flight one's runner writes result.json.
+    (first_path.parent / "result.json").write_text(
+        json.dumps(
+            {
+                "task_id": first,
+                "status": "done",
+                "completed_at": "2026-05-18T12:25:00+00:00",
+                "notes": "done",
+            }
+        )
+    )
+
+    # Tick 2: reap the completed one (frees the slot), then dispatch the queued one.
+    result2 = sweep_once(life, dispatcher=_noop_dispatcher, max_concurrent_claudes=1)
+    assert first in result2.reaped
+    assert result2.dispatched == [second]
+    assert len(_noop_dispatcher.calls) == 2
+
+    assert load_spec(first_path).status == TaskStatus.done
+    assert load_spec(second_path).status == TaskStatus.dispatched_subagent
