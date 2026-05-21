@@ -1,14 +1,29 @@
 # devclaw
 
-> Turn an [OpenClaw](https://openclaw.ai/) gateway + a Claude or Codex CLI auth into an autonomous-development collaborator. Send a chat message; get a merged PR.
+> **DevClaw turns approved engineering proposals into verified PRs.**
 
-`devclaw` is a bundle of OpenClaw workspace skills that gives your assistant a real development workflow:
+DevClaw is a pipeline, not a general-purpose autonomous coder. You write a
+proposal in `~/.life/system/proposals.md` (or any project's proposals dir);
+once approved, `task_intake` lowers it to a `TaskSpec` with explicit
+acceptance criteria; the orchestrator dispatches a `code_task` runner that
+clones the target repo into a per-task sandbox, implements the change, and
+hands the result to an independent verifier. The verifier re-checks the AC
+in a fresh environment, opens a PR tagged `devclaw`, and either trips the
+atomic-merge gate (for changes inside the 8-rule allowlist) or routes to
+human review. Every state transition is written to a per-task audit log.
 
-- **Project understanding** — recons existing repos, runs Socratic planning for new ones, refuses to act on code it doesn't understand.
-- **Design review boundary** — non-atomic work goes through an RFC-style proposal you approve before anything autonomous runs.
-- **Bounded autonomous coding** — clones target repo, branches, implements, runs tests, opens a PR (tagged with the `devclaw` label so runner-opened PRs are trivially filterable), all inside the agent's budget.
-- **Independent verification** — every claimed-done task in a Run gets re-checked against its evidence in a fresh environment before the orchestrator counts it done.
-- **Quiet by default** — chat pings only on PR-opens (atomic) or Run completions (proposal-bound). Internal failures are retried silently; only the narrow set of real blockers escalate.
+It's a runtime for *pre-approved, acceptance-criteria-shaped* engineering
+work — typo fixes, refactors with a stated invariant, doc reframes, the
+narrower passes inside a multi-task DAG. Not a chatbot. Not a freeform
+"build whatever I want" agent.
+
+What you get on top of that core loop:
+
+- **Design-review boundary, enforced.** `kind: code` against an unknown project, or non-atomic work without an approved proposal, is refused at intake — not by the runner, by the spec writer.
+- **Bounded autonomous coding.** Clones the target repo, branches, implements, runs tests, opens a PR (tagged with the `devclaw` label so runner-opened PRs are trivially filterable), all inside the agent's budget.
+- **Independent verification.** Every claimed-done task gets re-checked against its acceptance criteria in a fresh environment before the orchestrator counts it done. No self-graded passes.
+- **Atomic-merge gate.** PRs that fall inside the explicit 8-rule allowlist auto-merge once green; everything else holds for human review. Contract-class and architectural changes are out of scope for auto-merge by design.
+- **Quiet by default.** Chat pings only on PR-opens (atomic) or Run completions (proposal-bound). Internal failures are retried silently; only the narrow set of real blockers escalate.
 
 ## Status
 
@@ -37,21 +52,55 @@ devclaw/
 
 ## How it fits together
 
-```
-You (chat)  ─►  task_intake  ─►  spec.yaml  ─►  task_dispatch  ─►  code-task / research-task  ─►  PR / artifact
-                   │
-                   └─ refuses unknown projects, refuses non-atomic without an approved proposal
+The full loop, end-to-end:
 
-You (chat)  ─►  propose_change  ─►  proposal RFC (you read)  ─►  ship it  ─►  define_run  ─►  dag.yaml
-                                                                                                  │
-                                                          curator_30m cron  ─►  project_curator ──┤
-                                                                                   ├─ dispatch ready nodes
-                                                                                   ├─ verify-task each claimed_done
-                                                                                   ├─ internal retry on failure
-                                                                                   └─ announce on Run complete
+```
+                              ┌──────────────────────────────────────────────┐
+                              │  ~/.life/system/proposals.md (or             │
+                              │  ~/.life/projects/<p>/proposals/*.md)        │
+                              │  ── you write & approve ("ship it") ─────►   │
+                              └──────────────────────────────────────────────┘
+                                                  │
+                                                  ▼
+   proposal  ─►  task_intake  ─►  TaskSpec (spec.yaml, status: ready)
+                                                  │
+                                                  ▼
+                            sweep  (cron, scans ~/.life/ for status: ready)
+                                                  │
+                                                  ▼
+                              dispatch  (claim spec, status → dispatched-*)
+                                                  │
+                                                  ▼
+                  code_task runner  (per-task sandbox: clone → branch → implement → tests)
+                                                  │
+                                                  ▼
+                          verify-task  (fresh env, re-check AC against evidence)
+                                                  │
+                                                  ▼
+                                            PR opened
+                                       (label: devclaw)
+                                                  │
+                                  ┌───────────────┴───────────────┐
+                                  ▼                               ▼
+                  atomic-merge gate                       human review
+              (inside 8-rule allowlist)             (architectural / contract-class
+              auto-merge once green                  / outside allowlist)
+                                  │                               │
+                                  └───────────────┬───────────────┘
+                                                  ▼
+                              audit log  (per-task run.log.jsonl + result.json;
+                                          state-currency audit reconciles drift)
 ```
 
-The atomic path (top) is "single PR, ~minutes." The proposal path (bottom) is "design-reviewed multi-task DAG, hours-to-days." Same runtime, two execution surfaces.
+For multi-task proposals, `define_run` lowers the approved proposal into a
+`dag.yaml` of TaskSpecs with `depends_on` edges; `project_curator` walks the
+DAG on a 30-minute heartbeat, dispatching ready nodes and verifying claimed-
+done ones. Same pipeline — just fanned out.
+
+Two execution surfaces, one runtime: the atomic path is "single PR,
+~minutes"; the proposal-DAG path is "design-reviewed multi-task DAG,
+hours-to-days." Both terminate the same way: verified, labelled PR, audit-
+logged outcome.
 
 ## Install
 
@@ -225,18 +274,24 @@ Lifted verbatim from the architecture docs; the prose-version is in [`docs/archi
 - **No bespoke scheduler / queue / locking.** OpenClaw's cron + filesystem + skill manifest are the substrate.
 - **No persona drift.** Skills are bounded; persona comes from your OpenClaw agent's identity file, not from devclaw.
 
-## What devclaw is NOT
+## What DevClaw is NOT
 
-- **Not a chatbot.** OpenClaw is the chatbot; devclaw is what runs *inside* it.
+- **Not a chatbot.** OpenClaw is the chatbot; devclaw is what runs *inside* it. You don't converse with devclaw, you file specs against it.
+- **Not a general-purpose autonomous developer.** It does not take an unbounded "build me a SaaS" prompt and figure things out. Every run starts from a TaskSpec with explicit acceptance criteria — written by `task_intake` from an approved proposal, never from raw chat. Open-ended prompts get refused at intake.
+- **Not a replacement for human review on architectural or contract-class changes.** The atomic-merge gate is governed by an explicit 8-rule allowlist. Schema migrations, public-API surface changes, auth/permission code, dependency bumps that cross majors, anything touching the merge gate itself — these never auto-merge, regardless of test status. They get a PR, a `devclaw` label, and a request for human review.
 - **Not a personal memory framework.** That's [lifekit](https://github.com/dsdevq/lifekit) — devclaw composes with it but doesn't require it.
 - **Not a deploy template.** That's [lifekit-stack](https://github.com/dsdevq/lifekit-stack) — same separation.
 - **Not a multi-day autonomous build engine.** For tasks that need durable resume across container restart or multi-cycle critique loops, you want a separate sandboxed build engine (think OpenHands, swarm, or similar) wired behind devclaw's `BuildEngine` port. devclaw is for tasks finishable in < 4h.
 
 ## Limitations (v0.1)
 
+This list reflects what's *still* limited as of 2026-05-21. Items already
+fixed (e.g. the sweep-glob coverage gap closed by [#12](https://github.com/dsdevq/devclaw/pull/12))
+have been removed.
+
 - **Hard-coded paths.** Everything assumes `~/.life/projects/` and `~/.life/tasks/`. Configurability is v0.2.
-- **No per-task sandbox isolation yet.** `code-task` runs inside the OpenClaw-gateway container itself with a per-task `/tmp/<task_id>/` workdir. Workdir separation is real; full sandbox isolation (via [sandcastle](https://github.com/mattpocock/sandcastle) or similar) is on the v0.2 roadmap.
-- **Race condition in `task_dispatch`** when the cron and a manual dispatch fire on the same `status: ready` spec. Logged but not yet fixed. Killswitch the cron when you're driving dispatch manually until v0.2 lands the compare-and-swap fix.
+- **Per-task sandbox isolation is in flight, not landed.** `code_task` currently runs inside the OpenClaw-gateway container with a per-task `/tmp/<task_id>/` workdir — workdir separation is real, but full process/filesystem/network isolation is not. Active TaskSpec: `2026-05-20-devclaw-sandcastle-code-task-integration-a3f1` (Sandcastle adapter behind the existing `BuildEngine` port). Until that lands, treat the runner as having gateway-container-level trust.
+- **Dispatch race when cron and manual dispatch overlap.** `sweep` claims a spec by flipping its status before forking the runner, which closes the common cron-vs-cron case. The manual-vs-cron race is narrower than v0.0.x but not formally closed; killswitch the cron when you're driving dispatch by hand until the compare-and-swap path is hardened.
 - **GitHub-CLI-bound.** PRs go through `gh`. GitLab / Forgejo support is contributor territory.
 - **English-only triggers.** Skill descriptions trigger on English phrases. Multilingual triggers haven't been tested.
 
