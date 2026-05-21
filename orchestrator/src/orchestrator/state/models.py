@@ -87,6 +87,13 @@ class TaskSpec(BaseModel):
     target_repo: str | None = None
     target_branch: str = "main"
 
+    # Per-task sandbox selection. `bare` keeps the legacy `/tmp/<task_id>`
+    # behaviour; `sandcastle` runs the `code_task` runner inside a Sandcastle-
+    # managed container (see `orchestrator.sandbox`). Default stays `bare` for
+    # this PR — a follow-up flips it to `sandcastle` once one real task has
+    # run green that way.
+    sandbox: Literal["bare", "sandcastle"] = "bare"
+
     project: str | None = None
     run: str | None = None
     run_node: str | None = None

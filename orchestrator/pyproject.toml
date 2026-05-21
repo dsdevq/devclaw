@@ -20,11 +20,30 @@ postgres = [
     "langgraph-checkpoint-postgres>=2.0.0",
     "psycopg[binary,pool]>=3.2.0",
 ]
+# Sandcastle (https://github.com/mattpocock/sandcastle) is the per-task sandbox
+# for `code_task`. Upstream ships as a Node.js / TypeScript package on npm, not
+# PyPI — there is no `pip install sandcastle`. The `SandcastleSandbox` Python
+# wrapper in `orchestrator.sandbox` drives the upstream CLI via `npx`.
+#
+# The pinned npm version lives in `orchestrator.sandbox.SANDCASTLE_NPM_VERSION`
+# (single source of truth). This extra group documents the requirement so it
+# shows up in `pip install -e .[sandcastle]` and in dependency audits; the
+# actual binary still has to be made available out-of-band (Node 20+ on the
+# orchestrator host).
+sandcastle = [
+    # npm:sandcastle==0.5.2  (installed via `npx sandcastle@0.5.2`, not pip)
+]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.8.0",
 ]
+
+# Out-of-band runtime dependencies that aren't pip-installable. Kept here so
+# operators provisioning a new orchestrator host have one place to look.
+[tool.devclaw.external-deps]
+sandcastle = { kind = "npm", package = "sandcastle", version = "0.5.2", required_for = ["code_task with sandbox=sandcastle"] }
+node = { kind = "system", version = ">=20", required_for = ["sandcastle"] }
 
 [project.scripts]
 devclaw-orchestrator = "orchestrator.cli:main"
