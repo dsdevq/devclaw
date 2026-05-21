@@ -18,14 +18,21 @@ See `orchestrator.sandbox` for the protocol and both implementations.
 
 from __future__ import annotations
 
+import os
 from datetime import timezone
 
 from orchestrator.dispatch import now_utc
 from orchestrator.runners._subprocess import (
     CLAUDE_BIN,
+    CODEX_BIN,
     DEFAULT_ALLOWED_TOOLS,
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_SANDBOX,
+    AgentBackend,
     SubprocessResult,
+    _parse_codex_event_stream,
     _parse_last_json_line,
+    select_agent_backend,
 )
 from orchestrator.sandbox import (
     Sandbox,
@@ -107,6 +114,7 @@ def _run_claude_in_sandbox(
             returncode=-1,
             timed_out=True,
             blocker="time_budget_exceeded",
+            backend="claude",
         )
 
     if completed.returncode != 0:
@@ -124,6 +132,7 @@ def _run_claude_in_sandbox(
                 raw_stderr=completed.stderr or f"{CLAUDE_BIN}: command not found",
                 returncode=completed.returncode,
                 blocker="claude_cli_not_found",
+                backend="claude",
             )
         return SubprocessResult(
             status="blocked",
@@ -132,6 +141,7 @@ def _run_claude_in_sandbox(
             raw_stderr=completed.stderr,
             returncode=completed.returncode,
             blocker=f"claude_cli_exit_{completed.returncode}",
+            backend="claude",
         )
 
     parsed = _parse_last_json_line(completed.stdout)
@@ -143,6 +153,7 @@ def _run_claude_in_sandbox(
             raw_stderr=completed.stderr,
             returncode=0,
             blocker="no_parseable_result_json",
+            backend="claude",
         )
 
     return SubprocessResult(
@@ -152,6 +163,141 @@ def _run_claude_in_sandbox(
         raw_stderr=completed.stderr,
         returncode=0,
         blocker=parsed.get("blocker") if parsed.get("status") == "blocked" else None,
+        backend="claude",
+    )
+
+
+def _run_codex_in_sandbox(
+    prompt: str,
+    *,
+    sandbox: Sandbox,
+    timeout_seconds: int,
+    model: str | None = None,
+    codex_sandbox: str = DEFAULT_CODEX_SANDBOX,
+) -> SubprocessResult:
+    """Drive `codex exec --json` through `sandbox.run` and parse the event stream.
+
+    Mirrors `_run_claude_in_sandbox` shape so the calling node doesn't branch
+    on which backend it picked: same `SubprocessResult` out, same blocker
+    vocabulary where it overlaps, with Codex-specific blockers
+    (`codex_cli_not_found`, `codex_cli_exit_<rc>`, `codex_no_final_agent_message`)
+    where it doesn't.
+
+    The CLI runs *inside* the sandbox, so Codex's own `--sandbox` scope is
+    a defence-in-depth layer on top of the per-task Sandcastle container —
+    keep it on `workspace-write` (the adapter default) unless the task
+    needs broader access.
+    """
+    resolved_model = model or os.environ.get("DEVCLAW_CODEX_MODEL") or DEFAULT_CODEX_MODEL
+    cmd = [
+        CODEX_BIN,
+        "exec",
+        "--json",
+        "--sandbox",
+        codex_sandbox,
+        "--model",
+        resolved_model,
+        prompt,
+    ]
+
+    completed = sandbox.run(cmd, timeout=timeout_seconds)
+
+    if completed.timed_out:
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=-1,
+            timed_out=True,
+            blocker="time_budget_exceeded",
+            backend="codex",
+        )
+
+    final_text, counts = _parse_codex_event_stream(completed.stdout)
+
+    if completed.returncode != 0:
+        if (
+            "command not found" in completed.stderr.lower()
+            or f"{CODEX_BIN}: not found" in completed.stderr.lower()
+            or completed.returncode == 127
+        ):
+            return SubprocessResult(
+                status="blocked",
+                parsed_json=None,
+                raw_stdout=completed.stdout,
+                raw_stderr=completed.stderr or f"{CODEX_BIN}: command not found",
+                returncode=completed.returncode,
+                blocker="codex_cli_not_found",
+                backend="codex",
+                event_counts=counts,
+            )
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=completed.returncode,
+            blocker=f"codex_cli_exit_{completed.returncode}",
+            backend="codex",
+            event_counts=counts,
+        )
+
+    if final_text is None:
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=0,
+            blocker="codex_no_final_agent_message",
+            backend="codex",
+            event_counts=counts,
+        )
+
+    parsed = _parse_last_json_line(final_text)
+    if parsed is None:
+        return SubprocessResult(
+            status="blocked",
+            parsed_json=None,
+            raw_stdout=completed.stdout,
+            raw_stderr=completed.stderr,
+            returncode=0,
+            blocker="no_parseable_result_json",
+            backend="codex",
+            event_counts=counts,
+        )
+
+    return SubprocessResult(
+        status=parsed.get("status", "blocked"),
+        parsed_json=parsed,
+        raw_stdout=completed.stdout,
+        raw_stderr=completed.stderr,
+        returncode=0,
+        blocker=parsed.get("blocker") if parsed.get("status") == "blocked" else None,
+        backend="codex",
+        event_counts=counts,
+    )
+
+
+def _run_agent_in_sandbox(
+    prompt: str,
+    *,
+    sandbox: Sandbox,
+    timeout_seconds: int,
+    backend: AgentBackend,
+) -> SubprocessResult:
+    """Dispatch to the claude or codex in-sandbox helper based on `backend`."""
+    if backend == "codex":
+        return _run_codex_in_sandbox(
+            prompt,
+            sandbox=sandbox,
+            timeout_seconds=timeout_seconds,
+        )
+    return _run_claude_in_sandbox(
+        prompt,
+        sandbox=sandbox,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -192,11 +338,13 @@ def code_task_node(state: GraphState) -> dict:
             ),
         }
 
+    backend = select_agent_backend()
     try:
-        sub = _run_claude_in_sandbox(
+        sub = _run_agent_in_sandbox(
             _build_prompt(state),
             sandbox=sandbox,
             timeout_seconds=spec.budget.max_runtime_seconds,
+            backend=backend,
         )
     finally:
         sandbox.teardown()

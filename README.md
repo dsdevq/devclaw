@@ -193,6 +193,89 @@ Kit (~2-5 min later):  📚 Reconned <repo>. Wrote ~/.life/projects/<slug>/recon
 
 See [`examples/`](./examples/) for real artifacts produced by this loop.
 
+## Agent backend (Claude vs Codex)
+
+Cognition is one CLI subprocess per task. Two backends live in tree:
+
+| Backend | CLI | Auth | Status |
+|---|---|---|---|
+| `claude` (**default**) | `claude --print` | `claude login` → `~/.claude/` | Default until 2026-06-15 |
+| `codex` | `codex exec --json` | `codex login` → `~/.codex/auth.json` | Ready, opt-in via env var |
+
+The Codex backend exists ahead of Anthropic's [2026-06-15 Agent SDK billing
+split][anthropic-billing-split]. Today, `claude --print` over a Pro/Max
+subscription draws from the interactive rate-limit pool — effectively
+unmetered for autonomous use. After 2026-06-15, Agent SDK / `claude -p` /
+Claude Code GitHub Actions move to a separate metered monthly credit
+allowance. The Codex backend uses the user's ChatGPT Pro subscription via
+OAuth (no API key, no metered allowance) and preserves the marginal-$0
+design intent. A follow-up PR closer to the cutover will flip the default;
+this release keeps `claude` as default so the migration is reversible.
+
+[anthropic-billing-split]: https://venturebeat.com/technology/anthropic-reinstates-openclaw-and-third-party-agent-usage-on-claude-subscriptions-with-a-catch
+
+### Selecting a backend
+
+Set `DEVCLAW_AGENT_BACKEND` in the gateway environment:
+
+```bash
+# Opt into Codex (pre-cutover testing)
+DEVCLAW_AGENT_BACKEND=codex
+
+# Pin a specific Codex model (default: gpt-5.3-codex)
+DEVCLAW_CODEX_MODEL=gpt-5.3-codex
+```
+
+`select_agent_backend()` in `orchestrator.runners._subprocess` resolves the
+value at runner-invocation time, so a restart of the orchestrator container
+picks up the change. Unknown values log a warning and fall back to the
+default.
+
+### Codex prerequisites
+
+The Codex CLI is a Rust binary distributed via npm. On the orchestrator host:
+
+```bash
+# 1. Install the CLI (pin a known-good version; the JSONL event schema is
+#    stable but has shifted across minor versions historically).
+npm install -g @openai/codex@^0.130
+
+# 2. Sign in once with the ChatGPT account that holds the Pro subscription.
+#    Writes an OAuth token to ~/.codex/auth.json; no API key needed.
+codex login
+
+# 3. Confirm the model is reachable on this account.
+codex exec --json --model gpt-5.3-codex "say hello" | head -5
+```
+
+### ClawHub Codex skill bundle (optional)
+
+The following ClawHub skills are companions to the Codex backend. They run as
+user-scope OpenClaw skills (not devclaw-internal nodes) and don't need to be
+wired into devclaw's pyproject.toml — install them into the operator's
+OpenClaw workspace:
+
+- `codex-sub-agents` — fan-out helper for parallel Codex runs.
+- `openai-codex-operator` — interactive wrapper around `codex exec`.
+- `codex-orchestration` — composition primitive for multi-step Codex flows.
+- `codex-orchestrator` — DAG-shaped orchestrator over Codex sessions.
+- `openai-codex-multi-oauth` — multi-account OAuth juggler when a single Pro
+  subscription's 5h / weekly window is at risk.
+- `codex-quota` — surfaces the current ChatGPT-side Codex quota state for
+  the `status` runner output.
+
+Install (per-user, one-shot):
+
+```bash
+clawhub install codex-sub-agents openai-codex-operator codex-orchestration \
+                codex-orchestrator openai-codex-multi-oauth codex-quota
+```
+
+These are not required for `DEVCLAW_AGENT_BACKEND=codex` to work — the
+adapter only depends on the `codex` binary itself. Install them if you want
+the on-demand quota status + multi-account fan-out in the OpenClaw chat
+surface.
+
 ## PC-side install (devclaw-mcp)
 
 Once devclaw is running on a VPS, you can file tasks against it from your PC
