@@ -80,6 +80,59 @@ _ACTIVE_STATUSES: set[TaskStatus] = {
     TaskStatus.dispatched_human,
 }
 
+# Doc-drift acceptance-criterion auto-append (Spec B of
+# proposals/2026-05-20-doc-drift-automation-three-rung).
+#
+# Whenever a code task's `verbatim_intent` mentions a user-visible surface —
+# README, docker-compose comments, dashboard UI, public CLI command/help text,
+# a service rename — the runner must keep README.md and compose comments in
+# sync with the post-change state. The intake step auto-appends a literal
+# acceptance criterion so the contract is in scope from the start; the
+# deterministic CI gate in spec A enforces it at PR time.
+#
+# Keep this keyword list deliberately small. False negatives are preferable
+# to false positives: the CI gate is the safety net.
+USER_VISIBLE_SURFACE_MARKERS: tuple[str, ...] = (
+    "readme",
+    "docker-compose",
+    "compose/",
+    "compose.yml",
+    "compose.yaml",
+    "dashboard ui",
+    "--help",
+    "public cli command",
+    "rename the service",
+    "service rename",
+)
+
+# The exact literal acceptance-criterion string. Must match what the
+# deterministic CI gate (`scripts/check-doc-drift.sh` in spec A) asserts —
+# anything that says the README and compose comments reflect post-change
+# state passes both intake and CI.
+DOC_DRIFT_ACCEPTANCE_CRITERION: str = (
+    "README.md and compose comments reflect the post-change state "
+    "(no stale service lists, command signatures, or claims)"
+)
+
+
+def _mentions_user_visible_surface(verbatim_intent: str) -> bool:
+    blob = (verbatim_intent or "").lower()
+    return any(marker in blob for marker in USER_VISIBLE_SURFACE_MARKERS)
+
+
+def _has_doc_drift_criterion(criteria: list[str]) -> bool:
+    """True if any criterion already promises README + compose stay in sync.
+
+    Loose match (case-insensitive): both "readme" and one of "compose"/"docker-compose"
+    appearing in the same criterion line is enough — we don't want to double-add a
+    criterion the operator (or Claude) already wrote in their own words.
+    """
+    for c in criteria or []:
+        low = c.lower()
+        if "readme" in low and ("compose" in low or "docker-compose" in low):
+            return True
+    return False
+
 
 def _spec_text_blob(spec: TaskSpec) -> str:
     parts = [spec.verbatim_intent or ""]
@@ -178,6 +231,7 @@ Decide:
   3. `target_branch` — default "main" unless intent specifies.
   4. `project` — `<slug>` ONLY if intent clearly names an existing project (lifekit-stack, devclaw, finance-sentry, lifekit, swarm). Else null.
   5. `acceptance_criteria` — testable / observable criteria, max 5. For code: criteria the verifier can check via bash. For research/draft: criteria like "findings.md exists" or "covers section X". For chore: similar to code.
+     If the intent touches a user-visible surface (README, docker-compose, dashboard UI, public CLI command name/help text, service rename), include a criterion of the form: "README.md and compose comments reflect the post-change state (no stale service lists, command signatures, or claims)" — intake also auto-appends this deterministically, so it's fine if you forget; don't double-list it.
   6. `budget_seconds` — default 1800 (30 min) for code/research/draft/chore. 3600 (60 min) for non-trivial research. Cap 14400 (4h).
 
 Print a JSON object to stdout on the LAST line of your output (and nothing after it):
@@ -234,6 +288,23 @@ def intake(
     except (ValidationError, ValueError) as exc:
         logger.warning("task_intake: claude output failed validation: %s", exc)
         return None
+
+    # Doc-drift auto-append: if the verbatim intent mentions a user-visible
+    # surface (README, compose, dashboard UI, public CLI command name, service
+    # rename), make sure the README/compose acceptance criterion is in scope.
+    # See USER_VISIBLE_SURFACE_MARKERS above. Spec B of proposal
+    # 2026-05-20-doc-drift-automation-three-rung.
+    if spec.kind == TaskKind.code and _mentions_user_visible_surface(verbatim_intent):
+        if not _has_doc_drift_criterion(spec.acceptance_criteria):
+            new_criteria = list(spec.acceptance_criteria) + [
+                DOC_DRIFT_ACCEPTANCE_CRITERION
+            ]
+            spec = spec.model_copy(update={"acceptance_criteria": new_criteria})
+            logger.info(
+                "task_intake: auto-appended doc-drift acceptance criterion for %s "
+                "(detected user-visible-surface marker)",
+                spec.task_id,
+            )
 
     # Parallel-frontend-conflict guard: code tasks that touch the React SPA
     # root from two parallel branches reliably produce merge conflicts (see

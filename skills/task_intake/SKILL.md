@@ -181,6 +181,47 @@ completed_at: null
 result_summary: null
 ```
 
+### 3.5 Doc-drift auto-append (kind: code, user-visible-surface intents)
+
+For `kind: code` specs, intake MUST detect whether the operator's `verbatim_intent` mentions a user-visible surface and, if so, auto-append a literal acceptance criterion ensuring README + compose stay in sync with the change.
+
+This is spec B of `~/.life/system/proposals.md#2026-05-20-doc-drift-automation-three-rung`. Spec A adds the deterministic CI gate (`scripts/check-doc-drift.sh` in lifekit-stack); this step is the *prevention* rung — it puts the gate's criterion in scope from the start so the runner knows it's part of the contract.
+
+#### Detection
+
+Lowercase `verbatim_intent` and check for any of the following bounded markers:
+
+- `readme`
+- `docker-compose`
+- `compose/`
+- `compose.yml` / `compose.yaml`
+- `dashboard ui`
+- `--help`
+- `public cli command`
+- `rename the service` / `service rename`
+
+The list is deliberately small. False negatives are preferable to false positives — the CI gate in spec A is the safety net, and we extend this list only on real misses, not speculatively.
+
+#### Auto-append behavior
+
+If at least one marker matches AND `spec.acceptance_criteria` does not already promise the same thing (i.e. no existing criterion mentions both `readme` AND `compose`), append this exact criterion to `acceptance_criteria`:
+
+```
+README.md and compose comments reflect the post-change state (no stale service lists, command signatures, or claims)
+```
+
+The string is literal — it must match what spec A's `check-doc-drift.sh` asserts so anything that passes intake also passes CI.
+
+If a matching criterion already exists (operator wrote one, Claude wrote one), do NOT double-add. Loose match: `"readme"` plus `"compose"`/`"docker-compose"` in the same criterion line.
+
+#### Examples
+
+- *"In dsdevq/lifekit-stack, fix the typo 'depployment' → 'deployment' in README.md"* → marker `readme` matches → auto-appended.
+- *"Add a new endpoint /health to the API"* → no marker → not appended.
+- *"Refactor the order-cache module to use Redis"* → no marker → not appended.
+- *"Rename the `worker-jobs` service in docker-compose"* → markers `docker-compose` (+ `service rename`) match → auto-appended.
+- *"Update the `--help` text for the `claw status` CLI command"* → marker `--help` matches → auto-appended.
+
 ### 4. Validate before writing
 
 Reject (don't create the spec) if any of:
