@@ -1,0 +1,26 @@
+# Weekly cognition-rung doc-drift audit.
+#
+# Pairs with the deterministic mechanism rung in target repos
+# (scripts/check-doc-drift.sh). This routine is the cognition rung: it
+# catches PROSE drift the mechanism rung can't parse — stale architecture
+# explanations, renamed tools the README still references by old name,
+# claims about behavior that no longer match code or compose.
+#
+# Marginal cost is $0 on a clean week: the skill short-circuits when the
+# target repo carries scripts/check-doc-drift.sh AND that script exits 0.
+# The LLM call only fires when the mechanism rung is absent or already
+# flagging drift.
+#
+# Output is a proposal entry (status: new (auto-surfaced)), not an
+# auto-PR. The operator grades proposals on their own cadence.
+
+name: doc-drift-audit
+kind: research_task
+description: |
+  Weekly LLM-driven prose-drift audit across configured target repos.
+  Short-circuits per-repo on presence + exit 0 of scripts/check-doc-drift.sh.
+skill: doc-drift-audit
+schedule:
+  cron: "0 4 * * 0"
+  timezone: UTC
+config_path: skills/doc-drift-audit/repos.yaml

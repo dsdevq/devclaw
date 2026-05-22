@@ -1,0 +1,21 @@
+# Target repos for the weekly doc-drift-audit cognition-rung pass.
+#
+# Each entry is a `<org>/<repo>` slug cloneable over HTTPS via the
+# gh-auth principal the orchestrator already uses. Adding a repo here is
+# the only config change needed to bring it under the audit — the skill
+# iterates this list.
+#
+# Per-repo override fields (all optional):
+#   readme:       relative path to the README treated as the prose-of-record
+#                 (default: README.md at the repo root)
+#   short_circuit:
+#     script:     relative path to the deterministic doc-drift script.
+#                 When present + exits 0, the LLM call is skipped for this
+#                 repo. (default: scripts/check-doc-drift.sh)
+#   proposals_dir: where to append a proposal entry on drift detection.
+#                 Relative to ~/.life/. (default:
+#                 projects/<repo-basename>/proposals/, falling back to
+#                 system/proposals.md if that dir does not exist)
+
+repos:
+  - slug: dsdevq/lifekit-stack
