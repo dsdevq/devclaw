@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import timezone
 
 from orchestrator.dispatch import now_utc
-from orchestrator.runners._subprocess import run_claude
+from orchestrator.runners._subprocess import run_agent, select_agent_backend
 from orchestrator.state.models import GraphState, Result, TaskKind
 
 
@@ -58,9 +58,15 @@ def research_task_node(state: GraphState) -> dict:
     # Output dir hint — falls back to /tmp if we can't infer from the spec
     output_dir_hint = f"/tmp/{spec.task_id}"
 
-    sub = run_claude(
+    backend = select_agent_backend()
+    sub = run_agent(
         _build_prompt(state, output_dir_hint),
         timeout_seconds=spec.budget.max_runtime_seconds,
+        backend=backend,
+        # research/draft/chore are read+write-a-markdown-file shaped; the
+        # codex sandbox still needs workspace-write so the runner can write
+        # findings.md / draft.md next to the spec.
+        codex_sandbox="workspace-write",
     )
 
     if not sub.ok:

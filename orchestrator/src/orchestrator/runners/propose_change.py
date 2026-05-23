@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import timezone
 
 from orchestrator.dispatch import now_utc
-from orchestrator.runners._subprocess import run_claude
+from orchestrator.runners._subprocess import run_agent, select_agent_backend
 from orchestrator.state.models import GraphState, Result
 
 
@@ -111,7 +111,13 @@ def propose_change_node(state: GraphState) -> dict:
             ),
         }
 
-    sub = run_claude(_build_prompt(state), timeout_seconds=spec.budget.max_runtime_seconds)
+    backend = select_agent_backend()
+    sub = run_agent(
+        _build_prompt(state),
+        timeout_seconds=spec.budget.max_runtime_seconds,
+        backend=backend,
+        codex_sandbox="workspace-write",
+    )
 
     if not sub.ok:
         return {
