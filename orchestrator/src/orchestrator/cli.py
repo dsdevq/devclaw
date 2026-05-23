@@ -301,6 +301,99 @@ def cmd_record_manual_merge(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_logs(args: argparse.Namespace) -> int:
+    """Return full context for a task: intent, acceptance criteria, result, blocker.
+
+    Emits a single-line JSON on stdout. Intended for MCP tool consumption.
+    """
+    life_root = Path(args.life).expanduser()
+    from orchestrator.status import lookup_task_status
+    from orchestrator.dispatch import load_spec
+
+    info = lookup_task_status(args.task_id, life_root=life_root)
+
+    # Enrich with spec fields if available.
+    spec_path = info.get("spec_path")
+    if spec_path:
+        try:
+            spec = load_spec(Path(spec_path))
+            info["intent"] = spec.verbatim_intent
+            info["acceptance_criteria"] = spec.acceptance_criteria
+            info["kind"] = spec.kind.value if spec.kind else None
+            info["target_repo"] = spec.target_repo
+            info["result_summary"] = spec.result_summary
+        except Exception as exc:  # noqa: BLE001
+            info["spec_load_error"] = str(exc)
+
+    # Enrich with result.json fields if available.
+    result_path = info.get("result_path")
+    if result_path:
+        try:
+            result = json.loads(Path(result_path).read_text())
+            info.setdefault("blocker", result.get("blocker"))
+            info.setdefault("pr_url", result.get("pr_url"))
+            info["result_detail"] = result
+        except Exception as exc:  # noqa: BLE001
+            info["result_load_error"] = str(exc)
+
+    print(json.dumps(info))
+    return 0
+
+
+def cmd_unblock(args: argparse.Namespace) -> int:
+    """Write a decision for a blocked task and reset it to ready for re-dispatch.
+
+    Writes `decision.yaml` next to the spec.yaml and flips the spec status
+    from `blocked` back to `ready` so the next sweep tick picks it up.
+    """
+    life_root = Path(args.life).expanduser()
+    from orchestrator.status import lookup_task_status
+    from orchestrator.dispatch import load_spec, persist_spec
+    from orchestrator.state.models import TaskStatus
+
+    info = lookup_task_status(args.task_id, life_root=life_root)
+    if info["state"] == "unknown":
+        print(json.dumps({"error": "task_not_found", "task_id": args.task_id}))
+        return 1
+
+    spec_path = info.get("spec_path")
+    if not spec_path:
+        print(json.dumps({"error": "spec_path_missing", "task_id": args.task_id}))
+        return 1
+
+    spec_path = Path(spec_path)
+    decision_path = spec_path.parent / "decision.yaml"
+    from datetime import datetime, timezone
+    decision_payload = {
+        "decision": args.decision,
+        "decided_at": datetime.now(timezone.utc).isoformat(),
+        "task_id": args.task_id,
+    }
+    decision_path.write_text(
+        __import__("yaml").safe_dump(decision_payload, sort_keys=False)
+    )
+
+    # Reset spec status to ready so the sweep re-dispatches it.
+    try:
+        spec = load_spec(spec_path)
+        spec = spec.model_copy(update={"status": TaskStatus.ready})
+        persist_spec(spec, spec_path)
+    except Exception as exc:  # noqa: BLE001
+        print(json.dumps({
+            "error": "spec_reset_failed",
+            "task_id": args.task_id,
+            "detail": str(exc),
+        }))
+        return 1
+
+    print(json.dumps({
+        "task_id": args.task_id,
+        "state": "ready",
+        "decision_written": str(decision_path),
+    }))
+    return 0
+
+
 def cmd_runs_tail(args: argparse.Namespace) -> int:
     """Pretty-print the last N entries of ~/.life/state/devclaw/runs.jsonl.
 
@@ -497,6 +590,32 @@ def main() -> int:
         help="root of the ~/.life store (default ~/.life)",
     )
     p_record_merge.set_defaults(func=cmd_record_manual_merge)
+
+    p_logs = sub.add_parser(
+        "logs",
+        help="get full task context: intent, acceptance criteria, result, blocker",
+        description=(
+            "Read spec.yaml + result.json for a task and emit a single-line JSON "
+            "with intent, acceptance_criteria, result_summary, blocker, pr_url. "
+            "Intended for MCP tool consumption and debugging."
+        ),
+    )
+    p_logs.add_argument("task_id", help="task id to inspect")
+    p_logs.add_argument("--life", default="~/.life", help="root of the ~/.life store")
+    p_logs.set_defaults(func=cmd_logs)
+
+    p_unblock = sub.add_parser(
+        "unblock",
+        help="provide a decision for a blocked task and reset it to ready",
+        description=(
+            "Write decision.yaml next to spec.yaml and flip status back to ready "
+            "so the next sweep tick re-dispatches the task with the decision attached."
+        ),
+    )
+    p_unblock.add_argument("task_id", help="task id to unblock")
+    p_unblock.add_argument("--decision", required=True, help="decision text (how to proceed)")
+    p_unblock.add_argument("--life", default="~/.life", help="root of the ~/.life store")
+    p_unblock.set_defaults(func=cmd_unblock)
 
     p_runs = sub.add_parser(
         "runs",
