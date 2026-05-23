@@ -242,13 +242,13 @@ def _wire_pr_review_calls(repo: str, pr_number: int, files: list[str], merge_sta
     calls: list[list[str]] = []
     pr_list_payload = [
         {"number": pr_number, "title": "atomic kit PR", "headRefName": f"kit/2026-05-19-x",
-         "baseRefName": "main", "author": {"login": "kit-bot"}, "body": "body"},
+         "baseRefName": "main", "author": {"login": "ci_failure_dispatcher"}, "body": "body"},
     ]
     pr_view_payload = {
         "mergeable": merge_state,
         "mergeStateStatus": "CLEAN",
         "statusCheckRollup": [{"name": "test", "conclusion": "SUCCESS"}],
-        "files": [{"path": p} for p in files],
+        "files": [{"path": p, "additions": 5} for p in files],
     }
 
     def gh(args: list[str]) -> subprocess.CompletedProcess:
@@ -351,6 +351,34 @@ def test_contract_class_pr_is_surfaced_not_merged(tmp_path: Path) -> None:
     assert report.merged == []
     assert any(a.action == "surface" for a in report.actions)
     assert any(c[:2] == ["pr", "comment"] for c in calls)
+
+
+def test_atomic_check_failure_surfaces_pr_without_cognition(tmp_path: Path) -> None:
+    """If is_truly_atomic returns False, the PR must be surfaced for review
+    and cognition must NOT be invoked — the deterministic gate is cheap and
+    runs first."""
+    life = tmp_path / "life"
+    life.mkdir()
+    _make_spec(life, "2026-05-19-x")
+    cfg = _write_config(life)
+    # A migration file fails rule 3.
+    gh, calls = _wire_pr_review_calls(
+        "dsdevq/devclaw", 77, files=["app/migrations/0001_init.py"],
+    )
+
+    report = prr.run_pr_review(
+        life,
+        config_path=cfg,
+        gh=gh,
+        verdict_fn=lambda _p: pytest.fail("cognition must not run when atomic_check fails"),
+    )
+
+    assert report.merged == []
+    assert not any(c[:2] == ["pr", "merge"] for c in calls)
+    surface_actions = [a for a in report.actions if a.action == "surface"]
+    assert surface_actions, "expected a surface action"
+    assert "atomic_check" in surface_actions[0].reason
+    assert "rule 3" in surface_actions[0].reason
 
 
 def test_skips_pr_with_no_matching_spec(tmp_path: Path) -> None:

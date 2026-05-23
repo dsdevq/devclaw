@@ -1,0 +1,94 @@
+# Tunable thresholds and path-pattern lists for the atomic-merge rule.
+#
+# Consumed by orchestrator.atomic_check.is_truly_atomic. Tweak here (no code
+# change) when an allowlist needs to grow, a threshold needs to relax, or a
+# dispatcher gets added.
+#
+# Patterns use glob syntax with `**` for cross-directory matches. Bare names
+# (no `/`) are matched against the basename so e.g. `package.json` matches
+# `app/package.json` in monorepos.
+
+# Rule 1 — File count cap. A truly atomic PR touches very few files.
+max_files_changed: 3
+
+# Rule 7 — Added-line cap, EXCLUDING test files (matched by test_patterns).
+# Tests can balloon the diff legitimately; production-source bloat is what we
+# guard against.
+max_added_lines: 150
+
+# Rule 2 — Public API surface. Edits here break downstream callers and
+# require coordinated rollout.
+public_api_patterns:
+  - "**/api/**"
+  - "**/public/**"
+  - "**/__init__.py"
+  - "**/openapi.yaml"
+  - "**/*.proto"
+  - "**/*.d.ts"
+  - "index.ts"
+  - "mod.rs"
+  - "lib.rs"
+
+# Rule 3 — Schema / migration changes. DB shape is global state; cannot be
+# rolled back by a revert.
+schema_patterns:
+  - "**/migrations/**"
+  - "**/schema/**"
+  - "**/*.sql"
+  - "**/prisma/schema.prisma"
+  - "**/alembic/versions/**"
+
+# Rule 4 — Dependency manifests / lockfiles. Supply-chain surface; needs
+# human eyes on every change.
+dep_patterns:
+  - "package.json"
+  - "package-lock.json"
+  - "pnpm-lock.yaml"
+  - "requirements*.txt"
+  - "pyproject.toml"
+  - "poetry.lock"
+  - "uv.lock"
+  - "Cargo.toml"
+  - "Cargo.lock"
+  - "go.mod"
+  - "go.sum"
+  - "*.csproj"
+  - "*.sln"
+  - "Gemfile.lock"
+
+# Rule 5 — CI / infra. Bad changes here can break the very gate that should
+# catch them.
+ci_infra_patterns:
+  - ".github/workflows/**"
+  - "Dockerfile*"
+  - "docker-compose*.yml"
+  - "**/.hadolint.yaml"
+  - "**/.pre-commit-config.yaml"
+  - "**/Makefile"
+  - "**/justfile"
+
+# Rule 6 — Security-sensitive paths. Auth, secrets, middleware, keys —
+# never auto-merge.
+security_patterns:
+  - "**/auth/**"
+  - "**/security/**"
+  - "**/middleware/**"
+  - "**/.env*"
+  - "**/secrets/**"
+  - "*.pem"
+  - "*.key"
+
+# Rule 7 — Test-file detector. Lines added in matching paths are excluded
+# from the added-line cap.
+test_patterns:
+  - "**/test*/**"
+  - "**/tests/**"
+  - "*_test.py"
+  - "*.test.ts"
+
+# Rule 8 — Source allowlist. Only PRs opened by one of these dispatcher
+# identities are auto-merge eligible. Add a new dispatcher here when it
+# proves itself; default-deny is the safe stance.
+allowlisted_dispatchers:
+  - "ci_failure_dispatcher"
+  - "scout"
