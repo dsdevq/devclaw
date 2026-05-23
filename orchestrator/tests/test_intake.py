@@ -511,6 +511,93 @@ def test_parallel_frontend_guard_override(tmp_path: Path):
     assert spec.notes == []
 
 
+# ─── Doc-drift auto-append (Spec B of doc-drift-automation-three-rung) ───────
+
+
+DOC_DRIFT_CRITERION = (
+    "README.md and compose comments reflect the post-change state "
+    "(no stale service lists, command signatures, or claims)"
+)
+
+
+def test_intake_appends_readme_criterion_when_intent_mentions_readme(tmp_path: Path):
+    """A code task whose verbatim_intent mentions a user-visible surface (README)
+    must have the doc-drift acceptance criterion auto-appended, even when Claude
+    forgot to include it.
+    """
+    life = tmp_path / "life"
+    life.mkdir()
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/lifekit-stack",
+                "target_branch": "main",
+                "project": None,
+                "acceptance_criteria": [
+                    "the typo is corrected in README.md",
+                    "PR opened against main",
+                ],
+                "budget_seconds": 900,
+            }
+        ),
+    ):
+        spec = intake(
+            "Fix the typo 'depployment' → 'deployment' in README.md.",
+            requester_route=RequesterRoute(channel="telegram", to="123"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    assert spec.kind == TaskKind.code
+    assert DOC_DRIFT_CRITERION in spec.acceptance_criteria
+    # AND the spec was persisted with the criterion baked in
+    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    reloaded = load_spec(flat_path)
+    assert DOC_DRIFT_CRITERION in reloaded.acceptance_criteria
+
+
+def test_intake_skips_readme_criterion_for_pure_internal_refactor(tmp_path: Path):
+    """A code task that's purely an internal refactor with no user-visible
+    surface in the verbatim_intent must NOT have the doc-drift criterion added.
+    """
+    life = tmp_path / "life"
+    life.mkdir()
+
+    with patch(
+        "orchestrator.intake.run_claude",
+        return_value=_mock_claude_json(
+            {
+                "kind": "code",
+                "target_repo": "dsdevq/lifekit-stack",
+                "target_branch": "main",
+                "project": None,
+                "acceptance_criteria": [
+                    "OrderCache uses Redis instead of in-memory dict",
+                    "unit tests pass",
+                ],
+                "budget_seconds": 1800,
+            }
+        ),
+    ):
+        spec = intake(
+            "Refactor the OrderCache module in orchestrator/cache.py to use Redis as the backing store.",
+            requester_route=RequesterRoute(channel="telegram", to="123"),
+            life_root=life,
+        )
+
+    assert spec is not None
+    assert spec.kind == TaskKind.code
+    assert DOC_DRIFT_CRITERION not in spec.acceptance_criteria
+    # No surface marker means no auto-append — the original criteria stand.
+    assert spec.acceptance_criteria == [
+        "OrderCache uses Redis instead of in-memory dict",
+        "unit tests pass",
+    ]
+
+
 def test_parallel_frontend_guard_no_false_positive_on_backend_only(tmp_path: Path):
     """Backend-only intents (no SPA-root markers) must not be serialized."""
     life = tmp_path / "life"
