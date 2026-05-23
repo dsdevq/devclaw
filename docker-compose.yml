@@ -1,0 +1,5 @@
+# subclaw docker-compose — empty placeholder.
+# Service definitions land in a follow-up TaskSpec once the queue-mgmt
+# container shape is settled. See ~/.life/system/proposals.md entry
+# 2026-05-22-event-driven-subagent-architecture for the two-fault-domain
+# split this file will encode.
