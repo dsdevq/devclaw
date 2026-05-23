@@ -33,11 +33,12 @@ What you get on top of that core loop:
 
 ```
 devclaw/
-├── skills/                  # 10 OpenClaw workspace skills (the runtime contract)
+├── skills/                  # 11 OpenClaw workspace skills (the runtime contract)
 │   ├── project_init/        # bootstrap a project (recon arm + Socratic arm)
 │   ├── propose_change/      # RFC drafting + ship-it/edit/reject flow
 │   ├── define_run/          # approved proposal → DAG (tasks + deps)
 │   ├── project_curator/     # heartbeat orchestrator (autonomous Run walk)
+│   ├── curator_drain/       # ~/.life/queue.jsonl → domain edits (allowlist auto-apply + supervised patch)
 │   ├── verify-task/         # independent QA evaluator
 │   ├── code-task/           # bounded autonomous coding runner
 │   ├── research-task/       # research / draft / chore runner
