@@ -30,7 +30,7 @@ import { StateStore } from "./state-store.js";
 import { TaskQueue } from "./task-queue.js";
 
 const SERVER_NAME = "devclaw";
-const SERVER_VERSION = "0.0.2";
+const SERVER_VERSION = "0.0.3";
 
 const DB_PATH = resolve(process.cwd(), process.env["DEVCLAW_DB"] ?? "devclaw.db");
 const TRANSPORT = process.env["DEVCLAW_TRANSPORT"] ?? "stdio";
@@ -52,7 +52,10 @@ function buildServer(): Server {
         description:
           "Submit a natural-language coding goal to be executed by OpenHands " +
           "in the given workspace_dir. Returns a task_id immediately; the " +
-          "task runs asynchronously. Poll get_status(task_id) for completion.",
+          "task runs asynchronously. Poll get_status(task_id) for completion. " +
+          "Use this for new features or open-ended changes; prefer fix_bug " +
+          "when the user describes an existing defect, and review_repository " +
+          "when only a read-only review is wanted.",
         inputSchema: {
           type: "object",
           properties: {
@@ -68,6 +71,54 @@ function buildServer(): Server {
             },
           },
           required: ["workspace_dir", "goal"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "fix_bug",
+        description:
+          "Submit a bug-fix task. Like implement_feature, but with a " +
+          "specialized prompt that biases OpenHands toward: reading existing " +
+          "code first, making the smallest change that fixes the bug, NOT " +
+          "refactoring unrelated code, and running the project's tests to " +
+          "confirm the fix. Returns task_id immediately.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            workspace_dir: { type: "string", description: "Workspace path." },
+            description: {
+              type: "string",
+              description:
+                "Bug description — what's broken, where if known, what " +
+                "should happen instead.",
+            },
+          },
+          required: ["workspace_dir", "description"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "review_repository",
+        description:
+          "Submit a READ-ONLY code review task. OpenHands inspects the " +
+          "workspace and writes a review report; it is prompt-instructed " +
+          "NOT to modify, create, or delete any files. Returns task_id " +
+          "immediately; final report appears in the task's result_json " +
+          "agent_output field once status=done.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            workspace_dir: { type: "string", description: "Workspace path." },
+            focus: {
+              type: "string",
+              description:
+                "Optional focus area for the review (e.g. 'security', " +
+                "'error handling', 'test coverage'). Leave empty for a " +
+                "general review.",
+              default: "",
+            },
+          },
+          required: ["workspace_dir"],
           additionalProperties: false,
         },
       },
@@ -89,13 +140,17 @@ function buildServer(): Server {
       {
         name: "list_tasks",
         description:
-          "List recent tasks, most-recent first. Optionally filter by status.",
+          "List recent tasks, most-recent first. Optionally filter by status or kind.",
         inputSchema: {
           type: "object",
           properties: {
             status: {
               type: "string",
               enum: ["pending", "running", "done", "failed"],
+            },
+            kind: {
+              type: "string",
+              enum: ["implement_feature", "fix_bug", "review_repository"],
             },
             limit: { type: "number", default: 20, minimum: 1, maximum: 1000 },
           },
@@ -115,7 +170,55 @@ function buildServer(): Server {
         if (!workspaceDir || !goal) {
           throw new Error("implement_feature requires workspace_dir and goal");
         }
-        const { taskId } = queue.submit({ workspaceDir, goal });
+        const { taskId } = queue.submit({
+          kind: "implement_feature",
+          workspaceDir,
+          goal,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ task_id: taskId, status: "pending" }, null, 2),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      case "fix_bug": {
+        const workspaceDir = String(args["workspace_dir"] ?? "");
+        const description = String(args["description"] ?? "");
+        if (!workspaceDir || !description) {
+          throw new Error("fix_bug requires workspace_dir and description");
+        }
+        const { taskId } = queue.submit({
+          kind: "fix_bug",
+          workspaceDir,
+          goal: description,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ task_id: taskId, status: "pending" }, null, 2),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      case "review_repository": {
+        const workspaceDir = String(args["workspace_dir"] ?? "");
+        const focus = String(args["focus"] ?? "general code review");
+        if (!workspaceDir) {
+          throw new Error("review_repository requires workspace_dir");
+        }
+        const { taskId } = queue.submit({
+          kind: "review_repository",
+          workspaceDir,
+          goal: focus,
+        });
         return {
           content: [
             {
@@ -156,9 +259,14 @@ function buildServer(): Server {
           | "done"
           | "failed"
           | undefined;
+        const kind = args["kind"] as
+          | "implement_feature"
+          | "fix_bug"
+          | "review_repository"
+          | undefined;
         const limit =
           typeof args["limit"] === "number" ? (args["limit"] as number) : 20;
-        const tasks = store.listTasks({ status, limit });
+        const tasks = store.listTasks({ status, kind, limit });
         return {
           content: [
             { type: "text" as const, text: JSON.stringify(tasks, null, 2) },

@@ -16,6 +16,7 @@ const __dirname = dirname(__filename);
 const PYTHON_RUNNER_DIR = resolve(__dirname, "..", "python-runner");
 
 export type OpenHandsRequest = {
+  kind: "implement_feature" | "fix_bug" | "review_repository";
   workspaceDir: string;
   goal: string;
 };
@@ -38,6 +39,7 @@ export async function runOpenHands(
   const runnerScript = resolve(PYTHON_RUNNER_DIR, "runner.py");
 
   const payload = JSON.stringify({
+    kind: req.kind,
     workspace_dir: req.workspaceDir,
     goal: req.goal,
   });

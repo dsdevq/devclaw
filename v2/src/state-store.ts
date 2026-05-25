@@ -13,8 +13,14 @@ import { mkdirSync, existsSync } from "node:fs";
 
 export type TaskStatus = "pending" | "running" | "done" | "failed";
 
+export type TaskKind =
+  | "implement_feature"
+  | "fix_bug"
+  | "review_repository";
+
 export type Task = {
   id: string;
+  kind: TaskKind;
   status: TaskStatus;
   workspaceDir: string;
   goal: string;
@@ -27,6 +33,7 @@ export type Task = {
 
 type TaskRow = {
   id: string;
+  kind: TaskKind;
   status: TaskStatus;
   workspace_dir: string;
   goal: string;
@@ -40,6 +47,7 @@ type TaskRow = {
 function rowToTask(row: TaskRow): Task {
   return {
     id: row.id,
+    kind: row.kind,
     status: row.status,
     workspaceDir: row.workspace_dir,
     goal: row.goal,
@@ -69,6 +77,7 @@ export class StateStore {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id              TEXT PRIMARY KEY,
+        kind            TEXT NOT NULL DEFAULT 'implement_feature',
         status          TEXT NOT NULL,
         workspace_dir   TEXT NOT NULL,
         goal            TEXT NOT NULL,
@@ -81,16 +90,33 @@ export class StateStore {
 
       CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
+      CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
     `);
+
+    // Forward-compat: if an older slice 2 DB exists without the `kind`
+    // column, add it. ALTER TABLE ADD COLUMN is cheap + idempotent-ish
+    // (we swallow the duplicate-column error).
+    try {
+      this.db.exec(
+        `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'implement_feature'`,
+      );
+    } catch {
+      // already exists
+    }
   }
 
-  createTask(input: { id: string; workspaceDir: string; goal: string }): void {
+  createTask(input: {
+    id: string;
+    kind: TaskKind;
+    workspaceDir: string;
+    goal: string;
+  }): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, status, workspace_dir, goal, created_at)
-         VALUES (?, 'pending', ?, ?, ?)`,
+        `INSERT INTO tasks (id, kind, status, workspace_dir, goal, created_at)
+         VALUES (?, ?, 'pending', ?, ?, ?)`,
       )
-      .run(input.id, input.workspaceDir, input.goal, Date.now());
+      .run(input.id, input.kind, input.workspaceDir, input.goal, Date.now());
   }
 
   markRunning(taskId: string): void {
@@ -127,20 +153,28 @@ export class StateStore {
     return row ? rowToTask(row) : null;
   }
 
-  listTasks(opts?: { status?: TaskStatus; limit?: number }): Task[] {
-    const status = opts?.status;
+  listTasks(opts?: {
+    status?: TaskStatus;
+    kind?: TaskKind;
+    limit?: number;
+  }): Task[] {
     const limit = opts?.limit ?? 100;
-    const rows = (
-      status
-        ? this.db
-            .prepare(
-              `SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC LIMIT ?`,
-            )
-            .all(status, limit)
-        : this.db
-            .prepare(`SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?`)
-            .all(limit)
-    ) as TaskRow[];
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (opts?.status) {
+      where.push("status = ?");
+      args.push(opts.status);
+    }
+    if (opts?.kind) {
+      where.push("kind = ?");
+      args.push(opts.kind);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tasks ${whereSql} ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(...args, limit) as TaskRow[];
     return rows.map(rowToTask);
   }
 

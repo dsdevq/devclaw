@@ -9,7 +9,13 @@
 import { randomUUID } from "node:crypto";
 
 import { runOpenHands } from "./openhands-runner.js";
-import { StateStore } from "./state-store.js";
+import { StateStore, TaskKind } from "./state-store.js";
+
+export type SubmitInput = {
+  kind: TaskKind;
+  workspaceDir: string;
+  goal: string;
+};
 
 export type SubmitResult = {
   taskId: string;
@@ -18,10 +24,11 @@ export type SubmitResult = {
 export class TaskQueue {
   constructor(private readonly store: StateStore) {}
 
-  submit(input: { workspaceDir: string; goal: string }): SubmitResult {
+  submit(input: SubmitInput): SubmitResult {
     const taskId = randomUUID();
     this.store.createTask({
       id: taskId,
+      kind: input.kind,
       workspaceDir: input.workspaceDir,
       goal: input.goal,
     });
@@ -34,13 +41,14 @@ export class TaskQueue {
     return { taskId };
   }
 
-  private async execute(
-    taskId: string,
-    input: { workspaceDir: string; goal: string },
-  ): Promise<void> {
+  private async execute(taskId: string, input: SubmitInput): Promise<void> {
     this.store.markRunning(taskId);
     try {
-      const result = await runOpenHands(input);
+      const result = await runOpenHands({
+        kind: input.kind,
+        workspaceDir: input.workspaceDir,
+        goal: input.goal,
+      });
       if (result.status === "ok") {
         this.store.markDone(taskId, JSON.stringify(result));
       } else {

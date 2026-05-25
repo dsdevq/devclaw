@@ -27,6 +27,37 @@ import sys
 import traceback
 
 
+_KIND_WRAPPERS = {
+    "implement_feature": (
+        # No wrapper for implement_feature — the user's goal IS the instruction.
+        "{goal}"
+    ),
+    "fix_bug": (
+        "You are fixing a bug. Read the existing code in the current workspace "
+        "first to understand what's there before making changes. Make the "
+        "smallest change that fixes the bug; do NOT refactor unrelated code. "
+        "After fixing, run whatever test suite exists in the project to confirm "
+        "your fix works.\n\n"
+        "Bug description:\n{goal}"
+    ),
+    "review_repository": (
+        "You are reviewing this repository — READ ONLY. Do NOT modify, create, "
+        "or delete any files in the workspace. Your only allowed actions are "
+        "reading files and running read-only inspection commands "
+        "(ls, cat, grep, git log, git diff, etc.). At the end, write a clear "
+        "review report to STDOUT in your final message covering: codebase "
+        "summary, concerns or bugs you noticed, suggested improvements. If a "
+        "specific focus area was provided, address that first.\n\n"
+        "Review focus (if any):\n{goal}"
+    ),
+}
+
+
+def _wrap_goal(kind: str, goal: str) -> str:
+    template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
+    return template.format(goal=goal)
+
+
 def _refuse_api_key() -> None:
     """Refuse to run if an API key snuck into the env — preserves the
     Pro-subscription cost model (memory: pro-subscription-is-the-design)."""
@@ -62,6 +93,7 @@ def main() -> None:
 
     workspace_dir = req.get("workspace_dir")
     goal = req.get("goal")
+    kind = req.get("kind", "implement_feature")
     if not workspace_dir or not goal:
         print(
             json.dumps(
@@ -72,6 +104,23 @@ def main() -> None:
             )
         )
         sys.exit(2)
+
+    if kind not in ("implement_feature", "fix_bug", "review_repository"):
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error": f"unknown kind: {kind}",
+                }
+            )
+        )
+        sys.exit(2)
+
+    # Wrap the user's goal with kind-specific operating instructions. The
+    # OpenHands ACP-driven Claude session reads this as the user message,
+    # so prepending instructions here is the cheapest way to bias behavior
+    # without a custom system prompt.
+    wrapped_goal = _wrap_goal(kind, goal)
 
     os.makedirs(workspace_dir, exist_ok=True)
 
@@ -115,7 +164,7 @@ def main() -> None:
                 },
             )
             conversation = Conversation(agent=agent, workspace=workspace_dir)
-            conversation.send_message(goal)
+            conversation.send_message(wrapped_goal)
             conversation.run()
             agent.close()
     except Exception as exc:
