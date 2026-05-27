@@ -1,10 +1,15 @@
 """devclaw-orchestrator CLI — entry points for dispatching specs and running the periodic sweep.
 
 Usage:
-    devclaw-orchestrator dispatch <spec.yaml> [--db ~/.life/orchestrator.sqlite] [--thread-id <id>]
+    devclaw-orchestrator dispatch <spec.yaml> [--db <state_dir>/orchestrator.sqlite] [--thread-id <id>]
     devclaw-orchestrator sweep [--life ~/.life] [--quiet]
 
 The `sweep` subcommand is intended to be cron-fired every 15 minutes (the same cadence as the markdown `task_dispatch_15m`).
+
+Runtime state (orchestrator.sqlite, flat-bucket tasks/, intake_index.json) lives
+under LIFEKIT_STATE_DIR (default `~/.local/state/lifekit/`). Knowledge (passed via
+--life) is the read-mostly `~/.life/` vault. See `system/proposals.md →
+2026-05-27-runtime-knowledge-split`.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from orchestrator.events import (
 from orchestrator.graph import build_task_graph, postgres_checkpointer, sqlite_checkpointer
 from orchestrator.intake import intake_from_prose
 from orchestrator.notify import notify_telegram
+from orchestrator.paths import state_dir
 from orchestrator.run_summary import (
     format_tail,
     read_summaries,
@@ -45,10 +51,16 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
     spec = load_spec(spec_path)
 
-    if args.db.startswith(("postgres://", "postgresql://")):
-        checkpointer = postgres_checkpointer(args.db)
+    db = args.db
+    if db is None:
+        db_path = state_dir() / "orchestrator.sqlite"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        db = str(db_path)
+
+    if db.startswith(("postgres://", "postgresql://")):
+        checkpointer = postgres_checkpointer(db)
     else:
-        checkpointer = sqlite_checkpointer(Path(args.db).expanduser())
+        checkpointer = sqlite_checkpointer(Path(db).expanduser())
     graph = build_task_graph(checkpointer=checkpointer)
 
     config = {"configurable": {"thread_id": args.thread_id or spec.task_id}}
@@ -469,10 +481,12 @@ def main() -> int:
     p_dispatch.add_argument("spec", help="path to a spec.yaml")
     p_dispatch.add_argument(
         "--db",
-        default="~/.life/orchestrator.sqlite",
+        default=None,
         help=(
             "Checkpointer location: a SQLite file path, or a "
-            "postgres://... / postgresql://... connection string for the Postgres backend."
+            "postgres://... / postgresql://... connection string for the Postgres backend. "
+            "Default: <LIFEKIT_STATE_DIR>/orchestrator.sqlite "
+            "(falls back to ~/.local/state/lifekit/orchestrator.sqlite)."
         ),
     )
     p_dispatch.add_argument(

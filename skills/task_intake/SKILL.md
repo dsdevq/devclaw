@@ -1,6 +1,6 @@
 ---
 name: task_intake
-description: "Turn a natural-language intent from the operator into a fully-formed Task Spec at `~/.life/tasks/<id>/spec.yaml`. Invoke when the operator says something like 'overnight: ...', 'task: ...', 'tonight please do X', 'log a task to ...', 'queue up: ...', OR when his conversational turn is unambiguously a delegation rather than a chat (e.g. 'research X and draft Y', 'implement Z in repo W'). NEVER use this skill for chitchat, ambient questions, food logs, or anything that doesn't have a clear deliverable. After writing the spec, confirm with the operator in one short line."
+description: "Turn a natural-language intent from the operator into a fully-formed Task Spec at `~/.life-state/tasks/<id>/spec.yaml`. Invoke when the operator says something like 'overnight: ...', 'task: ...', 'tonight please do X', 'log a task to ...', 'queue up: ...', OR when his conversational turn is unambiguously a delegation rather than a chat (e.g. 'research X and draft Y', 'implement Z in repo W'). NEVER use this skill for chitchat, ambient questions, food logs, or anything that doesn't have a clear deliverable. After writing the spec, confirm with the operator in one short line."
 ---
 
 # task_intake
@@ -126,7 +126,7 @@ This lets the runner (and, in 5.7c, the verifier) load the proposal context.
 
 Extract:
 - **What's the deliverable?** Be concrete. ("A PR adding STATUS.md with phase status.")
-- **Where does it live?** For code: which repo. For research/draft: where does the output go (default: `~/.life/tasks/<id>/output/`).
+- **Where does it live?** For code: which repo. For research/draft: where does the output go (default: `~/.life-state/tasks/<id>/output/`).
 - **What constitutes done?** Reframe as 2–5 acceptance criteria, each a single testable bullet.
 - **What's the rough size?** Pick a `budget.max_runtime_seconds`:
   - small chore / typo fix: 900 (15 min)
@@ -194,11 +194,11 @@ Reject (don't create the spec) if any of:
 
 ```bash
 TASK_ID="<from above>"
-mkdir -p ~/.life/tasks/$TASK_ID
+mkdir -p ~/.life-state/tasks/$TASK_ID
 # Write spec.yaml using Write tool with the YAML content above.
 ```
 
-Append the first event to `~/.life/tasks/<task_id>/run.log.jsonl`:
+Append the first event to `~/.life-state/tasks/<task_id>/run.log.jsonl`:
 ```json
 {"ts":"<iso>","actor":"task_intake","event":"spec_created","kind":"<kind>","budget_seconds":<n>}
 ```
@@ -245,4 +245,4 @@ the operator: *"Add a feature."*
 
 - Not for status updates ("how's task X going?") — that's just chat; the operator can `cat result.json`.
 - Not for editing existing tasks — see `task_update`.
-- Not for ambient capture (food logs, mood notes) — those go to `~/.life/queue.jsonl` directly via the curator pattern, not as autonomous tasks.
+- Not for ambient capture (food logs, mood notes) — those go to `~/.life-state/queue.jsonl` directly via the curator pattern, not as autonomous tasks.

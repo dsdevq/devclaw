@@ -1,6 +1,6 @@
 ---
 name: research-task
-description: "Execute a bounded `kind: research|draft|chore` Task Spec — research deeply, draft documents, or do focused chores against acceptance criteria. Writes artifacts to `~/.life/tasks/<id>/output/` and (when the work proposes domain mutations) patches to `~/.life/.curator-proposed/`. Triggered by the task_dispatch skill OR invoked directly with a spec path. Mirror of `code-task` for non-code work. Not for multi-day work."
+description: "Execute a bounded `kind: research|draft|chore` Task Spec — research deeply, draft documents, or do focused chores against acceptance criteria. Writes artifacts to `~/.life-state/tasks/<id>/output/` and (when the work proposes domain mutations) patches to `~/.life-state/.curator-proposed/`. Triggered by the task_dispatch skill OR invoked directly with a spec path. Mirror of `code-task` for non-code work. Not for multi-day work."
 ---
 
 # research-task
@@ -9,15 +9,15 @@ You are running a bounded autonomous **research, draft, or chore** task. The Tas
 
 ## Hard behavioral rules
 
-- **Never edit `~/.life/domains/` directly.** Curator owns that surface. If your work concludes with a domain mutation, write a patch under `~/.life/.curator-proposed/<task_id>.patch` and append an event to `~/.life/queue.jsonl` so curator picks it up.
-- **Never edit spec.yaml.** Read the `task_update` skill before changing anything in `~/.life/tasks/<id>/`. The only files you create directly are inside `~/.life/tasks/<id>/output/`, plus the one-shot `result.json` and append-only `run.log.jsonl`.
+- **Never edit `~/.life/domains/` directly.** Curator owns that surface. If your work concludes with a domain mutation, write a patch under `~/.life-state/.curator-proposed/<task_id>.patch` and append an event to `~/.life-state/queue.jsonl` so curator picks it up.
+- **Never edit spec.yaml.** Read the `task_update` skill before changing anything in `~/.life-state/tasks/<id>/`. The only files you create directly are inside `~/.life-state/tasks/<id>/output/`, plus the one-shot `result.json` and append-only `run.log.jsonl`.
 - **All scratch work happens in `/tmp/<task_id>/`.** Don't clutter `~/` or `~/.life/`.
 - **Stay inside the time budget.** The spec carries `budget.max_runtime_seconds`. If you're approaching the limit, stop, save partial progress to `output/PARTIAL.md`, and write `result.json` with `status: blocked`, `blocker: time_budget_exceeded`, and a clear `to_resume` note.
 - **No clarifying questions.** If the spec is ambiguous, make a defensible call and document it in `result.json.notes`.
 
 ## Inputs
 
-When invoked, you'll be given a path like `~/.life/tasks/<task_id>/spec.yaml`. The frontmatter you care about:
+When invoked, you'll be given a path like `~/.life-state/tasks/<task_id>/spec.yaml`. The frontmatter you care about:
 
 ```yaml
 task_id: 2026-05-17-<slug>-<rand>
@@ -33,7 +33,7 @@ output_destination: optional            # one of:
                                         #   inline       — content in result.json.output
                                         #   file:<path>  — write to that exact path
                                         #   curator      — patch to .curator-proposed/
-                                        #   tasks-output — file under ~/.life/tasks/<id>/output/ (DEFAULT)
+                                        #   tasks-output — file under ~/.life-state/tasks/<id>/output/ (DEFAULT)
 ```
 
 If the spec is missing `kind` or the kind isn't `research|draft|chore`, write `result.json` with `status: blocked`, `blocker: unsupported_kind`, and stop — don't try to do code work; that's `code-task`.
@@ -46,7 +46,7 @@ If the spec is missing `kind` or the kind isn't `research|draft|chore`, write `r
 TASK_ID="<from spec.yaml>"
 SCRATCH="/tmp/${TASK_ID}"
 mkdir -p "$SCRATCH"
-mkdir -p ~/.life/tasks/${TASK_ID}/output
+mkdir -p ~/.life-state/tasks/${TASK_ID}/output
 ```
 
 Append to `run.log.jsonl`:
@@ -68,10 +68,10 @@ Append meaningful events to `run.log.jsonl` as you go (`event: source_fetched`, 
 
 Where the result lands depends on the spec's `output_destination` (default: `tasks-output`):
 
-- **`tasks-output`** (default): write your artifact(s) to `~/.life/tasks/<task_id>/output/<filename>.md` (or `.json`, `.yaml` — match the content). Reference each file in `result.json.artifacts`.
+- **`tasks-output`** (default): write your artifact(s) to `~/.life-state/tasks/<task_id>/output/<filename>.md` (or `.json`, `.yaml` — match the content). Reference each file in `result.json.artifacts`.
 - **`inline`**: put the full content in `result.json.output` (string field). Use for short results that don't deserve a file.
 - **`file:<path>`**: write to the absolute path the spec specifies. Path must be inside `~/.life/` — refuse otherwise.
-- **`curator`**: write a unified-diff patch to `~/.life/.curator-proposed/<task_id>.patch` AND append a notification to `~/.life/queue.jsonl`:
+- **`curator`**: write a unified-diff patch to `~/.life-state/.curator-proposed/<task_id>.patch` AND append a notification to `~/.life-state/queue.jsonl`:
    ```json
    {"ts":"<iso>","actor":"research-task","event":"curator_patch_proposed","task_id":"<id>","patch_path":".curator-proposed/<id>.patch"}
    ```
@@ -84,7 +84,7 @@ Where the result lands depends on the spec's `output_destination` (default: `tas
   "kind": "<kind>",
   "status": "done",
   "completed_at": "<iso>",
-  "artifacts": ["~/.life/tasks/<id>/output/research.md"],
+  "artifacts": ["~/.life-state/tasks/<id>/output/research.md"],
   "sources_consulted": ["https://...", "..."],
   "notes": "<defensible-call documentation, drive-by observations, follow-ups>",
   "runtime_seconds": 1832
@@ -103,7 +103,7 @@ Always include `to_resume` with 1–2 sentences naming the next concrete step a 
 
 ### 5. Update the spec, then announce — IN THAT ORDER
 
-**5a. Update spec.yaml.** Read `~/.openclaw/workspace/skills/task_update/SKILL.md` first for the rules. Then use the Edit tool to mutate the spec at `~/.life/tasks/<task_id>/spec.yaml`:
+**5a. Update spec.yaml.** Read `~/.openclaw/workspace/skills/task_update/SKILL.md` first for the rules. Then use the Edit tool to mutate the spec at `~/.life-state/tasks/<task_id>/spec.yaml`:
 
 ```yaml
 # change these EXACT fields (do not rewrite the whole file):
@@ -112,7 +112,7 @@ completed_at: <iso8601 UTC>
 result_summary: <one line, ≤200 chars>
 ```
 
-REQUIRED — without it the dispatch cron will re-pick the spec on its next tick and re-run forever. Also append a `spec_updated` event to `~/.life/tasks/<task_id>/run.log.jsonl`.
+REQUIRED — without it the dispatch cron will re-pick the spec on its next tick and re-run forever. Also append a `spec_updated` event to `~/.life-state/tasks/<task_id>/run.log.jsonl`.
 
 **5b. Announce via the shell.** Run via Bash (NOT the message-tool, NOT auto-announce — those are unreliable in cron-spawned sub-agent contexts on this stack):
 
@@ -134,21 +134,21 @@ No screenshots, no logs in chat. Keep the chat surface clean — detail lives in
 2. WebFetch Hetzner pricing + each SKU spec. Note prices in EUR.
 3. Cross-check with the Whisper and Ollama docs for RAM/CPU minimums.
 4. Synthesize: rank, justify, recommend.
-5. Output: `~/.life/tasks/<id>/output/comparison.md` with table + 1-paragraph recommendation.
+5. Output: `~/.life-state/tasks/<id>/output/comparison.md` with table + 1-paragraph recommendation.
 
 ### Draft — "blog post on lifekit, ~1200 words, voice matching the existing PLAN.md"
 
 1. Read `~/projects/lifekit/README.md`, `~/.life/PLAN.md`, the existing blog-draft.md (per CLAUDE.md it's already committed).
 2. Identify the operator's voice patterns from PLAN.md (terse, direct, no academic preamble).
 3. Outline → draft → tighten.
-4. Output: `~/.life/tasks/<id>/output/blog-draft.md`.
+4. Output: `~/.life-state/tasks/<id>/output/blog-draft.md`.
 
 ### Chore — "audit ~/.life/system/ for orphaned files referenced by nothing"
 
 1. List files in `~/.life/system/`.
 2. Grep `~/.life/` for references to each.
 3. Build a report: file → refs (or "no refs found").
-4. Output: `~/.life/tasks/<id>/output/orphan-audit.md`. Don't auto-delete — propose, don't act.
+4. Output: `~/.life-state/tasks/<id>/output/orphan-audit.md`. Don't auto-delete — propose, don't act.
 
 ## Failure modes
 
