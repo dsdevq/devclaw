@@ -24,6 +24,7 @@ export type Task = {
   status: TaskStatus;
   workspaceDir: string;
   goal: string;
+  notifyUrl: string | null;
   resultJson: string | null;
   error: string | null;
   createdAt: number;
@@ -37,6 +38,7 @@ type TaskRow = {
   status: TaskStatus;
   workspace_dir: string;
   goal: string;
+  notify_url: string | null;
   result_json: string | null;
   error: string | null;
   created_at: number;
@@ -51,6 +53,7 @@ function rowToTask(row: TaskRow): Task {
     status: row.status,
     workspaceDir: row.workspace_dir,
     goal: row.goal,
+    notifyUrl: row.notify_url,
     resultJson: row.result_json,
     error: row.error,
     createdAt: row.created_at,
@@ -81,6 +84,7 @@ export class StateStore {
         status          TEXT NOT NULL,
         workspace_dir   TEXT NOT NULL,
         goal            TEXT NOT NULL,
+        notify_url      TEXT,
         result_json     TEXT,
         error           TEXT,
         created_at      INTEGER NOT NULL,
@@ -93,15 +97,18 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
     `);
 
-    // Forward-compat: if an older slice 2 DB exists without the `kind`
-    // column, add it. ALTER TABLE ADD COLUMN is cheap + idempotent-ish
-    // (we swallow the duplicate-column error).
-    try {
-      this.db.exec(
-        `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'implement_feature'`,
-      );
-    } catch {
-      // already exists
+    // Forward-compat ALTERs for DBs created by older slices. Each is
+    // idempotent — swallow duplicate-column errors. Keep one ALTER per
+    // added column so the order of slices stays explicit.
+    for (const sql of [
+      `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'implement_feature'`,
+      `ALTER TABLE tasks ADD COLUMN notify_url TEXT`,
+    ]) {
+      try {
+        this.db.exec(sql);
+      } catch {
+        // column already exists
+      }
     }
   }
 
@@ -110,13 +117,21 @@ export class StateStore {
     kind: TaskKind;
     workspaceDir: string;
     goal: string;
+    notifyUrl?: string | null;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, kind, status, workspace_dir, goal, created_at)
-         VALUES (?, ?, 'pending', ?, ?, ?)`,
+        `INSERT INTO tasks (id, kind, status, workspace_dir, goal, notify_url, created_at)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
       )
-      .run(input.id, input.kind, input.workspaceDir, input.goal, Date.now());
+      .run(
+        input.id,
+        input.kind,
+        input.workspaceDir,
+        input.goal,
+        input.notifyUrl ?? null,
+        Date.now(),
+      );
   }
 
   markRunning(taskId: string): void {

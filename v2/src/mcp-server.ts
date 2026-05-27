@@ -55,7 +55,8 @@ function buildServer(): Server {
         description:
           "Submit a natural-language coding goal to be executed by OpenHands " +
           "in the given workspace_dir. Returns a task_id immediately; the " +
-          "task runs asynchronously. Poll get_status(task_id) for completion. " +
+          "task runs asynchronously. Poll get_status(task_id) for completion, " +
+          "or pass notify_url to be pushed the result instead of polling. " +
           "Use this for new features or open-ended changes; prefer fix_bug " +
           "when the user describes an existing defect, and review_repository " +
           "when only a read-only review is wanted.",
@@ -72,6 +73,14 @@ function buildServer(): Server {
               type: "string",
               description: "Natural-language description of what to do.",
             },
+            notify_url: {
+              type: "string",
+              description:
+                "Optional. URL to POST the task row (same shape as " +
+                "get_status returns) to once the task reaches a terminal " +
+                "state (done | failed). Bounded retries (1s/2s/4s) on " +
+                "non-2xx or network error. Use this to avoid polling.",
+            },
           },
           required: ["workspace_dir", "goal"],
           additionalProperties: false,
@@ -84,7 +93,8 @@ function buildServer(): Server {
           "specialized prompt that biases OpenHands toward: reading existing " +
           "code first, making the smallest change that fixes the bug, NOT " +
           "refactoring unrelated code, and running the project's tests to " +
-          "confirm the fix. Returns task_id immediately.",
+          "confirm the fix. Returns task_id immediately. Accepts the same " +
+          "optional notify_url as implement_feature.",
         inputSchema: {
           type: "object",
           properties: {
@@ -94,6 +104,12 @@ function buildServer(): Server {
               description:
                 "Bug description — what's broken, where if known, what " +
                 "should happen instead.",
+            },
+            notify_url: {
+              type: "string",
+              description:
+                "Optional. URL to POST the final task row to. See " +
+                "implement_feature for full semantics.",
             },
           },
           required: ["workspace_dir", "description"],
@@ -107,7 +123,8 @@ function buildServer(): Server {
           "workspace and writes a review report; it is prompt-instructed " +
           "NOT to modify, create, or delete any files. Returns task_id " +
           "immediately; final report appears in the task's result_json " +
-          "agent_output field once status=done.",
+          "agent_output field once status=done. Accepts the same optional " +
+          "notify_url as implement_feature.",
         inputSchema: {
           type: "object",
           properties: {
@@ -119,6 +136,12 @@ function buildServer(): Server {
                 "'error handling', 'test coverage'). Leave empty for a " +
                 "general review.",
               default: "",
+            },
+            notify_url: {
+              type: "string",
+              description:
+                "Optional. URL to POST the final task row to. See " +
+                "implement_feature for full semantics.",
             },
           },
           required: ["workspace_dir"],
@@ -170,6 +193,10 @@ function buildServer(): Server {
       case "implement_feature": {
         const workspaceDir = String(args["workspace_dir"] ?? "");
         const goal = String(args["goal"] ?? "");
+        const notifyUrl =
+          typeof args["notify_url"] === "string" && args["notify_url"]
+            ? (args["notify_url"] as string)
+            : null;
         if (!workspaceDir || !goal) {
           throw new Error("implement_feature requires workspace_dir and goal");
         }
@@ -177,6 +204,7 @@ function buildServer(): Server {
           kind: "implement_feature",
           workspaceDir,
           goal,
+          notifyUrl,
         });
         return {
           content: [
@@ -192,6 +220,10 @@ function buildServer(): Server {
       case "fix_bug": {
         const workspaceDir = String(args["workspace_dir"] ?? "");
         const description = String(args["description"] ?? "");
+        const notifyUrl =
+          typeof args["notify_url"] === "string" && args["notify_url"]
+            ? (args["notify_url"] as string)
+            : null;
         if (!workspaceDir || !description) {
           throw new Error("fix_bug requires workspace_dir and description");
         }
@@ -199,6 +231,7 @@ function buildServer(): Server {
           kind: "fix_bug",
           workspaceDir,
           goal: description,
+          notifyUrl,
         });
         return {
           content: [
@@ -214,6 +247,10 @@ function buildServer(): Server {
       case "review_repository": {
         const workspaceDir = String(args["workspace_dir"] ?? "");
         const focus = String(args["focus"] ?? "general code review");
+        const notifyUrl =
+          typeof args["notify_url"] === "string" && args["notify_url"]
+            ? (args["notify_url"] as string)
+            : null;
         if (!workspaceDir) {
           throw new Error("review_repository requires workspace_dir");
         }
@@ -221,6 +258,7 @@ function buildServer(): Server {
           kind: "review_repository",
           workspaceDir,
           goal: focus,
+          notifyUrl,
         });
         return {
           content: [
