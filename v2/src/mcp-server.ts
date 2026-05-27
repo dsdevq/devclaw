@@ -23,7 +23,6 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createServer } from "node:http";
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { StateStore } from "./state-store.js";
@@ -35,6 +34,10 @@ const SERVER_VERSION = "0.0.3";
 const DB_PATH = resolve(process.cwd(), process.env["DEVCLAW_DB"] ?? "devclaw.db");
 const TRANSPORT = process.env["DEVCLAW_TRANSPORT"] ?? "stdio";
 const HTTP_PORT = Number(process.env["DEVCLAW_PORT"] ?? "8000");
+// Bind address. Defaults to 0.0.0.0 so sibling containers in the same compose
+// network (e.g. openclaw-gateway) can reach the MCP endpoint. Set
+// DEVCLAW_HOST=127.0.0.1 to restrict to the host loopback.
+const HTTP_HOST = process.env["DEVCLAW_HOST"] ?? "0.0.0.0";
 
 const store = new StateStore(DB_PATH);
 const queue = new TaskQueue(store);
@@ -291,21 +294,35 @@ async function runStdio(): Promise<void> {
 }
 
 async function runHttp(): Promise<void> {
-  // Streamable HTTP transport. The MCP SDK handles the JSON-RPC + SSE
-  // framing; we provide the underlying Node http server.
+  // Streamable HTTP transport, stateless, **new Server + transport per
+  // request**. Two SDK invariants force this exact shape:
   //
-  // One server instance + one transport instance per process is the simple
-  // path. The transport handles concurrent requests via sessionId routing.
-  const server = buildServer();
-
-  // sessionIdGenerator: undefined disables stateful sessions — every request
-  // is independent. Suits our short-lived MCP tool calls; revisit if Kit
-  // needs streaming responses.
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-  });
-
-  await server.connect(transport);
+  //  1. Stateful mode (sessionIdGenerator set) with a shared transport
+  //     rejects the second client's initialize with HTTP 400
+  //     "Server already initialized" (webStandardStreamableHttp.js:425),
+  //     and any non-initialize call without the original Mcp-Session-Id
+  //     with "Mcp-Session-Id header is required" (line 599). That was
+  //     the original bug — openclaw-gateway hit it on every reconnect.
+  //
+  //  2. Stateless mode (sessionIdGenerator undefined) is the obvious
+  //     alternative, but the SDK explicitly forbids reusing a stateless
+  //     transport across requests:
+  //
+  //       // webStandardStreamableHttp.js:136-141
+  //       if (!this.sessionIdGenerator && this._hasHandledRequest) {
+  //         throw new Error('Stateless transport cannot be reused …');
+  //       }
+  //
+  //     The throw surfaces through hono's getRequestListener as a silent
+  //     HTTP 500 on the 2nd POST of any client (e.g. the
+  //     notifications/initialized that the SDK client sends right after
+  //     initialize). So a singleton-stateless server is also broken.
+  //
+  // Therefore: new Server + new transport per request, stateless mode.
+  // Matches the SDK's own example (simpleStatelessStreamableHttp.js).
+  // Per-request cost is negligible — `store` and `queue` are module-level
+  // so SQLite + in-flight task state stay shared; only the protocol
+  // framing objects are recreated.
 
   const httpServer = createServer(async (httpReq, httpRes) => {
     if (httpReq.url === "/health") {
@@ -320,8 +337,22 @@ async function runHttp(): Promise<void> {
       return;
     }
 
-    // The transport handles MCP protocol on /mcp.
+    let server: Server | undefined;
+    let transport: StreamableHTTPServerTransport | undefined;
     try {
+      server = buildServer();
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      await server.connect(transport);
+
+      // Tear down per-request server/transport when the response closes.
+      // Avoids leaking abort/protocol listeners across requests.
+      httpRes.on("close", () => {
+        transport?.close().catch(() => {});
+        server?.close().catch(() => {});
+      });
+
       await transport.handleRequest(httpReq, httpRes);
     } catch (err) {
       process.stderr.write(`http handler error: ${(err as Error).message}\n`);
@@ -329,13 +360,15 @@ async function runHttp(): Promise<void> {
         httpRes.writeHead(500);
         httpRes.end();
       }
+      transport?.close().catch(() => {});
+      server?.close().catch(() => {});
     }
   });
 
   await new Promise<void>((resolveListen) => {
-    httpServer.listen(HTTP_PORT, "127.0.0.1", () => {
+    httpServer.listen(HTTP_PORT, HTTP_HOST, () => {
       process.stderr.write(
-        `${SERVER_NAME} v${SERVER_VERSION} ready (http://127.0.0.1:${HTTP_PORT}/mcp, db=${DB_PATH})\n`,
+        `${SERVER_NAME} v${SERVER_VERSION} ready (http://${HTTP_HOST}:${HTTP_PORT}/mcp, db=${DB_PATH})\n`,
       );
       resolveListen();
     });

@@ -14,6 +14,7 @@
     "test:client": "tsx test/client.ts",
     "test:async": "tsx test/runtime-async.ts",
     "test:fix-bug": "tsx test/runtime-fix-bug.ts",
+    "test:http-multi": "tsx test/runtime-http-multi-client.ts",
     "python:install": "python3 -m venv python-runner/.venv && python-runner/.venv/bin/pip install -q -r python-runner/requirements.txt"
   },
   "dependencies": {
