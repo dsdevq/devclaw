@@ -294,22 +294,35 @@ async function runStdio(): Promise<void> {
 }
 
 async function runHttp(): Promise<void> {
-  // Streamable HTTP transport in stateless mode.
+  // Streamable HTTP transport, stateless, **new Server + transport per
+  // request**. Two SDK invariants force this exact shape:
   //
-  // We follow the SDK's canonical stateless pattern (see
-  // node_modules/@modelcontextprotocol/sdk/.../examples/server/simpleStatelessStreamableHttp.js):
-  // a NEW Server + transport per incoming HTTP request.
+  //  1. Stateful mode (sessionIdGenerator set) with a shared transport
+  //     rejects the second client's initialize with HTTP 400
+  //     "Server already initialized" (webStandardStreamableHttp.js:425),
+  //     and any non-initialize call without the original Mcp-Session-Id
+  //     with "Mcp-Session-Id header is required" (line 599). That was
+  //     the original bug — openclaw-gateway hit it on every reconnect.
   //
-  // The earlier "singleton server + singleton transport in stateful mode"
-  // pattern broke as soon as a second client (openclaw-gateway) connected:
-  // the SDK rejected the second initialize with 400 "Server already
-  // initialized", and non-initialize calls without the original session ID
-  // with 400 "Mcp-Session-Id header is required". Even a single client could
-  // wedge the singleton transport after its first request completed.
+  //  2. Stateless mode (sessionIdGenerator undefined) is the obvious
+  //     alternative, but the SDK explicitly forbids reusing a stateless
+  //     transport across requests:
   //
-  // Per-request server is cheap — `store` and `queue` are module-level
-  // singletons so all business state (SQLite, in-flight tasks) is shared.
-  // Only the protocol-framing objects are recreated per request.
+  //       // webStandardStreamableHttp.js:136-141
+  //       if (!this.sessionIdGenerator && this._hasHandledRequest) {
+  //         throw new Error('Stateless transport cannot be reused …');
+  //       }
+  //
+  //     The throw surfaces through hono's getRequestListener as a silent
+  //     HTTP 500 on the 2nd POST of any client (e.g. the
+  //     notifications/initialized that the SDK client sends right after
+  //     initialize). So a singleton-stateless server is also broken.
+  //
+  // Therefore: new Server + new transport per request, stateless mode.
+  // Matches the SDK's own example (simpleStatelessStreamableHttp.js).
+  // Per-request cost is negligible — `store` and `queue` are module-level
+  // so SQLite + in-flight task state stay shared; only the protocol
+  // framing objects are recreated.
 
   const httpServer = createServer(async (httpReq, httpRes) => {
     if (httpReq.url === "/health") {
