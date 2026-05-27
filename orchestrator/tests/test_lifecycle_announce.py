@@ -65,10 +65,18 @@ def _make_ready_spec(task_id: str, target_repo: str | None = "dsdevq/devclaw") -
 
 
 def _life_root(tmp_path: Path) -> Path:
+    """Build life_root for tests. Note: flat-bucket `tasks/` now lives under
+    state_tasks_dir() (conftest points LIFEKIT_STATE_DIR at tmp_path), so any
+    helper writing flat-bucket specs should use state_tasks_dir() rather than
+    `life / "tasks"`."""
     life = tmp_path / "life"
-    (life / "tasks").mkdir(parents=True)
     (life / "system").mkdir(parents=True)
     return life
+
+
+def _flat_task_dir(task_id: str) -> Path:
+    from orchestrator.paths import state_tasks_dir
+    return state_tasks_dir() / task_id
 
 
 # ─── 1. intake_from_prose → emit_queued ──────────────────────────────────────
@@ -166,7 +174,7 @@ def test_intake_from_prose_project_less_label(tmp_path: Path):
 def test_sweep_once_fires_emit_dispatched_on_dispatch(tmp_path: Path):
     life = _life_root(tmp_path)
     spec = _make_ready_spec("2026-05-20-foo")
-    task_dir = life / "tasks" / spec.task_id
+    task_dir = _flat_task_dir(spec.task_id)
     task_dir.mkdir(parents=True)
     persist_spec(spec, task_dir / "spec.yaml")
 
@@ -197,7 +205,7 @@ def test_sweep_once_default_events_announce_is_noop(tmp_path: Path):
     """Backwards-compatible: callers that omit events_announce see no crash."""
     life = _life_root(tmp_path)
     spec = _make_ready_spec("2026-05-20-bar")
-    task_dir = life / "tasks" / spec.task_id
+    task_dir = _flat_task_dir(spec.task_id)
     task_dir.mkdir(parents=True)
     persist_spec(spec, task_dir / "spec.yaml")
 
@@ -247,7 +255,7 @@ def test_cmd_dispatch_fires_emit_done_with_pr(tmp_path: Path):
 
     life = _life_root(tmp_path)
     spec = _make_ready_spec("2026-05-20-done-pr")
-    task_dir = life / "tasks" / spec.task_id
+    task_dir = _flat_task_dir(spec.task_id)
     task_dir.mkdir(parents=True)
     spec_path = task_dir / "spec.yaml"
     persist_spec(spec, spec_path)
@@ -292,7 +300,7 @@ def test_cmd_dispatch_fires_emit_done_without_pr(tmp_path: Path):
 
     life = _life_root(tmp_path)
     spec = _make_ready_spec("2026-05-20-done-nopr", target_repo=None)
-    task_dir = life / "tasks" / spec.task_id
+    task_dir = _flat_task_dir(spec.task_id)
     task_dir.mkdir(parents=True)
     spec_path = task_dir / "spec.yaml"
     persist_spec(spec, spec_path)
@@ -328,7 +336,7 @@ def test_cmd_dispatch_fires_emit_terminal_failure_on_blocked(tmp_path: Path):
 
     life = _life_root(tmp_path)
     spec = _make_ready_spec("2026-05-20-blk")
-    task_dir = life / "tasks" / spec.task_id
+    task_dir = _flat_task_dir(spec.task_id)
     task_dir.mkdir(parents=True)
     spec_path = task_dir / "spec.yaml"
     persist_spec(spec, spec_path)

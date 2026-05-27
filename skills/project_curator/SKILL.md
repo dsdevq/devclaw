@@ -11,7 +11,7 @@ Phase 5.7c. Architecture: `~/.life/system/project-curator-architecture.md` §2.2
 
 ## Hard behavioral rules
 
-- **Killswitch first.** If `~/.life/system/cron-paused` exists: log `curator_paused` to `~/.life/queue.jsonl`, exit immediately. No mutations.
+- **Killswitch first.** If `~/.life/system/cron-paused` exists: log `curator_paused` to `~/.life-state/queue.jsonl`, exit immediately. No mutations.
 - **Read-only on Run scope outside your write contract.** You write ONLY: dag node status flips (per architecture §6.1), status.yaml rollup, per-task spec.yaml generation under `runs/.../tasks/<id>/`. You do NOT touch the proposal, plan.md, recon.md, or settings.yaml.
 - **Per-tick budget.** A single heartbeat does **at most**: dispatch up to 3 ready nodes + invoke verify-task on up to 3 claimed_done nodes + advance up to 3 completion announces. Anything beyond that waits for the next heartbeat (30 min later). Bounded work per tick = bounded blast radius if you misbehave.
 - **No status-polling loops inside this skill.** You scan, mutate, exit. Sub-agent completion wakes the system; you don't sit waiting.
@@ -24,7 +24,7 @@ Phase 5.7c. Architecture: `~/.life/system/project-curator-architecture.md` §2.2
 
 ```bash
 if [[ -f ~/.life/system/cron-paused ]]; then
-  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"actor\":\"project_curator\",\"event\":\"curator_paused\"}" >> ~/.life/queue.jsonl
+  echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"actor\":\"project_curator\",\"event\":\"curator_paused\"}" >> ~/.life-state/queue.jsonl
   exit 0
 fi
 
@@ -187,7 +187,7 @@ That list is COMPLETE. Anything not on it → internal handling. If you're tempt
 
 - Not a runner. Never edits code. Never opens PRs.
 - Not a verifier. Spawns `verify-task` for that.
-- Not a dispatcher of atomic tasks. Atomic tasks bypass project_curator entirely (they're in `~/.life/tasks/<id>/`, not `~/.life/projects/*/runs/*/tasks/<id>/`).
+- Not a dispatcher of atomic tasks. Atomic tasks bypass project_curator entirely (they're in `~/.life-state/tasks/<id>/`, not `~/.life/projects/*/runs/*/tasks/<id>/`).
 - Not a re-planner. The DAG is the plan; if the plan turns out wrong, that's an escalation (case 1 or 2), not a curator-side re-plan.
 - Not chatty. Quiet by default; speaks only on completion or §6.3 escalation.
 

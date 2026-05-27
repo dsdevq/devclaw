@@ -197,13 +197,14 @@ def load_spec(spec_path: Path) -> TaskSpec:
 
 
 def find_spec_for_task(life_root: Path, task_id: str) -> Path | None:
-    """Locate spec.yaml for `task_id` anywhere under `life_root`.
+    """Locate spec.yaml for `task_id` under either state_dir/tasks/ (flat-bucket)
+    or life_root/projects/* (per-project)."""
+    from orchestrator.paths import state_tasks_dir
 
-    Mirrors the lookup pattern used by pr_review.find_spec_for_task — kept here so
-    `dispatch` callers don't need to import from pr_review.
-    """
+    flat = state_tasks_dir() / task_id / "spec.yaml"
+    if flat.is_file():
+        return flat
     for glob_pattern in (
-        f"tasks/{task_id}/spec.yaml",
         f"projects/*/tasks/{task_id}/spec.yaml",
         f"projects/*/runs/*/tasks/{task_id}/spec.yaml",
     ):

@@ -20,6 +20,7 @@ import yaml
 from pydantic import ValidationError
 
 from orchestrator.dispatch import load_spec, now_utc, persist_spec
+from orchestrator.paths import state_tasks_dir
 from orchestrator.runners._subprocess import run_claude
 from orchestrator.state.models import (
     Budget,
@@ -297,7 +298,7 @@ def intake(
     if project_slug:
         task_dir = life_root / "projects" / project_slug / "tasks" / spec.task_id
     else:
-        task_dir = life_root / "tasks" / spec.task_id
+        task_dir = state_tasks_dir() / spec.task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     persist_spec(spec, task_dir / "spec.yaml")
 
@@ -339,9 +340,16 @@ def _intake_hash(prose: str, from_surface: str) -> str:
     return h.hexdigest()
 
 
-def _load_intake_index(life_root: Path) -> dict[str, str]:
+def _intake_index_path() -> Path:
+    """Resolve the intake-dedup index path. Lives in state_dir per
+    proposal `2026-05-27-runtime-knowledge-split`."""
+    from orchestrator.paths import state_dir
+    return state_dir() / INTAKE_INDEX_FILE
+
+
+def _load_intake_index() -> dict[str, str]:
     """Read the intake-dedup index. Returns {} if absent or malformed."""
-    idx_path = life_root / INTAKE_INDEX_FILE
+    idx_path = _intake_index_path()
     if not idx_path.is_file():
         return {}
     try:
@@ -353,8 +361,8 @@ def _load_intake_index(life_root: Path) -> dict[str, str]:
     return {}
 
 
-def _save_intake_index(life_root: Path, index: dict[str, str]) -> None:
-    idx_path = life_root / INTAKE_INDEX_FILE
+def _save_intake_index(index: dict[str, str]) -> None:
+    idx_path = _intake_index_path()
     idx_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = idx_path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(index, indent=2, sort_keys=True))
@@ -404,7 +412,7 @@ def intake_from_prose(
     fingerprint = _intake_hash(prose, from_surface)
     _say(f"intake: fingerprint={fingerprint[:12]} from={from_surface}")
 
-    index = _load_intake_index(life_root)
+    index = _load_intake_index()
     if fingerprint in index:
         existing_path = Path(index[fingerprint])
         if existing_path.is_file():
@@ -424,7 +432,7 @@ def intake_from_prose(
         # Index pointed at a vanished spec — drop the stale entry and continue.
         logger.info("task_intake: dropping stale index entry %s", fingerprint)
         index.pop(fingerprint, None)
-        _save_intake_index(life_root, index)
+        _save_intake_index(index)
 
     _say("intake: invoking LangGraph intake node (claude --print)")
     route = RequesterRoute(channel="cli", to=from_surface or "cli")
@@ -447,7 +455,7 @@ def intake_from_prose(
         return None
 
     index[fingerprint] = str(spec_path)
-    _save_intake_index(life_root, index)
+    _save_intake_index(index)
 
     _say(
         f"intake: new spec at {spec_path} "
@@ -477,7 +485,7 @@ def intake_from_prose(
 
 
 def _locate_spec_path(life_root: Path, task_id: str) -> Path | None:
-    flat = life_root / "tasks" / task_id / "spec.yaml"
+    flat = state_tasks_dir() / task_id / "spec.yaml"
     if flat.is_file():
         return flat
     for candidate in life_root.glob(f"projects/*/tasks/{task_id}/spec.yaml"):
