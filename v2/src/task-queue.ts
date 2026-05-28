@@ -35,7 +35,11 @@
 
 import { randomUUID } from "node:crypto";
 
-import { runOpenHands } from "./openhands-runner.js";
+import {
+  runOpenHands,
+  type OpenHandsRequest,
+  type OpenHandsResult,
+} from "./openhands-runner.js";
 import { planGoal, PlannerError, type PlannedTask } from "./planner.js";
 import {
   StateStore,
@@ -81,6 +85,13 @@ export class TaskQueue {
       goal: string,
       workspaceDir: string,
     ) => Promise<PlannedTask[]> = (g, w) => planGoal(g, w),
+    /**
+     * Injectable for tests — defaults to the real OpenHands runner. The
+     * DAG-stub smoke test swaps this for a fake that resolves quickly so
+     * we can verify queue + state logic without burning Pro tokens.
+     */
+    private readonly runner: (req: OpenHandsRequest) => Promise<OpenHandsResult> =
+      runOpenHands,
   ) {}
 
   // ---- standalone task path (unchanged) -------------------------------
@@ -289,7 +300,7 @@ export class TaskQueue {
     req: { kind: TaskKind; workspaceDir: string; goal: string },
   ): Promise<void> {
     try {
-      const result = await runOpenHands(req);
+      const result = await this.runner(req);
       if (result.status === "ok") {
         this.store.markDone(taskId, JSON.stringify(result));
       } else {
