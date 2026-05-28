@@ -141,6 +141,9 @@ export class StateStore {
   }
 
   private bootstrap(): void {
+    // (1) Create tables (idempotent — IF NOT EXISTS skips if already there).
+    // CREATE TABLE for `tasks` is the new-slice schema; older slices'
+    // tables stay as they are and get caught up by the ALTERs below.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id              TEXT PRIMARY KEY,
@@ -169,17 +172,14 @@ export class StateStore {
         created_at      INTEGER NOT NULL,
         completed_at    INTEGER
       );
-
-      CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status);
-      CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
-      CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
-      CREATE INDEX IF NOT EXISTS idx_tasks_program    ON tasks(program_id);
-      CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
     `);
 
-    // Forward-compat ALTERs for DBs created by older slices. Each is
+    // (2) Forward-compat ALTERs for DBs created by older slices. Each is
     // idempotent — swallow duplicate-column errors. Keep one ALTER per
-    // added column so the order of slices stays explicit.
+    // added column so the order of slices stays explicit. MUST run
+    // BEFORE the CREATE INDEX block below — indexes can reference new
+    // columns on the existing `tasks` table, and on a pre-slice-4 DB
+    // those columns don't exist until these ALTERs add them.
     for (const sql of [
       `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'implement_feature'`,
       `ALTER TABLE tasks ADD COLUMN notify_url TEXT`,
@@ -193,6 +193,15 @@ export class StateStore {
         // column already exists
       }
     }
+
+    // (3) Indexes — safe to create now that all referenced columns exist.
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
+      CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
+      CREATE INDEX IF NOT EXISTS idx_tasks_program    ON tasks(program_id);
+      CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
+    `);
   }
 
   createTask(input: {
