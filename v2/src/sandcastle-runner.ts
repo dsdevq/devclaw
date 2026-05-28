@@ -24,7 +24,6 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -90,16 +89,14 @@ class SandcastleRunnerError extends Error {
 export async function runSandcastle(
   req: SandcastleRunRequest,
 ): Promise<OpenHandsResult> {
+  // DEVCLAW_HOST_CLAUDE_DIR is a HOST path passed straight to docker as a
+  // bind source. When devclaw-mcp itself runs in a container, that path
+  // intentionally does NOT exist in the container's filesystem view —
+  // existsSync from inside the container would always fail. We pass the
+  // string through and let docker emit a clear "no such file or directory"
+  // if the operator misconfigured the env var.
   const claudeDir =
     process.env["DEVCLAW_HOST_CLAUDE_DIR"] ?? resolve(homedir(), ".claude");
-  if (!existsSync(claudeDir)) {
-    return {
-      status: "error",
-      error:
-        `host claude dir not found at ${claudeDir} — set DEVCLAW_HOST_CLAUDE_DIR ` +
-        `to override or mount your Claude Code config into the devclaw container.`,
-    };
-  }
 
   // When devclaw-mcp itself runs in a container and spawns docker on the
   // host socket, the workspace path it sees internally (e.g.
