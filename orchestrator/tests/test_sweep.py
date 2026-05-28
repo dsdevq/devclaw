@@ -68,15 +68,22 @@ def make_spec(task_id: str, **overrides) -> TaskSpec:
 
 
 def setup_life_root(tmp_path: Path) -> Path:
-    """Create a minimal ~/.life/ shape for tests."""
+    """Create a minimal ~/.life/ shape for tests.
+
+    Note: flat-bucket `tasks/` is now resolved via `state_tasks_dir()` (see
+    `paths.state_dir`), which the autouse fixture in conftest.py points at
+    `tmp_path` — so `state_tasks_dir() == tmp_path/"tasks"`. We deliberately
+    don't pre-create that here; helpers create it as needed.
+    """
     life = tmp_path / "life"
-    (life / "tasks").mkdir(parents=True)
+    (life / "projects").mkdir(parents=True)
     (life / "system").mkdir(parents=True)
     return life
 
 
 def write_atomic_spec(life: Path, spec: TaskSpec) -> Path:
-    task_dir = life / "tasks" / spec.task_id
+    from orchestrator.paths import state_tasks_dir
+    task_dir = state_tasks_dir() / spec.task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     spec_path = task_dir / "spec.yaml"
     persist_spec(spec, spec_path)
@@ -528,9 +535,10 @@ def test_sweep_skips_unknown_dep_and_logs_warning_once(tmp_path: Path, caplog):
     )
 
     from orchestrator.dispatch import load_spec
+    from orchestrator.paths import state_tasks_dir
 
     for tid in ("orphan-1", "orphan-2"):
-        reloaded = load_spec(life / "tasks" / tid / "spec.yaml")
+        reloaded = load_spec(state_tasks_dir() / tid / "spec.yaml")
         assert reloaded.status == TaskStatus.ready
 
 

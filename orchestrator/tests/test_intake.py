@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from orchestrator.dispatch import load_spec, persist_spec
 from orchestrator.intake import intake
+from orchestrator.paths import state_tasks_dir
 from orchestrator.runners._subprocess import SubprocessResult
 from orchestrator.state.models import (
     Budget,
@@ -121,7 +122,7 @@ def test_intake_creates_atomic_research_spec_when_no_project(tmp_path: Path):
     assert spec.project is None
     assert spec.target_repo is None
     # spec written to atomic location, not project-bound
-    expected = life / "tasks" / spec.task_id / "spec.yaml"
+    expected = state_tasks_dir() / spec.task_id / "spec.yaml"
     assert expected.is_file()
 
 
@@ -189,7 +190,7 @@ def test_intake_respects_explicit_task_id(tmp_path: Path):
 
     assert spec is not None
     assert spec.task_id == "custom-task-id-99"
-    assert (life / "tasks" / "custom-task-id-99" / "spec.yaml").is_file()
+    assert (state_tasks_dir() / "custom-task-id-99" / "spec.yaml").is_file()
 
 
 def test_intake_writes_verbatim_intent(tmp_path: Path):
@@ -240,7 +241,7 @@ def test_intake_routes_to_project_bucket_when_target_repo_matches(tmp_path: Path
 
     assert spec is not None
     project_path = life / "projects" / "devclaw" / "tasks" / spec.task_id / "spec.yaml"
-    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    flat_path = state_tasks_dir() / spec.task_id / "spec.yaml"
     assert project_path.is_file()
     assert not flat_path.exists()
 
@@ -270,7 +271,7 @@ def test_intake_routes_to_flat_bucket_when_target_repo_has_no_project_match(tmp_
         )
 
     assert spec is not None
-    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    flat_path = state_tasks_dir() / spec.task_id / "spec.yaml"
     assert flat_path.is_file()
     # no project bucket got created for this spec
     assert list(life.glob("projects/*/tasks/*/spec.yaml")) == []
@@ -301,7 +302,7 @@ def test_intake_routes_to_flat_bucket_when_target_repo_missing(tmp_path: Path):
         )
 
     assert spec is not None
-    flat_path = life / "tasks" / spec.task_id / "spec.yaml"
+    flat_path = state_tasks_dir() / spec.task_id / "spec.yaml"
     assert flat_path.is_file()
     assert list(life.glob("projects/*/tasks/*/spec.yaml")) == []
 
@@ -382,7 +383,7 @@ def _seed_sibling_spec(
     if project_slug:
         task_dir = life / "projects" / project_slug / "tasks" / task_id
     else:
-        task_dir = life / "tasks" / task_id
+        task_dir = state_tasks_dir() / task_id
     task_dir.mkdir(parents=True, exist_ok=True)
     spec_path = task_dir / "spec.yaml"
     persist_spec(spec, spec_path)

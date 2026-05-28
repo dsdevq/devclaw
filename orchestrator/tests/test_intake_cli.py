@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from orchestrator import cli
+from orchestrator.paths import state_tasks_dir
 from orchestrator.intake import (
     _intake_hash,
     intake_from_prose,
@@ -97,7 +98,7 @@ def test_intake_from_prose_returns_new_then_duplicate(tmp_path: Path):
     assert r2.state == "duplicate"
     assert r1.budget_min == 20  # 1200s / 60
     # Exactly one spec.yaml on disk for this dedup key.
-    specs = list(life.glob("**/spec.yaml"))
+    specs = list(state_tasks_dir().glob("**/spec.yaml")) + list(life.glob("projects/**/spec.yaml"))
     assert len(specs) == 1, specs
 
 
@@ -113,7 +114,7 @@ def test_intake_from_prose_distinct_prose_creates_distinct_specs(tmp_path: Path)
     assert r1.task_id != r2.task_id
     assert r1.state == "new"
     assert r2.state == "new"
-    assert len(list(life.glob("**/spec.yaml"))) == 2
+    assert len(list(state_tasks_dir().glob("**/spec.yaml")) + list(life.glob("projects/**/spec.yaml"))) == 2
 
 
 def test_intake_from_prose_distinct_from_surface_creates_distinct_specs(tmp_path: Path):
@@ -135,7 +136,7 @@ def test_intake_from_prose_returns_none_on_intake_failure(tmp_path: Path):
     with mock.patch("orchestrator.intake.run_claude", return_value=_mock_claude_failure()):
         result = intake_from_prose("anything", from_surface="cli", life_root=life)
     assert result is None
-    assert list(life.glob("**/spec.yaml")) == []
+    assert list(state_tasks_dir().glob("**/spec.yaml")) + list(life.glob("projects/**/spec.yaml")) == []
 
 
 def test_intake_from_prose_progress_callback_fires(tmp_path: Path):
@@ -242,7 +243,7 @@ def test_cli_intake_idempotent_returns_duplicate_state(tmp_path: Path):
     assert a["task_id"] == b["task_id"]
     assert a["state"] == "new"
     assert b["state"] == "duplicate"
-    specs = list(life.glob("**/spec.yaml"))
+    specs = list(state_tasks_dir().glob("**/spec.yaml")) + list(life.glob("projects/**/spec.yaml"))
     assert len(specs) == 1
 
 

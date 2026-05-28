@@ -29,12 +29,13 @@ import logging
 from pathlib import Path
 
 from orchestrator.dispatch import load_spec
+from orchestrator.paths import state_tasks_dir
 
 logger = logging.getLogger(__name__)
 
 
 def _find_task_dir(life_root: Path, task_id: str) -> Path | None:
-    flat = life_root / "tasks" / task_id
+    flat = state_tasks_dir() / task_id
     if flat.is_dir():
         return flat
     for candidate in life_root.glob(f"projects/*/tasks/{task_id}"):

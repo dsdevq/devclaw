@@ -1,0 +1,4 @@
+# Pinned so the host venv and the sandbox image stay byte-aligned.
+# Bump deliberately (sandbox image must be rebuilt + pre-pulled on VPS).
+openhands-sdk==1.24.0
+openhands-tools==1.24.0

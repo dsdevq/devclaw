@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.tsbuildinfo
+*.log
+
+# Python runner virtualenv
+python-runner/.venv/
+python-runner/__pycache__/
+
+# Local scratch workspaces created during dev
+/tmp-workspaces/

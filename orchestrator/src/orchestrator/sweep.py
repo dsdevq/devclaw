@@ -134,13 +134,15 @@ class SweepResult:
 
 
 def find_dispatched_specs(life_root: Path) -> list[Path]:
-    """Locate every spec.yaml under ~/.life/ whose status looks dispatched-*.
+    """Locate every spec.yaml under ~/.life/ + state_dir whose status looks dispatched-*.
 
-    Scans BOTH atomic (`tasks/*/spec.yaml`) and run-bound (`projects/*/runs/*/tasks/*/spec.yaml`) paths.
+    Flat-bucket specs (`tasks/<id>/spec.yaml`) live under state_dir per proposal
+    2026-05-27-runtime-knowledge-split. Project-bound specs stay in life_root.
     """
+    from orchestrator.paths import state_tasks_dir
     candidates: list[Path] = []
+    candidates.extend(state_tasks_dir().glob("*/spec.yaml"))
     for glob in (
-        "tasks/*/spec.yaml",
         "projects/*/tasks/*/spec.yaml",
         "projects/*/runs/*/tasks/*/spec.yaml",
     ):
@@ -149,13 +151,15 @@ def find_dispatched_specs(life_root: Path) -> list[Path]:
 
 
 def find_all_specs(life_root: Path) -> list[Path]:
-    """Locate every spec.yaml under ~/.life/ (any status).
+    """Locate every spec.yaml under ~/.life/ + state_dir (any status).
 
     Used by the dispatch pass to find `status: ready` specs that need a runner.
+    Flat-bucket specs live under state_dir; project-bound under life_root.
     """
+    from orchestrator.paths import state_tasks_dir
     candidates: list[Path] = []
+    candidates.extend(state_tasks_dir().glob("*/spec.yaml"))
     for glob in (
-        "tasks/*/spec.yaml",
         "projects/*/tasks/*/spec.yaml",
         "projects/*/runs/*/tasks/*/spec.yaml",
     ):

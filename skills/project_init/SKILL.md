@@ -249,6 +249,6 @@ If `task_intake` is dropping an **atomic** code task on an unknown project, it a
 | Failure | Action |
 |---|---|
 | Project already has `plan.md` | Refuse. Tell the operator to edit by hand. |
-| Repo clone fails (auth, network, 404) | Append `recon_failed` to `~/.life/queue.jsonl`, reply with a one-line "couldn't clone <repo>: <reason>" and stop. Do NOT leave a half-populated `$PROJ_DIR`. |
+| Repo clone fails (auth, network, 404) | Append `recon_failed` to `~/.life-state/queue.jsonl`, reply with a one-line "couldn't clone <repo>: <reason>" and stop. Do NOT leave a half-populated `$PROJ_DIR`. |
 | the operator never replies to a single clarifying question | After ~24h, write `plan.md` anyway using the strongest defensible interpretation — record both candidate readings under "Assumptions" so the operator can correct in one reply. Half-initialized states are no longer an acceptable outcome under the auto-proceed posture. |
 | `gh api` for visibility detection fails | Set `github_visibility: unknown` in settings.yaml. Don't block on it. |

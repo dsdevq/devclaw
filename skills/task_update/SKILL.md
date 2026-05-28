@@ -1,11 +1,11 @@
 ---
 name: task_update
-description: "Controlled-mutation rules for `~/.life/tasks/<id>/spec.yaml`. This is the SINGLE-WRITER contract for Task Spec status transitions — `task_dispatch`, `code-task`, and `research-task` all MUST follow these rules when changing a spec. Per §5.3 invariant 1 of ~/.life/system/autonomous-overnight-architecture.md, any skill mutating spec.yaml outside these rules is violating the contract. Read this skill before editing a spec.yaml."
+description: "Controlled-mutation rules for `~/.life-state/tasks/<id>/spec.yaml`. This is the SINGLE-WRITER contract for Task Spec status transitions — `task_dispatch`, `code-task`, and `research-task` all MUST follow these rules when changing a spec. Per §5.3 invariant 1 of ~/.life/system/autonomous-overnight-architecture.md, any skill mutating spec.yaml outside these rules is violating the contract. Read this skill before editing a spec.yaml."
 ---
 
 # task_update
 
-You are about to change a Task Spec at `~/.life/tasks/<id>/spec.yaml`. Stop. Read this first. The rules below exist to keep the autonomous-overnight pipeline coherent as it scales.
+You are about to change a Task Spec at `~/.life-state/tasks/<id>/spec.yaml`. Stop. Read this first. The rules below exist to keep the autonomous-overnight pipeline coherent as it scales.
 
 ## What you may change
 
@@ -35,8 +35,8 @@ ready ──► dispatched-subagent ──► done
 
 - `ready` is the initial state set by `task_intake`. Never write it from another skill.
 - `dispatched-*` MUST be one of: `dispatched-subagent` | `dispatched-build` | `dispatched-human`.
-- `done` and `blocked` are terminal — no transitions out. If you think you need `blocked → ready`, you don't; the human re-dispatch path is `rm -rf ~/.life/tasks/<id>/` + recreate via `task_intake`.
-- Any other transition is a bug. If you find yourself wanting to write one, stop and write to `~/.life/queue.jsonl` instead with a `task_contract_violation_attempt` event so the curator can investigate.
+- `done` and `blocked` are terminal — no transitions out. If you think you need `blocked → ready`, you don't; the human re-dispatch path is `rm -rf ~/.life-state/tasks/<id>/` + recreate via `task_intake`.
+- Any other transition is a bug. If you find yourself wanting to write one, stop and write to `~/.life-state/queue.jsonl` instead with a `task_contract_violation_attempt` event so the curator can investigate.
 
 ## Required fields when transitioning to dispatched-*
 
@@ -53,15 +53,15 @@ When you set `status: done` or `status: blocked`, you MUST also set:
 
 ## How to actually do the edit
 
-1. Read `~/.life/tasks/<id>/spec.yaml` with Read tool.
+1. Read `~/.life-state/tasks/<id>/spec.yaml` with Read tool.
 2. Verify the current `status` allows the transition you intend (see table above).
-3. If invalid: STOP. Append to `~/.life/queue.jsonl`:
+3. If invalid: STOP. Append to `~/.life-state/queue.jsonl`:
    ```json
    {"ts":"<iso>","actor":"<your-skill-name>","event":"task_contract_violation_attempt","task_id":"<id>","from_status":"<x>","to_status":"<y>","reason":"<why this was attempted>"}
    ```
    Do NOT write the spec.
 4. If valid: use Edit tool to change only the allowed fields. Preserve all other content byte-for-byte. Use single Edit calls per field if needed; don't holistic-rewrite the file.
-5. Append a `spec_updated` event to `~/.life/tasks/<id>/run.log.jsonl` capturing the transition.
+5. Append a `spec_updated` event to `~/.life-state/tasks/<id>/run.log.jsonl` capturing the transition.
 
 ## What you may NOT change
 
