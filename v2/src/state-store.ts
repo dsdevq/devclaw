@@ -57,6 +57,43 @@ export type Program = {
   completedAt: number | null;
 };
 
+// Events are append-only observations emitted by the runner during a task
+// (one row per openhands-sdk Event the SDK fires). They power the dashboard
+// SSE stream and post-mortem inspection. `payloadJson` is the raw event
+// JSON the runner serialized — preserved verbatim so the dashboard can
+// render new event types without a schema migration.
+export type TaskEvent = {
+  id: number;
+  taskId: string;
+  programId: string | null;
+  type: string;
+  source: string;
+  payloadJson: string;
+  ts: number;
+};
+
+type EventRow = {
+  id: number;
+  task_id: string;
+  program_id: string | null;
+  type: string;
+  source: string;
+  payload_json: string;
+  ts: number;
+};
+
+function rowToEvent(row: EventRow): TaskEvent {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    programId: row.program_id,
+    type: row.type,
+    source: row.source,
+    payloadJson: row.payload_json,
+    ts: row.ts,
+  };
+}
+
 type TaskRow = {
   id: string;
   kind: TaskKind;
@@ -172,6 +209,16 @@ export class StateStore {
         created_at      INTEGER NOT NULL,
         completed_at    INTEGER
       );
+
+      CREATE TABLE IF NOT EXISTS events (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id         TEXT NOT NULL,
+        program_id      TEXT,
+        type            TEXT NOT NULL,
+        source          TEXT NOT NULL DEFAULT '',
+        payload_json    TEXT NOT NULL,
+        ts              INTEGER NOT NULL
+      );
     `);
 
     // (2) Forward-compat ALTERs for DBs created by older slices. Each is
@@ -201,6 +248,8 @@ export class StateStore {
       CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
       CREATE INDEX IF NOT EXISTS idx_tasks_program    ON tasks(program_id);
       CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
+      CREATE INDEX IF NOT EXISTS idx_events_program   ON events(program_id, id);
+      CREATE INDEX IF NOT EXISTS idx_events_task      ON events(task_id, id);
     `);
   }
 
@@ -281,6 +330,16 @@ export class StateStore {
          WHERE id = ? AND status IN ('planning', 'running')`,
       )
       .run(error, Date.now(), programId);
+  }
+
+  listPrograms(opts?: { limit?: number }): Program[] {
+    const limit = opts?.limit ?? 100;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM programs ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(limit) as ProgramRow[];
+    return rows.map(rowToProgram);
   }
 
   getProgram(programId: string): Program | null {
@@ -374,6 +433,75 @@ export class StateStore {
       )
       .all(...args, limit) as TaskRow[];
     return rows.map(rowToTask);
+  }
+
+  // ---- events --------------------------------------------------------
+
+  /**
+   * Append one event row. Returns the auto-assigned monotonic id, which the
+   * SSE layer uses as the resume cursor (Last-Event-Id).
+   */
+  appendEvent(input: {
+    taskId: string;
+    programId: string | null;
+    type: string;
+    source: string;
+    payloadJson: string;
+    ts?: number;
+  }): number {
+    const result = this.db
+      .prepare(
+        `INSERT INTO events (task_id, program_id, type, source, payload_json, ts)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        input.taskId,
+        input.programId,
+        input.type,
+        input.source,
+        input.payloadJson,
+        input.ts ?? Date.now(),
+      );
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * List events for a program or task, in id order (i.e. emission order).
+   * Pass `sinceId` to resume after a known cursor (exclusive). `limit`
+   * caps the result set — callers can paginate by re-issuing with the
+   * largest id seen.
+   */
+  listEvents(opts: {
+    programId?: string;
+    taskId?: string;
+    sinceId?: number;
+    limit?: number;
+  }): TaskEvent[] {
+    const where: string[] = [];
+    const args: (string | number)[] = [];
+    if (opts.programId) {
+      where.push("program_id = ?");
+      args.push(opts.programId);
+    }
+    if (opts.taskId) {
+      where.push("task_id = ?");
+      args.push(opts.taskId);
+    }
+    if (!where.length) {
+      throw new Error("listEvents requires programId or taskId");
+    }
+    if (typeof opts.sinceId === "number") {
+      where.push("id > ?");
+      args.push(opts.sinceId);
+    }
+    const limit = opts.limit ?? 500;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM events WHERE ${where.join(" AND ")}
+         ORDER BY id ASC LIMIT ?`,
+      )
+      .all(...args, limit) as EventRow[];
+    return rows.map(rowToEvent);
   }
 
   close(): void {

@@ -22,6 +22,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 
@@ -29,7 +30,7 @@ import { StateStore } from "./state-store.js";
 import { TaskQueue } from "./task-queue.js";
 
 const SERVER_NAME = "devclaw";
-const SERVER_VERSION = "0.0.4";
+const SERVER_VERSION = "0.0.5";
 
 const DB_PATH = resolve(process.cwd(), process.env["DEVCLAW_DB"] ?? "devclaw.db");
 const TRANSPORT = process.env["DEVCLAW_TRANSPORT"] ?? "stdio";
@@ -222,6 +223,55 @@ function buildServer(): Server {
         },
       },
       {
+        name: "list_programs",
+        description:
+          "List recent programs (high-level goals submitted via start_program), " +
+          "most-recent first. Use to discover program_ids to feed into get_program, " +
+          "get_events, or the /dashboard view.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            limit: { type: "number", default: 50, minimum: 1, maximum: 1000 },
+          },
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "get_events",
+        description:
+          "Return events emitted by the OpenHands runner for one program or " +
+          "one task, in emission order. Each event includes its id (monotonic " +
+          "cursor), type (e.g. ActionEvent, ObservationEvent), source (agent | " +
+          "user | environment), payload_json (the raw SDK Event), and ts. " +
+          "Pass since_id to resume after a known cursor — same semantics as " +
+          "the /programs/:id/events SSE stream's Last-Event-Id.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            program_id: {
+              type: "string",
+              description:
+                "Program id (mutually exclusive with task_id). Returns events " +
+                "from every task in the program, interleaved in emission order.",
+            },
+            task_id: {
+              type: "string",
+              description:
+                "Task id (mutually exclusive with program_id). Returns events " +
+                "for that one task only.",
+            },
+            since_id: {
+              type: "number",
+              description:
+                "Resume cursor — only events with id > since_id are returned. " +
+                "Omit to start from the beginning.",
+            },
+            limit: { type: "number", default: 500, minimum: 1, maximum: 5000 },
+          },
+          additionalProperties: false,
+        },
+      },
+      {
         name: "list_tasks",
         description:
           "List recent tasks, most-recent first. Optionally filter by status or kind.",
@@ -407,6 +457,55 @@ function buildServer(): Server {
         };
       }
 
+      case "list_programs": {
+        const limit =
+          typeof args["limit"] === "number" ? (args["limit"] as number) : 50;
+        const programs = store.listPrograms({ limit });
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(programs, null, 2) },
+          ],
+          isError: false,
+        };
+      }
+
+      case "get_events": {
+        const programId =
+          typeof args["program_id"] === "string"
+            ? (args["program_id"] as string)
+            : undefined;
+        const taskId =
+          typeof args["task_id"] === "string"
+            ? (args["task_id"] as string)
+            : undefined;
+        const sinceId =
+          typeof args["since_id"] === "number"
+            ? (args["since_id"] as number)
+            : undefined;
+        const limit =
+          typeof args["limit"] === "number" ? (args["limit"] as number) : 500;
+        if (!programId && !taskId) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  error: "get_events requires program_id or task_id",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        const events = store.listEvents({ programId, taskId, sinceId, limit });
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(events, null, 2) },
+          ],
+          isError: false,
+        };
+      }
+
       case "list_tasks": {
         const status = args["status"] as
           | "pending"
@@ -445,6 +544,207 @@ async function runStdio(): Promise<void> {
   process.stderr.write(`${SERVER_NAME} v${SERVER_VERSION} ready (stdio, db=${DB_PATH})\n`);
 }
 
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function handleDashboardIndex(res: ServerResponse): void {
+  const programs = store.listPrograms({ limit: 50 });
+  const rows = programs
+    .map((p) => {
+      const created = new Date(p.createdAt).toISOString();
+      const goal = escapeHtml(
+        p.goal.length > 120 ? p.goal.slice(0, 117) + "..." : p.goal,
+      );
+      return (
+        `<tr>` +
+        `<td><a href="/dashboard/${p.id}">${p.id.slice(0, 8)}</a></td>` +
+        `<td>${escapeHtml(p.status)}</td>` +
+        `<td>${created}</td>` +
+        `<td>${goal}</td>` +
+        `</tr>`
+      );
+    })
+    .join("");
+  const html = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>devclaw — programs</title>
+<style>
+ body{font:14px/1.4 -apple-system,system-ui,sans-serif;margin:2rem;color:#eee;background:#0d1117}
+ a{color:#7ab8ff}
+ table{border-collapse:collapse;width:100%;margin-top:1rem}
+ th,td{padding:.4rem .6rem;border-bottom:1px solid #30363d;text-align:left}
+ th{background:#161b22}
+</style></head><body>
+<h1>devclaw programs <small>v${SERVER_VERSION}</small></h1>
+<p>${programs.length} program(s). Click a row to open the live event stream.</p>
+<table><thead><tr><th>id</th><th>status</th><th>created</th><th>goal</th></tr></thead>
+<tbody>${rows}</tbody></table>
+</body></html>`;
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+function handleDashboardProgram(res: ServerResponse, programId: string): void {
+  const program = store.getProgram(programId);
+  if (!program) {
+    res.writeHead(404, { "content-type": "text/html; charset=utf-8" });
+    res.end(`<p>unknown program: ${escapeHtml(programId)}</p>`);
+    return;
+  }
+  const goal = escapeHtml(program.goal);
+  // Note: EventSource auto-resumes via Last-Event-Id on reconnect, so no
+  // manual cursor management needed in the page.
+  const html = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><title>devclaw — ${escapeHtml(programId)}</title>
+<style>
+ body{font:13px/1.4 -apple-system,system-ui,sans-serif;margin:2rem;color:#eee;background:#0d1117}
+ a{color:#7ab8ff}
+ h1{font-size:1.2rem}
+ #events{margin-top:1rem;border:1px solid #30363d;border-radius:6px;padding:1rem;background:#161b22;max-height:80vh;overflow:auto;font-family:ui-monospace,monospace;font-size:12px}
+ .ev{padding:.2rem 0;border-bottom:1px solid #21262d}
+ .type{color:#79c0ff;font-weight:bold}
+ .source{color:#8b949e}
+ .id{color:#6e7681}
+</style></head><body>
+<p><a href="/dashboard">&larr; all programs</a></p>
+<h1>program ${escapeHtml(programId)} <small>(${escapeHtml(program.status)})</small></h1>
+<p>${goal}</p>
+<div id="events"></div>
+<script>
+ const box = document.getElementById('events');
+ const src = new EventSource('/programs/${programId}/events');
+ src.onmessage = (e) => {
+   try {
+     const ev = JSON.parse(e.data);
+     const div = document.createElement('div');
+     div.className = 'ev';
+     div.innerHTML = '<span class=id>#' + ev.id + '</span> ' +
+                     '<span class=type>' + ev.type + '</span> ' +
+                     '<span class=source>(' + ev.source + ')</span>';
+     box.appendChild(div);
+     box.scrollTop = box.scrollHeight;
+   } catch (err) { /* swallow */ }
+ };
+ src.onerror = () => { /* browser will auto-reconnect with Last-Event-Id */ };
+</script>
+</body></html>`;
+  res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+/**
+ * Resumable SSE stream of one program's events.
+ *
+ * Resume protocol: the standard EventSource Last-Event-Id header (sent by
+ * the browser on auto-reconnect) is our cursor. Each SSE frame carries an
+ * `id:` line set to the event row's primary key, so a reconnecting client
+ * picks up where it left off.
+ *
+ * Live tail: SQLite has no LISTEN/NOTIFY; we poll the events table every
+ * 750ms after draining the initial backlog. Cheap (indexed on
+ * program_id+id) and bounded — the dashboard is for one operator, not a
+ * fan-out broadcast.
+ *
+ * Termination: when the program has reached a terminal state AND the last
+ * poll returned no new rows, we emit a final `event: done` frame and close
+ * the response.
+ */
+function handleProgramEventsSse(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  programId: string,
+): void {
+  const program = store.getProgram(programId);
+  if (!program) {
+    res.writeHead(404, { "content-type": "text/plain" });
+    res.end(`unknown program: ${programId}`);
+    return;
+  }
+
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+  // Initial comment forces the browser EventSource onopen to fire even if
+  // the program currently has zero events.
+  res.write(": ok\n\n");
+
+  const lastEventIdHeader = _req.headers["last-event-id"];
+  let cursor = 0;
+  if (typeof lastEventIdHeader === "string") {
+    const parsed = Number.parseInt(lastEventIdHeader, 10);
+    if (Number.isFinite(parsed) && parsed > 0) cursor = parsed;
+  }
+
+  let closed = false;
+  res.on("close", () => {
+    closed = true;
+  });
+
+  const pollMs = 750;
+
+  const tick = (): void => {
+    if (closed) return;
+    let drained: ReturnType<typeof store.listEvents>;
+    try {
+      drained = store.listEvents({
+        programId,
+        sinceId: cursor,
+        limit: 200,
+      });
+    } catch (err) {
+      res.write(
+        `event: error\ndata: ${JSON.stringify({ message: (err as Error).message })}\n\n`,
+      );
+      res.end();
+      return;
+    }
+
+    for (const ev of drained) {
+      const frame =
+        `id: ${ev.id}\n` +
+        `data: ${JSON.stringify({
+          id: ev.id,
+          type: ev.type,
+          source: ev.source,
+          ts: ev.ts,
+          payload: safeParse(ev.payloadJson),
+        })}\n\n`;
+      res.write(frame);
+      cursor = ev.id;
+    }
+
+    const current = store.getProgram(programId);
+    const terminal =
+      current?.status === "done" || current?.status === "failed";
+    if (terminal && drained.length === 0) {
+      res.write(`event: done\ndata: ${JSON.stringify({ status: current?.status })}\n\n`);
+      res.end();
+      return;
+    }
+
+    setTimeout(tick, pollMs);
+  };
+
+  tick();
+}
+
+function safeParse(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+}
+
 async function runHttp(): Promise<void> {
   // Streamable HTTP transport, stateless, **new Server + transport per
   // request**. Two SDK invariants force this exact shape:
@@ -477,13 +777,32 @@ async function runHttp(): Promise<void> {
   // framing objects are recreated.
 
   const httpServer = createServer(async (httpReq, httpRes) => {
-    if (httpReq.url === "/health") {
+    const url = httpReq.url ?? "";
+
+    if (url === "/health") {
       httpRes.writeHead(200, { "content-type": "application/json" });
       httpRes.end(JSON.stringify({ ok: true, name: SERVER_NAME, version: SERVER_VERSION }));
       return;
     }
 
-    if (!httpReq.url?.startsWith("/mcp")) {
+    if (url === "/dashboard" || url === "/dashboard/") {
+      handleDashboardIndex(httpRes);
+      return;
+    }
+
+    const dashMatch = url.match(/^\/dashboard\/([A-Za-z0-9-]+)\/?$/);
+    if (dashMatch) {
+      handleDashboardProgram(httpRes, dashMatch[1] as string);
+      return;
+    }
+
+    const sseMatch = url.match(/^\/programs\/([A-Za-z0-9-]+)\/events\/?$/);
+    if (sseMatch) {
+      handleProgramEventsSse(httpReq, httpRes, sseMatch[1] as string);
+      return;
+    }
+
+    if (!url.startsWith("/mcp")) {
       httpRes.writeHead(404);
       httpRes.end();
       return;

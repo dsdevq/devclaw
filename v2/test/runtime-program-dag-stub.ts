@@ -24,7 +24,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-import type { OpenHandsRequest, OpenHandsResult } from "../src/openhands-runner.js";
+import type {
+  OpenHandsResult,
+  SandcastleRunRequest,
+} from "../src/sandcastle-runner.js";
 import type { PlannedTask } from "../src/planner.js";
 import { StateStore } from "../src/state-store.js";
 import { TaskQueue } from "../src/task-queue.js";
@@ -90,10 +93,20 @@ function makeRunner(opts: {
   const events: RunnerEvent[] = [];
   let inFlight = 0;
   let peakInFlight = 0;
-  const runner = async (req: OpenHandsRequest): Promise<OpenHandsResult> => {
+  const runner = async (req: SandcastleRunRequest): Promise<OpenHandsResult> => {
     inFlight++;
     if (inFlight > peakInFlight) peakInFlight = inFlight;
     events.push({ goal: req.goal, startedAt: Date.now() });
+    // Emit one synthetic ActionEvent per run so the events-table assertion
+    // has something to verify. Real runner.py emits many; one is enough to
+    // prove plumbing.
+    req.onEvent?.({
+      id: `stub-${req.goal}`,
+      type: "ActionEvent",
+      source: "agent",
+      ts: Date.now(),
+      payload: { goal: req.goal },
+    });
     const beh = opts.behaviors?.[req.goal] ?? { kind: "ok", delayMs: 30 };
     await new Promise((r) => setTimeout(r, beh.delayMs ?? 30));
     inFlight--;
@@ -311,12 +324,142 @@ async function testConcurrencyCap(): Promise<void> {
   }
 }
 
+async function testEventsLandInTable(): Promise<void> {
+  const name = "runner events land in events table with correct program_id";
+  const { store, cleanup } = newStore();
+  try {
+    const planner = makePlanner([
+      { key: "a", goal: "a", kind: "implement_feature", dependsOnKeys: [] },
+      { key: "b", goal: "b", kind: "implement_feature", dependsOnKeys: ["a"] },
+    ]);
+    const { runner } = makeRunner({});
+    const queue = new TaskQueue(store, planner, runner);
+
+    const { programId } = queue.submitProgram({
+      workspaceDir: "/tmp/ws",
+      goal: "events",
+    });
+
+    await waitFor(() => store.getProgram(programId)?.status === "done");
+
+    const events = store.listEvents({ programId, limit: 100 });
+    if (events.length !== 2) {
+      throw new Error(`expected 2 events, got ${events.length}`);
+    }
+    if (!events.every((e) => e.programId === programId)) {
+      throw new Error("event program_id mismatch");
+    }
+    if (!events.every((e) => e.type === "ActionEvent")) {
+      throw new Error("event type mismatch");
+    }
+    // ids must be monotonic — that's what the SSE resume cursor relies on.
+    if (events[1]!.id <= events[0]!.id) {
+      throw new Error("event ids must be strictly increasing");
+    }
+
+    // since_id should exclude already-seen events.
+    const tail = store.listEvents({ programId, sinceId: events[0]!.id });
+    if (tail.length !== 1 || tail[0]!.id !== events[1]!.id) {
+      throw new Error("since_id cursor did not filter correctly");
+    }
+    ok(name);
+  } catch (err) {
+    fail(name, err);
+  } finally {
+    cleanup();
+  }
+}
+
+async function testStandaloneEventsNullProgramId(): Promise<void> {
+  const name = "standalone task events have null program_id";
+  const { store, cleanup } = newStore();
+  try {
+    const { runner } = makeRunner({});
+    const queue = new TaskQueue(
+      store,
+      // Planner is unused on this path; throw to make sure it's not called.
+      async () => {
+        throw new Error("planner should not run for submit()");
+      },
+      runner,
+    );
+
+    const { taskId } = queue.submit({
+      kind: "implement_feature",
+      workspaceDir: "/tmp/ws",
+      goal: "standalone",
+    });
+
+    await waitFor(() => store.getTask(taskId)?.status === "done");
+
+    const events = store.listEvents({ taskId, limit: 10 });
+    if (events.length !== 1) {
+      throw new Error(`expected 1 event, got ${events.length}`);
+    }
+    if (events[0]!.programId !== null) {
+      throw new Error(
+        `standalone task event must have null program_id; got ${events[0]!.programId}`,
+      );
+    }
+    ok(name);
+  } catch (err) {
+    fail(name, err);
+  } finally {
+    cleanup();
+  }
+}
+
+async function testListProgramsOrdering(): Promise<void> {
+  const name = "list_programs returns most-recent first";
+  const { store, cleanup } = newStore();
+  try {
+    const { runner } = makeRunner({});
+    const queue = new TaskQueue(
+      store,
+      makePlanner([
+        { key: "x", goal: "x", kind: "implement_feature", dependsOnKeys: [] },
+      ]),
+      runner,
+    );
+
+    const first = queue.submitProgram({ workspaceDir: "/tmp/ws", goal: "first" });
+    // Force created_at to differ so the ORDER BY is deterministic — Date.now()
+    // ticks at ms granularity which can collide on fast machines.
+    await new Promise((r) => setTimeout(r, 2));
+    const second = queue.submitProgram({ workspaceDir: "/tmp/ws", goal: "second" });
+    await new Promise((r) => setTimeout(r, 2));
+    const third = queue.submitProgram({ workspaceDir: "/tmp/ws", goal: "third" });
+
+    await waitFor(() => store.getProgram(third.programId)?.status === "done");
+
+    const programs = store.listPrograms({ limit: 10 });
+    if (programs.length !== 3) {
+      throw new Error(`expected 3 programs, got ${programs.length}`);
+    }
+    const ids = programs.map((p) => p.id);
+    const expected = [third.programId, second.programId, first.programId];
+    if (JSON.stringify(ids) !== JSON.stringify(expected)) {
+      throw new Error(
+        `ordering wrong: got ${JSON.stringify(ids)} expected ${JSON.stringify(expected)}`,
+      );
+    }
+    ok(name);
+  } catch (err) {
+    fail(name, err);
+  } finally {
+    cleanup();
+  }
+}
+
 async function main(): Promise<void> {
   await testSingleTask();
   await testDiamondDag();
   await testFailureSticky();
   await testFailureInFlightDrains();
   await testConcurrencyCap();
+  await testEventsLandInTable();
+  await testStandaloneEventsNullProgramId();
+  await testListProgramsOrdering();
 
   if (failures > 0) {
     process.stderr.write(`\n${failures} failure(s)\n`);

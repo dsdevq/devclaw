@@ -1,22 +1,21 @@
 """
 DevClaw v2 — OpenHands runner.
 
-Spawned as a subprocess by the TypeScript MCP server when an `implement_feature`
-MCP call lands. Reads a single JSON request from argv[1] (so command lines stay
-readable) and writes a single JSON response to stdout.
+Spawned as a subprocess (host process or sandcastle-runner docker exec) by
+the TypeScript MCP server. Reads a single JSON request from argv[1] and
+streams progress to stdout, one prefixed line at a time:
 
-Request shape:
-    {"workspace_dir": "/abs/path", "goal": "natural-language task"}
+    event: {"id":"...","type":"ActionEvent","source":"agent","payload":{...},"ts":...}
+    event: {"id":"...","type":"ObservationEvent",...}
+    ...
+    result: {"status":"ok","workspace_dir":"...","message":"..."}
 
-Response shape (success):
-    {"status": "ok", "final_message": "...", "tool_calls": N}
+The TS caller splits on newlines and routes `event:` lines to the events
+table while waiting for the single terminating `result:` line. On failure
+the `result:` line carries status='error' instead.
 
-Response shape (failure):
-    {"status": "error", "error": "...", "trace": "..."}
-
-Authentication: relies on Claude Code OAuth session via CLAUDE_CODE_EXECUTABLE
-+ CLAUDE_CONFIG_DIR env vars (validated end-to-end 2026-05-25 smoke test).
-No ANTHROPIC_API_KEY required or accepted.
+Authentication: Claude Code OAuth session via CLAUDE_CODE_EXECUTABLE +
+CLAUDE_CONFIG_DIR env vars. No ANTHROPIC_API_KEY required or accepted.
 """
 
 import contextlib
@@ -24,6 +23,7 @@ import io
 import json
 import os
 import sys
+import time
 import traceback
 
 
@@ -58,22 +58,41 @@ def _wrap_goal(kind: str, goal: str) -> str:
     return template.format(goal=goal)
 
 
+def _emit_result(payload: dict) -> None:
+    """Write the final terminating `result: <json>` line and flush.
+
+    The TS caller treats the first `result:` line as the run's verdict.
+    Anything written to stdout AFTER this line is ignored.
+    """
+    sys.stdout.write("result: " + json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
+def _emit_event(payload: dict) -> None:
+    """Write one `event: <json>` line and flush.
+
+    Flushing matters: the TS caller streams stdout line-by-line and writes
+    each event to the events table the moment it arrives. Without flush
+    we'd see a flood of events only at process exit.
+    """
+    sys.stdout.write("event: " + json.dumps(payload) + "\n")
+    sys.stdout.flush()
+
+
 def _refuse_api_key() -> None:
     """Refuse to run if an API key snuck into the env — preserves the
     Pro-subscription cost model (memory: pro-subscription-is-the-design)."""
     for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         if os.environ.get(var):
-            print(
-                json.dumps(
-                    {
-                        "status": "error",
-                        "error": (
-                            f"{var} is set in the environment. DevClaw v2 runs "
-                            "exclusively through Claude Code OAuth — refusing to "
-                            "spend metered credits."
-                        ),
-                    }
-                )
+            _emit_result(
+                {
+                    "status": "error",
+                    "error": (
+                        f"{var} is set in the environment. DevClaw v2 runs "
+                        "exclusively through Claude Code OAuth — refusing to "
+                        "spend metered credits."
+                    ),
+                }
             )
             sys.exit(2)
 
@@ -82,38 +101,29 @@ def main() -> None:
     _refuse_api_key()
 
     if len(sys.argv) != 2:
-        print(json.dumps({"status": "error", "error": "expected one JSON arg"}))
+        _emit_result({"status": "error", "error": "expected one JSON arg"})
         sys.exit(2)
 
     try:
         req = json.loads(sys.argv[1])
     except json.JSONDecodeError as exc:
-        print(json.dumps({"status": "error", "error": f"invalid JSON: {exc}"}))
+        _emit_result({"status": "error", "error": f"invalid JSON: {exc}"})
         sys.exit(2)
 
     workspace_dir = req.get("workspace_dir")
     goal = req.get("goal")
     kind = req.get("kind", "implement_feature")
     if not workspace_dir or not goal:
-        print(
-            json.dumps(
-                {
-                    "status": "error",
-                    "error": "request must include workspace_dir and goal",
-                }
-            )
+        _emit_result(
+            {
+                "status": "error",
+                "error": "request must include workspace_dir and goal",
+            }
         )
         sys.exit(2)
 
     if kind not in ("implement_feature", "fix_bug", "review_repository"):
-        print(
-            json.dumps(
-                {
-                    "status": "error",
-                    "error": f"unknown kind: {kind}",
-                }
-            )
-        )
+        _emit_result({"status": "error", "error": f"unknown kind: {kind}"})
         sys.exit(2)
 
     # Wrap the user's goal with kind-specific operating instructions. The
@@ -130,27 +140,51 @@ def main() -> None:
     try:
         from openhands.sdk.agent import ACPAgent
         from openhands.sdk.conversation import Conversation
+        from openhands.sdk.event.base import Event
     except ImportError as exc:
-        print(
-            json.dumps(
-                {
-                    "status": "error",
-                    "error": (
-                        "openhands-sdk not importable. Install with: "
-                        "`npm run python:install` from the v2/ directory."
-                    ),
-                    "trace": str(exc),
-                }
-            )
+        _emit_result(
+            {
+                "status": "error",
+                "error": (
+                    "openhands-sdk not importable. Install with: "
+                    "`npm run python:install` from the v2/ directory."
+                ),
+                "trace": str(exc),
+            }
         )
         sys.exit(2)
 
-    # OpenHands SDK and its ACP transport write decorative output (banner,
-    # live tool-call panels, finish messages) to stdout. Capture all of that
-    # so our final JSON line is the only thing on actual stdout — the
-    # TypeScript caller needs clean JSON to parse the result.
+    # OpenHands SDK + ACP transport write decorative output (banner, panels,
+    # finish messages) to stdout. Capture all of it so the only lines on
+    # actual stdout are our prefixed `event:` / `result:` lines.
     captured_stdout = io.StringIO()
     os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+
+    def on_event(event: Event) -> None:
+        """Forward each SDK Event to the TS caller as a prefixed JSON line.
+
+        Runs in whatever thread the SDK invokes callbacks on; print + flush
+        are thread-safe at the line granularity we care about. Swallow our
+        own exceptions — a bad event must not crash the agent loop.
+        """
+        try:
+            payload = event.model_dump(mode="json")
+        except Exception:
+            # Some events may have unencodable fields in edge cases.
+            payload = {"repr": repr(event)}
+        try:
+            _emit_event(
+                {
+                    "id": getattr(event, "id", None),
+                    "type": event.__class__.__name__,
+                    "source": str(getattr(event, "source", "")),
+                    "ts": getattr(event, "timestamp", None) or time.time(),
+                    "payload": payload,
+                }
+            )
+        except Exception:
+            # stdout broken? nothing else we can do; let the run continue.
+            pass
 
     try:
         with contextlib.redirect_stdout(captured_stdout):
@@ -163,40 +197,32 @@ def main() -> None:
                     "HOME": os.environ.get("HOME", ""),
                 },
             )
-            conversation = Conversation(agent=agent, workspace=workspace_dir)
+            conversation = Conversation(
+                agent=agent,
+                workspace=workspace_dir,
+                callbacks=[on_event],
+            )
             conversation.send_message(wrapped_goal)
             conversation.run()
             agent.close()
     except Exception as exc:
-        # On failure, surface the captured agent output as the trace —
-        # otherwise debugging is blind.
-        print(
-            json.dumps(
-                {
-                    "status": "error",
-                    "error": str(exc),
-                    "trace": traceback.format_exc(),
-                    "agent_output": captured_stdout.getvalue(),
-                }
-            )
-        )
-        sys.exit(1)
-
-    # Conversation doesn't expose a clean "final message" accessor across SDK
-    # versions; for slice 1 we report success + workspace location and pass
-    # the captured agent output through so the caller can inspect/log it.
-    print(
-        json.dumps(
+        _emit_result(
             {
-                "status": "ok",
-                "workspace_dir": workspace_dir,
-                "message": (
-                    "OpenHands completed. Inspect workspace_dir for the resulting files; "
-                    "richer result extraction lands in slice 2."
-                ),
+                "status": "error",
+                "error": str(exc),
+                "trace": traceback.format_exc(),
                 "agent_output": captured_stdout.getvalue(),
             }
         )
+        sys.exit(1)
+
+    _emit_result(
+        {
+            "status": "ok",
+            "workspace_dir": workspace_dir,
+            "message": "OpenHands completed.",
+            "agent_output": captured_stdout.getvalue(),
+        }
     )
 
 

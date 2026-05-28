@@ -35,12 +35,13 @@
 
 import { randomUUID } from "node:crypto";
 
-import {
-  runOpenHands,
-  type OpenHandsRequest,
-  type OpenHandsResult,
-} from "./openhands-runner.js";
 import { planGoal, PlannerError, type PlannedTask } from "./planner.js";
+import {
+  runSandcastle,
+  type OpenHandsResult,
+  type RunnerEvent,
+  type SandcastleRunRequest,
+} from "./sandcastle-runner.js";
 import {
   StateStore,
   Task,
@@ -86,12 +87,14 @@ export class TaskQueue {
       workspaceDir: string,
     ) => Promise<PlannedTask[]> = (g, w) => planGoal(g, w),
     /**
-     * Injectable for tests — defaults to the real OpenHands runner. The
+     * Injectable for tests — defaults to the sandcastle docker runner. The
      * DAG-stub smoke test swaps this for a fake that resolves quickly so
-     * we can verify queue + state logic without burning Pro tokens.
+     * we can verify queue + state logic without burning Pro tokens or
+     * requiring docker.
      */
-    private readonly runner: (req: OpenHandsRequest) => Promise<OpenHandsResult> =
-      runOpenHands,
+    private readonly runner: (
+      req: SandcastleRunRequest,
+    ) => Promise<OpenHandsResult> = runSandcastle,
   ) {}
 
   // ---- standalone task path (unchanged) -------------------------------
@@ -299,8 +302,35 @@ export class TaskQueue {
     taskId: string,
     req: { kind: TaskKind; workspaceDir: string; goal: string },
   ): Promise<void> {
+    // Resolve the program_id once so onEvent doesn't re-query the store on
+    // every event. Standalone tasks just get null.
+    const row = this.store.getTask(taskId);
+    const programId = row?.programId ?? null;
+
+    const onEvent = (event: RunnerEvent): void => {
+      try {
+        this.store.appendEvent({
+          taskId,
+          programId,
+          type: event.type,
+          source: event.source,
+          payloadJson: JSON.stringify(event.payload ?? null),
+          ts:
+            typeof event.ts === "number"
+              ? event.ts
+              : Date.now(),
+        });
+      } catch (err) {
+        // Event-table writes must never crash the run. Surface to stderr so
+        // operators can spot a recurring schema/db problem.
+        process.stderr.write(
+          `task-queue: appendEvent failed task=${taskId}: ${(err as Error).message}\n`,
+        );
+      }
+    };
+
     try {
-      const result = await this.runner(req);
+      const result = await this.runner({ ...req, onEvent });
       if (result.status === "ok") {
         this.store.markDone(taskId, JSON.stringify(result));
       } else {
