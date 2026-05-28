@@ -58,14 +58,22 @@ def _wrap_goal(kind: str, goal: str) -> str:
     return template.format(goal=goal)
 
 
+# `sys.__stdout__` is the original stdout the process was started with —
+# `contextlib.redirect_stdout` swaps `sys.stdout` but leaves `__stdout__`
+# alone. We write our prefixed protocol lines (`event:` / `result:`)
+# straight to it so SDK decorative output captured by the redirect block
+# can't swallow them.
+_PROTO_OUT = sys.__stdout__
+
+
 def _emit_result(payload: dict) -> None:
     """Write the final terminating `result: <json>` line and flush.
 
     The TS caller treats the first `result:` line as the run's verdict.
     Anything written to stdout AFTER this line is ignored.
     """
-    sys.stdout.write("result: " + json.dumps(payload) + "\n")
-    sys.stdout.flush()
+    _PROTO_OUT.write("result: " + json.dumps(payload) + "\n")
+    _PROTO_OUT.flush()
 
 
 def _emit_event(payload: dict) -> None:
@@ -75,8 +83,8 @@ def _emit_event(payload: dict) -> None:
     each event to the events table the moment it arrives. Without flush
     we'd see a flood of events only at process exit.
     """
-    sys.stdout.write("event: " + json.dumps(payload) + "\n")
-    sys.stdout.flush()
+    _PROTO_OUT.write("event: " + json.dumps(payload) + "\n")
+    _PROTO_OUT.flush()
 
 
 def _refuse_api_key() -> None:
