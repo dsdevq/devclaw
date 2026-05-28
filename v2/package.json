@@ -16,6 +16,9 @@
     "test:fix-bug": "tsx test/runtime-fix-bug.ts",
     "test:http-multi": "tsx test/runtime-http-multi-client.ts",
     "test:notify-url": "tsx test/runtime-notify-url.ts",
+    "test:planner": "tsx test/unit-planner.ts",
+    "test:state-program": "tsx test/unit-state-program.ts",
+    "test:unit": "tsx test/unit-planner.ts && tsx test/unit-state-program.ts",
     "python:install": "python3 -m venv python-runner/.venv && python-runner/.venv/bin/pip install -q -r python-runner/requirements.txt"
   },
   "dependencies": {

@@ -29,7 +29,7 @@ import { StateStore } from "./state-store.js";
 import { TaskQueue } from "./task-queue.js";
 
 const SERVER_NAME = "devclaw";
-const SERVER_VERSION = "0.0.3";
+const SERVER_VERSION = "0.0.4";
 
 const DB_PATH = resolve(process.cwd(), process.env["DEVCLAW_DB"] ?? "devclaw.db");
 const TRANSPORT = process.env["DEVCLAW_TRANSPORT"] ?? "stdio";
@@ -164,6 +164,64 @@ function buildServer(): Server {
         },
       },
       {
+        name: "start_program",
+        description:
+          "Submit a high-level coding goal that DevClaw should decompose " +
+          "into a DAG of smaller OpenHands tasks. The planner (a Claude " +
+          "subprocess) writes the plan, then tasks execute in dep order " +
+          "with bounded parallelism. Returns a program_id immediately; " +
+          "poll get_program(program_id) to inspect progress or pass " +
+          "notify_url to be pushed the final result when the whole " +
+          "program terminates. Use this for goals too large for one " +
+          "implement_feature call (e.g. 'scaffold a new service with CI " +
+          "and a smoke test'). For small bounded goals, implement_feature " +
+          "/ fix_bug / review_repository are still the right tools.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            workspace_dir: {
+              type: "string",
+              description:
+                "Absolute path to the workspace OpenHands will work in. " +
+                "Shared by every task in this program.",
+            },
+            goal: {
+              type: "string",
+              description:
+                "Natural-language description of the overall goal. The " +
+                "planner will decide whether to decompose it.",
+            },
+            notify_url: {
+              type: "string",
+              description:
+                "Optional. URL to POST the program row (with embedded " +
+                "task rows) to once the program reaches a terminal state " +
+                "(done | failed). Bounded retries (1s/2s/4s). No " +
+                "per-task callbacks fire — only this one.",
+            },
+          },
+          required: ["workspace_dir", "goal"],
+          additionalProperties: false,
+        },
+      },
+      {
+        name: "get_program",
+        description:
+          "Return a program row and all its tasks in dependency order. " +
+          "Use to poll the state of a program submitted via start_program.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            program_id: {
+              type: "string",
+              description: "Program id returned by start_program.",
+            },
+          },
+          required: ["program_id"],
+          additionalProperties: false,
+        },
+      },
+      {
         name: "list_tasks",
         description:
           "List recent tasks, most-recent first. Optionally filter by status or kind.",
@@ -265,6 +323,62 @@ function buildServer(): Server {
             {
               type: "text" as const,
               text: JSON.stringify({ task_id: taskId, status: "pending" }, null, 2),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      case "start_program": {
+        const workspaceDir = String(args["workspace_dir"] ?? "");
+        const goal = String(args["goal"] ?? "");
+        const notifyUrl =
+          typeof args["notify_url"] === "string" && args["notify_url"]
+            ? (args["notify_url"] as string)
+            : null;
+        if (!workspaceDir || !goal) {
+          throw new Error("start_program requires workspace_dir and goal");
+        }
+        const { programId } = queue.submitProgram({
+          workspaceDir,
+          goal,
+          notifyUrl,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                { program_id: programId, status: "planning" },
+                null,
+                2,
+              ),
+            },
+          ],
+          isError: false,
+        };
+      }
+
+      case "get_program": {
+        const programId = String(args["program_id"] ?? "");
+        const program = store.getProgram(programId);
+        if (!program) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ error: `unknown program_id: ${programId}` }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        const tasks = store.listProgramTasks(programId);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ program, tasks }, null, 2),
             },
           ],
           isError: false,

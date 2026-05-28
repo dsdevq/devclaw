@@ -1,20 +1,48 @@
 /**
- * In-process async task executor. The MCP handler calls submit() and returns
- * immediately with a task_id; the OpenHands subprocess runs in the background,
- * and status flips in the state store when it terminates.
+ * In-process async task executor. The MCP handler calls submit() or
+ * submitProgram() and returns immediately; OpenHands subprocesses run
+ * in the background and the state store flips task rows when they settle.
  *
  * Single-writer-to-state by design — only this queue mutates task rows.
  *
- * If a task was submitted with a notify_url, after the row reaches a terminal
- * state (done | failed) we POST the row to that URL. Bounded retries (1s/2s/4s
- * backoff). All errors get logged and swallowed — a callback failure must not
- * crash the queue.
+ * Programs (DAGs):
+ *   submitProgram() returns a program_id synchronously and:
+ *     1. spawns the planner asynchronously,
+ *     2. on success, creates tasks with depends_on remapped to UUIDs and
+ *        schedules tasks whose deps are already satisfied,
+ *     3. on planner failure marks the program failed and fires the
+ *        program-level notify.
+ *   When a child task settles, the queue:
+ *     - schedules any sibling whose deps are now all 'done',
+ *     - decrements the program's in-flight counter,
+ *     - if no in-flight remain and the program has reached a terminal
+ *       state (all done, or any failed with no further progress
+ *       possible), marks the program done/failed and fires its notify.
+ *
+ * Failure policy: a single sibling failure makes the program "sticky
+ * failed" — pending siblings will not start, in-flight siblings still
+ * run to completion. Matches the architecture-v2 §4 description (DAG
+ * walks forward; failures don't roll back, but don't propagate either).
+ *
+ * Notifications:
+ *   - Standalone tasks (no program_id) fire their own notify_url on
+ *     terminal state, with bounded retries (1s/2s/4s backoff).
+ *   - Program-child tasks DO NOT fire per-task callbacks — only the
+ *     program-level notify fires once the program terminates. This
+ *     keeps the callback contract simple for callers: one program in,
+ *     one notify out.
  */
 
 import { randomUUID } from "node:crypto";
 
 import { runOpenHands } from "./openhands-runner.js";
-import { StateStore, Task, TaskKind } from "./state-store.js";
+import { planGoal, PlannerError, type PlannedTask } from "./planner.js";
+import {
+  StateStore,
+  Task,
+  TaskKind,
+  type Program,
+} from "./state-store.js";
 
 export type SubmitInput = {
   kind: TaskKind;
@@ -27,10 +55,35 @@ export type SubmitResult = {
   taskId: string;
 };
 
+export type SubmitProgramInput = {
+  workspaceDir: string;
+  goal: string;
+  notifyUrl?: string | null;
+};
+
+export type SubmitProgramResult = {
+  programId: string;
+};
+
 const NOTIFY_BACKOFF_MS = [1000, 2000, 4000];
+const MAX_CONCURRENT_PER_PROGRAM = Number(
+  process.env["DEVCLAW_MAX_CONCURRENT_PER_PROGRAM"] ?? "2",
+);
 
 export class TaskQueue {
-  constructor(private readonly store: StateStore) {}
+  /** In-flight counter per program, used to enforce concurrency cap. */
+  private readonly runningByProgram = new Map<string, number>();
+
+  constructor(
+    private readonly store: StateStore,
+    /** Injectable for tests — defaults to the real planner. */
+    private readonly planner: (
+      goal: string,
+      workspaceDir: string,
+    ) => Promise<PlannedTask[]> = (g, w) => planGoal(g, w),
+  ) {}
+
+  // ---- standalone task path (unchanged) -------------------------------
 
   submit(input: SubmitInput): SubmitResult {
     const taskId = randomUUID();
@@ -41,23 +94,202 @@ export class TaskQueue {
       goal: input.goal,
       notifyUrl: input.notifyUrl ?? null,
     });
-
-    // Kick off the runner without awaiting — the MCP handler returns
-    // immediately. Errors thrown by the runner promise are caught and
-    // recorded in state; we never let them surface as unhandled rejections.
-    void this.execute(taskId, input);
-
+    void this.executeStandalone(taskId, input);
     return { taskId };
   }
 
-  private async execute(taskId: string, input: SubmitInput): Promise<void> {
+  private async executeStandalone(
+    taskId: string,
+    input: SubmitInput,
+  ): Promise<void> {
     this.store.markRunning(taskId);
+    await this.runAndSettle(taskId, {
+      kind: input.kind,
+      workspaceDir: input.workspaceDir,
+      goal: input.goal,
+    });
+
+    const finalRow = this.store.getTask(taskId);
+    if (finalRow?.notifyUrl) {
+      await this.notifyTask(finalRow);
+    }
+  }
+
+  // ---- program path ---------------------------------------------------
+
+  submitProgram(input: SubmitProgramInput): SubmitProgramResult {
+    const programId = randomUUID();
+    this.store.createProgram({
+      id: programId,
+      goal: input.goal,
+      workspaceDir: input.workspaceDir,
+      notifyUrl: input.notifyUrl ?? null,
+    });
+    void this.planAndStart(programId, input);
+    return { programId };
+  }
+
+  private async planAndStart(
+    programId: string,
+    input: SubmitProgramInput,
+  ): Promise<void> {
+    let planned: PlannedTask[];
     try {
-      const result = await runOpenHands({
-        kind: input.kind,
-        workspaceDir: input.workspaceDir,
-        goal: input.goal,
+      planned = await this.planner(input.goal, input.workspaceDir);
+    } catch (err) {
+      const msg =
+        err instanceof PlannerError
+          ? `planner: ${err.message}`
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      this.store.markProgramFailed(programId, msg);
+      const program = this.store.getProgram(programId);
+      if (program) await this.notifyProgram(program, []);
+      return;
+    }
+
+    // Map planner-supplied keys → real UUIDs, then persist tasks with
+    // depends_on remapped to UUIDs. The whole insert runs synchronously
+    // before any task is scheduled so the dep graph is fully consistent
+    // by the time the first task starts.
+    const keyToUuid = new Map<string, string>();
+    for (const p of planned) keyToUuid.set(p.key, randomUUID());
+
+    planned.forEach((p, idx) => {
+      const id = keyToUuid.get(p.key) as string;
+      const depsUuids = p.dependsOnKeys.map((k) => {
+        const uuid = keyToUuid.get(k);
+        if (!uuid) {
+          // Should never happen — validatePlan rejects dangling refs.
+          throw new Error(`planner produced dangling ref '${k}'`);
+        }
+        return uuid;
       });
+      this.store.createTask({
+        id,
+        kind: p.kind,
+        workspaceDir: input.workspaceDir,
+        goal: p.goal,
+        // Per-task notify intentionally omitted — only program-level fires.
+        notifyUrl: null,
+        programId,
+        dependsOn: depsUuids,
+        orderIdx: idx,
+      });
+    });
+
+    this.store.markProgramRunning(programId);
+    this.scheduleReady(programId);
+  }
+
+  /**
+   * Find pending tasks whose deps are all done and launch up to the
+   * concurrency cap. Safe to call multiple times — claimPending is
+   * atomic, so a second concurrent call is a no-op for already-claimed
+   * tasks. If the program has already failed (sticky), launch nothing.
+   */
+  private scheduleReady(programId: string): void {
+    const program = this.store.getProgram(programId);
+    if (!program || program.status === "failed" || program.status === "done") {
+      return;
+    }
+
+    const tasks = this.store.listProgramTasks(programId);
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+
+    // If any task already failed, mark program failed (sticky) and bail.
+    if (tasks.some((t) => t.status === "failed")) {
+      // Don't start new work, but in-flight tasks will continue. The
+      // program transition to 'failed' happens in the post-task hook
+      // once the in-flight count hits zero. Here we only suppress new
+      // launches.
+      return;
+    }
+
+    let inFlight = this.runningByProgram.get(programId) ?? 0;
+    for (const t of tasks) {
+      if (inFlight >= MAX_CONCURRENT_PER_PROGRAM) break;
+      if (t.status !== "pending") continue;
+      const depsReady = t.dependsOn.every(
+        (d) => byId.get(d)?.status === "done",
+      );
+      if (!depsReady) continue;
+      if (!this.store.claimPending(t.id)) continue; // lost the race
+      inFlight++;
+      this.runningByProgram.set(programId, inFlight);
+      void this.executeProgramTask(programId, t.id, t.kind, t.workspaceDir, t.goal);
+    }
+  }
+
+  private async executeProgramTask(
+    programId: string,
+    taskId: string,
+    kind: TaskKind,
+    workspaceDir: string,
+    goal: string,
+  ): Promise<void> {
+    await this.runAndSettle(taskId, { kind, workspaceDir, goal });
+
+    // Decrement in-flight, then re-evaluate scheduling + termination.
+    const n = (this.runningByProgram.get(programId) ?? 1) - 1;
+    if (n <= 0) this.runningByProgram.delete(programId);
+    else this.runningByProgram.set(programId, n);
+
+    this.advanceProgram(programId);
+  }
+
+  /**
+   * Evaluate program-level state after a child terminated.
+   *   - if all tasks 'done' → mark program done + notify
+   *   - if any task 'failed' AND in-flight count is zero → mark program
+   *     failed + notify (sticky)
+   *   - otherwise schedule any newly-ready tasks
+   */
+  private advanceProgram(programId: string): void {
+    const program = this.store.getProgram(programId);
+    if (!program || program.status === "done" || program.status === "failed") {
+      // Already terminal — notify already fired (or will, in the in-flight
+      // task's own advanceProgram call).
+      return;
+    }
+
+    const tasks = this.store.listProgramTasks(programId);
+    const allDone = tasks.length > 0 && tasks.every((t) => t.status === "done");
+    const anyFailed = tasks.some((t) => t.status === "failed");
+    const inFlight = this.runningByProgram.get(programId) ?? 0;
+
+    if (allDone) {
+      this.store.markProgramDone(programId);
+      void this.notifyProgram(
+        this.store.getProgram(programId) as Program,
+        tasks,
+      );
+      return;
+    }
+    if (anyFailed && inFlight === 0) {
+      const firstErr =
+        tasks.find((t) => t.status === "failed")?.error ?? "task failed";
+      this.store.markProgramFailed(programId, firstErr);
+      void this.notifyProgram(
+        this.store.getProgram(programId) as Program,
+        tasks,
+      );
+      return;
+    }
+    if (!anyFailed) {
+      this.scheduleReady(programId);
+    }
+  }
+
+  // ---- shared runner --------------------------------------------------
+
+  private async runAndSettle(
+    taskId: string,
+    req: { kind: TaskKind; workspaceDir: string; goal: string },
+  ): Promise<void> {
+    try {
+      const result = await runOpenHands(req);
       if (result.status === "ok") {
         this.store.markDone(taskId, JSON.stringify(result));
       } else {
@@ -67,18 +299,11 @@ export class TaskQueue {
       const msg = err instanceof Error ? err.message : String(err);
       this.store.markFailed(taskId, msg);
     }
-
-    // Fire the notify callback after the row is in its final state. We read
-    // the row back from the store so the payload reflects exactly what
-    // get_status would return. Errors here never propagate — at worst the
-    // caller polls instead.
-    const finalRow = this.store.getTask(taskId);
-    if (finalRow?.notifyUrl) {
-      await this.notify(finalRow);
-    }
   }
 
-  private async notify(task: Task): Promise<void> {
+  // ---- notify ---------------------------------------------------------
+
+  private async notifyTask(task: Task): Promise<void> {
     if (!task.notifyUrl) return;
     const payload = {
       task_id: task.id,
@@ -90,28 +315,61 @@ export class TaskQueue {
       error: task.error,
       terminated_at: task.completedAt,
     };
-    const body = JSON.stringify(payload);
+    await this.postWithRetries(task.notifyUrl, payload, `task=${task.id}`);
+  }
 
+  private async notifyProgram(program: Program, tasks: Task[]): Promise<void> {
+    if (!program.notifyUrl) return;
+    const payload = {
+      program_id: program.id,
+      status: program.status,
+      goal: program.goal,
+      workspace_dir: program.workspaceDir,
+      error: program.error,
+      terminated_at: program.completedAt,
+      tasks: tasks.map((t) => ({
+        task_id: t.id,
+        kind: t.kind,
+        status: t.status,
+        goal: t.goal,
+        depends_on: t.dependsOn,
+        result_json: t.resultJson,
+        error: t.error,
+      })),
+    };
+    await this.postWithRetries(
+      program.notifyUrl,
+      payload,
+      `program=${program.id}`,
+    );
+  }
+
+  private async postWithRetries(
+    url: string,
+    payload: object,
+    tag: string,
+  ): Promise<void> {
+    const body = JSON.stringify(payload);
     for (let attempt = 0; attempt < NOTIFY_BACKOFF_MS.length; attempt++) {
       try {
-        const res = await fetch(task.notifyUrl, {
+        const res = await fetch(url, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body,
         });
         if (res.ok) {
           process.stderr.write(
-            `notify ok task=${task.id} url=${task.notifyUrl} status=${res.status} attempt=${attempt + 1}\n`,
+            `notify ok ${tag} url=${url} status=${res.status} attempt=${attempt + 1}\n`,
           );
           return;
         }
         process.stderr.write(
-          `notify non-2xx task=${task.id} url=${task.notifyUrl} status=${res.status} attempt=${attempt + 1}\n`,
+          `notify non-2xx ${tag} url=${url} status=${res.status} attempt=${attempt + 1}\n`,
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(
-          `notify error task=${task.id} url=${task.notifyUrl} err="${msg}" attempt=${attempt + 1}\n`,
+          `notify error ${tag} url=${url} err="${msg}" attempt=${attempt + 1}\n`,
         );
       }
       if (attempt < NOTIFY_BACKOFF_MS.length - 1) {
@@ -119,7 +377,7 @@ export class TaskQueue {
       }
     }
     process.stderr.write(
-      `notify WARN giving up task=${task.id} url=${task.notifyUrl} after ${NOTIFY_BACKOFF_MS.length} attempts\n`,
+      `notify WARN giving up ${tag} url=${url} after ${NOTIFY_BACKOFF_MS.length} attempts\n`,
     );
   }
 }

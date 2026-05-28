@@ -18,6 +18,17 @@ export type TaskKind =
   | "fix_bug"
   | "review_repository";
 
+// Programs hold a DAG of tasks decomposed from a single high-level goal.
+// Status semantics:
+//   planning   — planner is still decomposing (claude --print in flight)
+//   running    — at least one task exists, none have moved to failed AND
+//                not all are terminal yet
+//   done       — every task in the program is status='done'
+//   failed     — planner failed OR any task is status='failed' (failure
+//                is sticky; we do NOT continue scheduling siblings after
+//                a sibling fails — see TaskQueue for the policy)
+export type ProgramStatus = "planning" | "running" | "done" | "failed";
+
 export type Task = {
   id: string;
   kind: TaskKind;
@@ -29,6 +40,20 @@ export type Task = {
   error: string | null;
   createdAt: number;
   startedAt: number | null;
+  completedAt: number | null;
+  programId: string | null;
+  dependsOn: string[];
+  orderIdx: number | null;
+};
+
+export type Program = {
+  id: string;
+  goal: string;
+  workspaceDir: string;
+  notifyUrl: string | null;
+  status: ProgramStatus;
+  error: string | null;
+  createdAt: number;
   completedAt: number | null;
 };
 
@@ -44,9 +69,32 @@ type TaskRow = {
   created_at: number;
   started_at: number | null;
   completed_at: number | null;
+  program_id: string | null;
+  depends_on: string | null;
+  order_idx: number | null;
+};
+
+type ProgramRow = {
+  id: string;
+  goal: string;
+  workspace_dir: string;
+  notify_url: string | null;
+  status: ProgramStatus;
+  error: string | null;
+  created_at: number;
+  completed_at: number | null;
 };
 
 function rowToTask(row: TaskRow): Task {
+  let dependsOn: string[] = [];
+  if (row.depends_on) {
+    try {
+      const parsed = JSON.parse(row.depends_on);
+      if (Array.isArray(parsed)) dependsOn = parsed.filter((x) => typeof x === "string");
+    } catch {
+      // tolerate corrupt depends_on cell — treat as no deps
+    }
+  }
   return {
     id: row.id,
     kind: row.kind,
@@ -58,6 +106,22 @@ function rowToTask(row: TaskRow): Task {
     error: row.error,
     createdAt: row.created_at,
     startedAt: row.started_at,
+    completedAt: row.completed_at,
+    programId: row.program_id,
+    dependsOn,
+    orderIdx: row.order_idx,
+  };
+}
+
+function rowToProgram(row: ProgramRow): Program {
+  return {
+    id: row.id,
+    goal: row.goal,
+    workspaceDir: row.workspace_dir,
+    notifyUrl: row.notify_url,
+    status: row.status,
+    error: row.error,
+    createdAt: row.created_at,
     completedAt: row.completed_at,
   };
 }
@@ -89,12 +153,28 @@ export class StateStore {
         error           TEXT,
         created_at      INTEGER NOT NULL,
         started_at      INTEGER,
+        completed_at    INTEGER,
+        program_id      TEXT,
+        depends_on      TEXT,
+        order_idx       INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS programs (
+        id              TEXT PRIMARY KEY,
+        goal            TEXT NOT NULL,
+        workspace_dir   TEXT NOT NULL,
+        notify_url      TEXT,
+        status          TEXT NOT NULL,
+        error           TEXT,
+        created_at      INTEGER NOT NULL,
         completed_at    INTEGER
       );
 
       CREATE INDEX IF NOT EXISTS idx_tasks_status     ON tasks(status);
       CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
       CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
+      CREATE INDEX IF NOT EXISTS idx_tasks_program    ON tasks(program_id);
+      CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
     `);
 
     // Forward-compat ALTERs for DBs created by older slices. Each is
@@ -103,6 +183,9 @@ export class StateStore {
     for (const sql of [
       `ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'implement_feature'`,
       `ALTER TABLE tasks ADD COLUMN notify_url TEXT`,
+      `ALTER TABLE tasks ADD COLUMN program_id TEXT`,
+      `ALTER TABLE tasks ADD COLUMN depends_on TEXT`,
+      `ALTER TABLE tasks ADD COLUMN order_idx INTEGER`,
     ]) {
       try {
         this.db.exec(sql);
@@ -118,11 +201,16 @@ export class StateStore {
     workspaceDir: string;
     goal: string;
     notifyUrl?: string | null;
+    programId?: string | null;
+    dependsOn?: string[];
+    orderIdx?: number | null;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, kind, status, workspace_dir, goal, notify_url, created_at)
-         VALUES (?, ?, 'pending', ?, ?, ?, ?)`,
+        `INSERT INTO tasks
+           (id, kind, status, workspace_dir, goal, notify_url, created_at,
+            program_id, depends_on, order_idx)
+         VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         input.id,
@@ -131,7 +219,76 @@ export class StateStore {
         input.goal,
         input.notifyUrl ?? null,
         Date.now(),
+        input.programId ?? null,
+        input.dependsOn && input.dependsOn.length
+          ? JSON.stringify(input.dependsOn)
+          : null,
+        input.orderIdx ?? null,
       );
+  }
+
+  createProgram(input: {
+    id: string;
+    goal: string;
+    workspaceDir: string;
+    notifyUrl?: string | null;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO programs (id, goal, workspace_dir, notify_url, status, created_at)
+         VALUES (?, ?, ?, ?, 'planning', ?)`,
+      )
+      .run(
+        input.id,
+        input.goal,
+        input.workspaceDir,
+        input.notifyUrl ?? null,
+        Date.now(),
+      );
+  }
+
+  markProgramRunning(programId: string): void {
+    this.db
+      .prepare(
+        `UPDATE programs SET status = 'running'
+         WHERE id = ? AND status = 'planning'`,
+      )
+      .run(programId);
+  }
+
+  markProgramDone(programId: string): void {
+    this.db
+      .prepare(
+        `UPDATE programs SET status = 'done', completed_at = ?
+         WHERE id = ? AND status IN ('planning', 'running')`,
+      )
+      .run(Date.now(), programId);
+  }
+
+  markProgramFailed(programId: string, error: string): void {
+    this.db
+      .prepare(
+        `UPDATE programs SET status = 'failed', error = ?, completed_at = ?
+         WHERE id = ? AND status IN ('planning', 'running')`,
+      )
+      .run(error, Date.now(), programId);
+  }
+
+  getProgram(programId: string): Program | null {
+    const row = this.db
+      .prepare(`SELECT * FROM programs WHERE id = ?`)
+      .get(programId) as ProgramRow | undefined;
+    return row ? rowToProgram(row) : null;
+  }
+
+  listProgramTasks(programId: string): Task[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM tasks WHERE program_id = ?
+         ORDER BY order_idx IS NULL, order_idx ASC, created_at ASC`,
+      )
+      .all(programId) as TaskRow[];
+    return rows.map(rowToTask);
   }
 
   markRunning(taskId: string): void {
@@ -141,6 +298,23 @@ export class StateStore {
          WHERE id = ? AND status = 'pending'`,
       )
       .run(Date.now(), taskId);
+  }
+
+  /**
+   * Atomically transition pending → running. Returns true if THIS call won
+   * the race (and the caller must therefore execute the task), false if
+   * the task was already running/done/failed or doesn't exist. Used by
+   * the DAG scheduler where multiple siblings finishing can both try to
+   * unblock the same downstream task.
+   */
+  claimPending(taskId: string): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE tasks SET status = 'running', started_at = ?
+         WHERE id = ? AND status = 'pending'`,
+      )
+      .run(Date.now(), taskId);
+    return result.changes === 1;
   }
 
   markDone(taskId: string, resultJson: string): void {
