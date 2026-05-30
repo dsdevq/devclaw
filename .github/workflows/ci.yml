@@ -19,6 +19,10 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GH Actions Artifact storage is quota-blocked by the account-lock;
+          # the SARIF upload fails and reds the job even with zero leaks.
+          # gitleaks's own exit code is the gate, so disable the upload.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
 
       - name: yamllint
         run: |
