@@ -33,6 +33,8 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__
+from .project_service import ProjectService
+from .project_store import ProjectStore
 from .state_store import StateStore
 from .task_queue import TaskQueue
 
@@ -51,6 +53,7 @@ TOKEN_QS = f"?token={urllib.parse.quote(AUTH_TOKEN)}" if AUTH_TOKEN else ""
 
 store = StateStore(DB_PATH)
 queue = TaskQueue(store)
+projects = ProjectService(ProjectStore(), queue)
 mcp: FastMCP = FastMCP(SERVER_NAME, version=__version__)
 
 LimitField = Field(ge=1, le=1000)
@@ -189,6 +192,58 @@ async def list_tasks(
     """List recent tasks, most-recent first. Optionally filter by status or kind."""
     tasks = store.list_tasks(status=status, kind=kind, limit=limit)
     return json.dumps([t.to_dict() for t in tasks], indent=2)
+
+
+# ===== build a project from scratch ==========================================
+
+
+@mcp.tool
+async def build_project(idea: str, workspace_dir: str) -> str:
+    """Start a project from scratch. DevClaw GRILLS you — one question at a time,
+    each with a recommended answer — to reach a shared understanding of what to
+    build and how, before any code is written. Returns a project_id and the first
+    question. Answer with answer_question(project_id, answer); repeat until
+    status='ready' (a spec), then approve_spec(project_id) to build it (which may
+    run for a long time via OpenHands)."""
+    if not idea or not workspace_dir:
+        raise ToolError("build_project requires idea and workspace_dir")
+    return json.dumps(await projects.start(idea, workspace_dir), indent=2)
+
+
+@mcp.tool
+async def answer_question(project_id: str, answer: str) -> str:
+    """Answer the project's current grill question. Returns the next question, or
+    status='ready' with the finalized spec once the interview converges."""
+    try:
+        return json.dumps(await projects.answer(project_id, answer), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown project_id: {project_id}")
+    except ValueError as err:
+        raise ToolError(str(err))
+
+
+@mcp.tool
+async def get_project(project_id: str) -> str:
+    """Status of a build-from-scratch project across all phases — idea,
+    transcript, the outstanding question, the spec, and (once approved) the
+    program_id of the running build."""
+    project = projects.get(project_id)
+    if not project:
+        raise ToolError(f"unknown project_id: {project_id}")
+    return json.dumps(project.to_dict(), indent=2)
+
+
+@mcp.tool
+async def approve_spec(project_id: str) -> str:
+    """Approve a ready project spec and start building. Decomposes the spec into a
+    milestone task DAG and hands it to the executor; returns the program_id. Poll
+    get_program(program_id) or get_project(project_id) for progress."""
+    try:
+        return json.dumps(await projects.approve(project_id), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown project_id: {project_id}")
+    except ValueError as err:
+        raise ToolError(str(err))
 
 
 # ===== dashboard + SSE (HTTP transport only) =================================

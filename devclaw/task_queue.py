@@ -277,6 +277,53 @@ class TaskQueue:
         # tasks; another program may be able to start. Re-pump.
         self._pump()
 
+    def _persist_plan(
+        self, program_id: str, workspace_dir: str, planned: list[PlannedTask]
+    ) -> None:
+        """Map planner keys -> real UUIDs and insert the program's tasks with
+        depends_on remapped. Runs as one batch before anything is scheduled, so
+        the dep graph is fully consistent by the time the first task starts."""
+        key_to_uuid = {p.key: str(uuid.uuid4()) for p in planned}
+        for idx, p in enumerate(planned):
+            dep_uuids: list[str] = []
+            for k in p.depends_on_keys:
+                u = key_to_uuid.get(k)
+                if not u:  # should never happen — validate_plan rejects dangling refs
+                    raise RuntimeError(f"planner produced dangling ref '{k}'")
+                dep_uuids.append(u)
+            self._store.create_task(
+                id=key_to_uuid[p.key],
+                kind=p.kind,
+                workspace_dir=workspace_dir,
+                goal=p.goal,
+                notify_url=None,  # per-task notify omitted — only program-level fires
+                program_id=program_id,
+                depends_on=dep_uuids,
+                order_idx=idx,
+                milestone=p.milestone,
+            )
+
+    def start_planned_program(
+        self,
+        *,
+        goal: str,
+        workspace_dir: str,
+        planned: list[PlannedTask],
+        notify_url: Optional[str] = None,
+    ) -> str:
+        """Submit an ALREADY-PLANNED program (caller did the planning, e.g.
+        plan_spec for an approved project). Persists the DAG and starts it
+        synchronously — never observed in 'planning', so no plan-time recovery
+        edge case. Returns the program_id."""
+        program_id = str(uuid.uuid4())
+        self._store.create_program(
+            id=program_id, goal=goal, workspace_dir=workspace_dir, notify_url=notify_url
+        )
+        self._persist_plan(program_id, workspace_dir, planned)
+        self._store.mark_program_running(program_id)
+        self._pump()
+        return program_id
+
     async def _plan_and_start(self, program_id: str, workspace_dir: str, goal: str) -> None:
         try:
             try:
@@ -288,29 +335,7 @@ class TaskQueue:
                 if program:
                     await self._notify_program(program, [])
                 return
-
-            # Map planner keys -> real UUIDs, then persist tasks with depends_on
-            # remapped. The whole insert runs before any task is scheduled, so the
-            # dep graph is fully consistent by the time the first task starts.
-            key_to_uuid = {p.key: str(uuid.uuid4()) for p in planned}
-            for idx, p in enumerate(planned):
-                dep_uuids: list[str] = []
-                for k in p.depends_on_keys:
-                    u = key_to_uuid.get(k)
-                    if not u:  # should never happen — validate_plan rejects dangling refs
-                        raise RuntimeError(f"planner produced dangling ref '{k}'")
-                    dep_uuids.append(u)
-                self._store.create_task(
-                    id=key_to_uuid[p.key],
-                    kind=p.kind,
-                    workspace_dir=workspace_dir,
-                    goal=p.goal,
-                    notify_url=None,  # per-task notify omitted — only program-level fires
-                    program_id=program_id,
-                    depends_on=dep_uuids,
-                    order_idx=idx,
-                    milestone=p.milestone,
-                )
+            self._persist_plan(program_id, workspace_dir, planned)
             self._store.mark_program_running(program_id)
         finally:
             self._planning.discard(program_id)
