@@ -122,8 +122,10 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 
 ```bash
 pip install -e ".[dev]"
-pytest          # planner + state store + queue/DAG, all stubbed — no docker, no claude
+pytest          # planner + state store + queue/DAG + grill, all stubbed — no docker, no claude
 ```
+
+To validate the **real** pipeline (a logged-in `claude` driving OpenHands in a docker sandbox), follow the layered runbook in [`docs/live-shakedown.md`](./docs/live-shakedown.md).
 
 ## Status
 
