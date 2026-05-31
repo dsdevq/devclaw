@@ -96,6 +96,9 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address (set `127.0.0.1` to restrict to loopback) |
 | `DEVCLAW_TOKEN` | — | When set, the HTTP transport requires it on every route except `/health` — via `Authorization: Bearer <token>` or a `?token=` query param. Unset = no auth (local dev). |
 | `DEVCLAW_DB` | `./devclaw.db` | SQLite path for state |
+| `DEVCLAW_MAX_CONCURRENT` | `4` | global cap on concurrently-running tasks (backpressure) |
+| `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | per-program concurrency cap |
+| `DEVCLAW_TICK_SECONDS` | `10` | heartbeat interval — advances DAGs and resumes recovered work from DB state |
 | `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image (see `.sandcastle/Dockerfile`) |
 | `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
 | `DEVCLAW_HOST_CLAUDE_DIR` | `~/.claude` | host path bind-mounted read-only into each sandbox |

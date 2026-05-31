@@ -482,6 +482,73 @@ class StateStore:
             ).fetchall()
         return [_row_to_event(r) for r in rows]
 
+    # ---- scheduling / recovery ------------------------------------------
+
+    def count_running(self) -> int:
+        """Global count of tasks currently 'running' — the in-flight count.
+        Single-writer + recover-on-startup means every 'running' row really is
+        in flight in this process, so concurrency caps derive straight from it."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM tasks WHERE status = 'running'"
+            ).fetchone()
+        return int(row["n"])
+
+    def list_pending_standalone(self, *, limit: int = 100) -> list[Task]:
+        """Pending tasks with no program (the standalone path), oldest first so
+        a backlog drains in submission order."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM tasks WHERE program_id IS NULL AND status = 'pending' "
+                "ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
+    def list_nonterminal_programs(self) -> list[Program]:
+        """Programs still in flight ('planning' or 'running') — what the
+        reconcile pass and startup recovery walk."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM programs WHERE status IN ('planning', 'running') "
+                "ORDER BY created_at ASC"
+            ).fetchall()
+        return [_row_to_program(r) for r in rows]
+
+    def has_active_work(self) -> bool:
+        """Cheap-idle guard: True iff anything needs scheduling. One COUNT each
+        so an idle tick costs ~nothing (don't spend the engine on empty ticks)."""
+        with self._lock:
+            prog = self._db.execute(
+                "SELECT 1 FROM programs WHERE status IN ('planning', 'running') LIMIT 1"
+            ).fetchone()
+            if prog:
+                return True
+            task = self._db.execute(
+                "SELECT 1 FROM tasks WHERE status IN ('pending', 'running') LIMIT 1"
+            ).fetchone()
+        return task is not None
+
+    def reset_running_to_pending(self) -> list[str]:
+        """Crash recovery — call ONCE at startup, before any scheduling. A task
+        left 'running' by a dead process has no live execution behind it, so
+        reset it to 'pending' to be re-run. Returns the reaped task ids (for the
+        audit log). Safe only when nothing is in flight in THIS process yet."""
+        with self._lock:
+            ids = [
+                r["id"]
+                for r in self._db.execute(
+                    "SELECT id FROM tasks WHERE status = 'running'"
+                ).fetchall()
+            ]
+            if ids:
+                self._db.execute(
+                    "UPDATE tasks SET status = 'pending', started_at = NULL "
+                    "WHERE status = 'running'"
+                )
+                self._db.commit()
+        return ids
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
