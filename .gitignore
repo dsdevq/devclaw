@@ -18,10 +18,11 @@ Thumbs.db
 .venv/
 *.log
 
-# Runtime state (SQLite) — never belongs in the repo
+# Runtime state — never belongs in the repo
 *.db
 *.db-shm
 *.db-wal
+.devclaw-state/
 openhands-runner/.venv/
 __pycache__/
 *.pyc

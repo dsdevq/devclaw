@@ -67,6 +67,19 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 
 Async by default: a tool call returns a `task_id` immediately and the work runs in the background. Pass a `notify_url` to get a callback on completion/block instead of polling.
 
+### Build a project from scratch
+
+For a whole project (not one task), DevClaw **grills you to a shared spec first**, then builds it:
+
+| Tool | Does |
+|---|---|
+| `build_project(idea, workspace_dir)` | Start a project; returns a `project_id` + the first question |
+| `answer_question(project_id, answer)` | Answer the current question → the next one, or `status: ready` + the spec |
+| `get_project(project_id)` | Full state — idea, transcript, spec, the running program |
+| `approve_spec(project_id)` | Approve the spec → plan it into a milestone DAG → start the build (returns `program_id`) |
+
+The grill (one question at a time, each with a recommended answer) adapts [Matt Pocock's MIT `grill-me`](https://github.com/mattpocock/skills); the build runs as a program you can watch with `get_program` / the dashboard. The agreed spec + interview transcript are written to `$DEVCLAW_STATE/projects/<id>/` for the human record.
+
 ## Auth (the design constraint)
 
 DevClaw inherits a `claude` OAuth session — it never uses an API key. `ANTHROPIC_API_KEY` is **actively refused** at both the host (planner) and sandbox layers so a stray key can't silently switch autonomous runs onto metered billing. All you need is a logged-in `claude` CLI: the planner shells out to it, and the per-task sandbox bind-mounts `~/.claude` **read-only** (auth works; nothing else from the host is mounted, and the container is destroyed on exit so no state escapes).
@@ -96,6 +109,8 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address (set `127.0.0.1` to restrict to loopback) |
 | `DEVCLAW_TOKEN` | — | When set, the HTTP transport requires it on every route except `/health` — via `Authorization: Bearer <token>` or a `?token=` query param. Unset = no auth (local dev). |
 | `DEVCLAW_DB` | `./devclaw.db` | SQLite path for state |
+| `DEVCLAW_STATE` | `./.devclaw-state` | dir for build-from-scratch project files (idea/transcript/spec) |
+| `DEVCLAW_MAX_GRILL_QUESTIONS` | `20` | cap on grill questions before the spec is force-finalized |
 | `DEVCLAW_MAX_CONCURRENT` | `4` | global cap on concurrently-running tasks (backpressure) |
 | `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | per-program concurrency cap |
 | `DEVCLAW_TICK_SECONDS` | `10` | heartbeat interval — advances DAGs and resumes recovered work from DB state |
