@@ -58,6 +58,39 @@ def _strip_api_keys(env: dict[str, str]) -> dict[str, str]:
     return clean
 
 
+async def _teardown(proc: "asyncio.subprocess.Process", container_name: str) -> None:
+    """Best-effort kill of a still-running sandbox — used when the task is
+    cancelled (or the stream breaks) before the container exits on its own.
+    Killing the ``docker run`` client does NOT stop the container, so we also
+    ``docker rm -f`` by name to honour --rm's destroy guarantee. Swallows every
+    error, including a re-delivered CancelledError, so cleanup always completes;
+    the original cancellation still propagates from the caller's try-block."""
+    import sys
+
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:  # pragma: no cover - defensive
+        pass
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            DOCKER_BIN,
+            "rm",
+            "-f",
+            container_name,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await killer.wait()
+    except asyncio.CancelledError:
+        pass
+    except Exception as err:  # pragma: no cover - defensive
+        sys.stderr.write(
+            f"sandcastle-runner: force-remove of {container_name} failed: {err}\n"
+        )
+
+
 def _translate_workspace_path(workspace_dir: str) -> str:
     """When devclaw itself runs in a container and spawns docker on the host
     socket, the workspace path it sees internally is not the host's view of
@@ -138,46 +171,53 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
 
     stderr_task = asyncio.ensure_future(drain_stderr())
 
-    assert proc.stdout is not None
-    async for raw in proc.stdout:
-        line = raw.decode("utf-8", "replace").strip()
-        if not line:
-            continue
-        if line.startswith("event: "):
-            if req.on_event:
-                try:
-                    data = json.loads(line[len("event: ") :])
-                    req.on_event(
-                        EngineEvent(
-                            id=data.get("id"),
-                            type=data.get("type", ""),
-                            source=data.get("source", ""),
-                            ts=data.get("ts", 0),
-                            payload=data.get("payload"),
+    try:
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            if line.startswith("event: "):
+                if req.on_event:
+                    try:
+                        data = json.loads(line[len("event: ") :])
+                        req.on_event(
+                            EngineEvent(
+                                id=data.get("id"),
+                                type=data.get("type", ""),
+                                source=data.get("source", ""),
+                                ts=data.get("ts", 0),
+                                payload=data.get("payload"),
+                            )
                         )
-                    )
-                except json.JSONDecodeError as parse_err:
-                    # malformed event line — drop, don't crash the run
-                    import sys
+                    except json.JSONDecodeError as parse_err:
+                        # malformed event line — drop, don't crash the run
+                        import sys
 
-                    sys.stderr.write(
-                        f"sandcastle-runner: dropping malformed event line: {parse_err}\n"
-                    )
-        elif line.startswith("result: "):
-            # first result line wins; ignore anything after
-            if result is None:
-                try:
-                    result = json.loads(line[len("result: ") :])
-                except json.JSONDecodeError as parse_err:
-                    result = {
-                        "status": "error",
-                        "error": f"runner emitted unparsable result: {parse_err}",
-                        "trace": line,
-                    }
-        # everything else is decorative sandbox output — drop
+                        sys.stderr.write(
+                            f"sandcastle-runner: dropping malformed event line: {parse_err}\n"
+                        )
+            elif line.startswith("result: "):
+                # first result line wins; ignore anything after
+                if result is None:
+                    try:
+                        result = json.loads(line[len("result: ") :])
+                    except json.JSONDecodeError as parse_err:
+                        result = {
+                            "status": "error",
+                            "error": f"runner emitted unparsable result: {parse_err}",
+                            "trace": line,
+                        }
+            # everything else is decorative sandbox output — drop
 
-    await proc.wait()
-    stderr_task.cancel()
+        await proc.wait()
+    finally:
+        # On cancellation the `async for` above raises CancelledError straight
+        # into here with the container still alive — tear it down. On a clean
+        # exit proc has already returned, so teardown is a cheap no-op.
+        stderr_task.cancel()
+        if proc.returncode is None:
+            await _teardown(proc, container_name)
     stderr_text = b"".join(stderr_chunks).decode("utf-8", "replace")
 
     if result is not None:

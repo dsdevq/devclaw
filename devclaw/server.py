@@ -7,6 +7,7 @@ runs in the background):
   - get_status(task_id)            / list_tasks(status?, kind?, limit?)
   - get_program(program_id)        / list_programs(limit?)
   - get_events(program_id | task_id, since_id?, limit?)
+  - cancel_task(task_id)           / cancel_program(program_id)  (deliberate abort)
 
 Transport:
   - DEVCLAW_TRANSPORT=stdio (default) — local dev + tests
@@ -147,7 +148,7 @@ async def start_program(
 @mcp.tool
 async def get_status(task_id: str) -> str:
     """Return the current status + (when terminated) the result or error of a
-    task. Status values: pending | running | done | failed."""
+    task. Status values: pending | running | done | failed | cancelled."""
     task = store.get_task(task_id)
     if not task:
         raise ToolError(f"unknown task_id: {task_id}")
@@ -197,13 +198,51 @@ async def get_events(
 
 @mcp.tool
 async def list_tasks(
-    status: Optional[Literal["pending", "running", "done", "failed"]] = None,
+    status: Optional[Literal["pending", "running", "done", "failed", "cancelled"]] = None,
     kind: Optional[Literal["implement_feature", "fix_bug", "review_repository"]] = None,
     limit: Annotated[int, Field(ge=1, le=1000)] = 20,
 ) -> str:
     """List recent tasks, most-recent first. Optionally filter by status or kind."""
     tasks = store.list_tasks(status=status, kind=kind, limit=limit)
     return json.dumps([t.to_dict() for t in tasks], indent=2)
+
+
+# ===== cancellation (deliberate abort) =======================================
+
+
+@mcp.tool
+async def cancel_task(task_id: str) -> str:
+    """Abort a running or pending task. Tears down its sandbox and marks it
+    'cancelled' (a terminal state distinct from 'failed' — it won't be retried or
+    resurrected on restart). Cancelling a task that belongs to a program also
+    stops that program. No-op if the task already finished. Returns whether an
+    abort actually happened."""
+    if not task_id:
+        raise ToolError("cancel_task requires task_id")
+    if not store.get_task(task_id):
+        raise ToolError(f"unknown task_id: {task_id}")
+    cancelled = queue.cancel_task(task_id)
+    return json.dumps(
+        {"task_id": task_id, "cancelled": cancelled, "status": "cancelled" if cancelled else None},
+        indent=2,
+    )
+
+
+@mcp.tool
+async def cancel_program(program_id: str) -> str:
+    """Abort a whole program (a start_program goal or an approved build): stop
+    scheduling new tasks, tear down every running task's sandbox, and mark the
+    program 'cancelled'. Use this as the kill switch for a long or runaway build.
+    No-op if the program already terminated. Returns whether an abort happened."""
+    if not program_id:
+        raise ToolError("cancel_program requires program_id")
+    if not store.get_program(program_id):
+        raise ToolError(f"unknown program_id: {program_id}")
+    cancelled = queue.cancel_program(program_id)
+    return json.dumps(
+        {"program_id": program_id, "cancelled": cancelled, "status": "cancelled" if cancelled else None},
+        indent=2,
+    )
 
 
 # ===== build a project from scratch ==========================================
