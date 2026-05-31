@@ -27,9 +27,9 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Optional
 
-from .engine import EngineEvent, EngineRequest, EngineResult
+from .engine import EngineRequest, EngineResult
+from .runner_io import consume_runner_output
 
 SANDBOX_IMAGE = os.environ.get("DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest")
 DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
@@ -161,71 +161,12 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
             ),
         }
 
-    result: Optional[EngineResult] = None
-    stderr_chunks: list[bytes] = []
-
-    async def drain_stderr() -> None:
-        assert proc.stderr is not None
-        async for line in proc.stderr:
-            stderr_chunks.append(line)
-
-    stderr_task = asyncio.ensure_future(drain_stderr())
-
     try:
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line:
-                continue
-            if line.startswith("event: "):
-                if req.on_event:
-                    try:
-                        data = json.loads(line[len("event: ") :])
-                        req.on_event(
-                            EngineEvent(
-                                id=data.get("id"),
-                                type=data.get("type", ""),
-                                source=data.get("source", ""),
-                                ts=data.get("ts", 0),
-                                payload=data.get("payload"),
-                            )
-                        )
-                    except json.JSONDecodeError as parse_err:
-                        # malformed event line — drop, don't crash the run
-                        import sys
-
-                        sys.stderr.write(
-                            f"sandcastle-runner: dropping malformed event line: {parse_err}\n"
-                        )
-            elif line.startswith("result: "):
-                # first result line wins; ignore anything after
-                if result is None:
-                    try:
-                        result = json.loads(line[len("result: ") :])
-                    except json.JSONDecodeError as parse_err:
-                        result = {
-                            "status": "error",
-                            "error": f"runner emitted unparsable result: {parse_err}",
-                            "trace": line,
-                        }
-            # everything else is decorative sandbox output — drop
-
-        await proc.wait()
+        return await consume_runner_output(proc, req.on_event, label="sandbox")
     finally:
-        # On cancellation the `async for` above raises CancelledError straight
-        # into here with the container still alive — tear it down. On a clean
-        # exit proc has already returned, so teardown is a cheap no-op.
-        stderr_task.cancel()
+        # On cancellation the read above raises CancelledError straight into
+        # here with the container still alive — tear it down (docker-specific,
+        # so it can't live in the engine-agnostic reader). On a clean exit proc
+        # has already returned, so teardown is a cheap no-op.
         if proc.returncode is None:
             await _teardown(proc, container_name)
-    stderr_text = b"".join(stderr_chunks).decode("utf-8", "replace")
-
-    if result is not None:
-        return result
-    return {
-        "status": "error",
-        "error": (
-            f"sandbox exited {proc.returncode} without a result line. "
-            f"stderr tail:\n{stderr_text[-1024:]}"
-        ),
-    }
