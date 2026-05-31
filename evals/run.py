@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -125,7 +126,12 @@ async def _run_once(
     acceptance: bool | None = None
     accept_output = ""
     if program.get("status") == "done":
-        proc = subprocess.run(["bash", str(accept)], cwd=workspace, capture_output=True, text=True)
+        # Run the check with the harness's own interpreter (it has the eval deps,
+        # and a bare `python` may not exist on the host).
+        env = {**os.environ, "EVAL_PYTHON": sys.executable}
+        proc = subprocess.run(
+            ["bash", str(accept)], cwd=workspace, capture_output=True, text=True, env=env
+        )
         acceptance = proc.returncode == 0
         accept_output = (proc.stdout or "") + (proc.stderr or "")
 
@@ -165,7 +171,7 @@ async def main() -> None:
     proj = Path(args.project_dir)
     idea = (proj / "idea.txt").read_text().strip()
     answers = [ln for ln in (proj / "answers.txt").read_text().splitlines() if ln.strip()]
-    accept = proj / "accept.sh"
+    accept = (proj / "accept.sh").resolve()  # absolute — accept runs with cwd=workspace
     sha = _git_sha()
     out = Path(args.out) / sha / proj.name
     out.mkdir(parents=True, exist_ok=True)

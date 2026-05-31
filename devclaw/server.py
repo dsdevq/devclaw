@@ -52,8 +52,20 @@ AUTH_TOKEN = os.environ.get("DEVCLAW_TOKEN", "")
 TOKEN_QS = f"?token={urllib.parse.quote(AUTH_TOKEN)}" if AUTH_TOKEN else ""
 
 store = StateStore(DB_PATH)
-queue = TaskQueue(store)
-projects = ProjectService(ProjectStore(), queue)
+if os.environ.get("DEVCLAW_ENGINE") == "stub":
+    # Harness-validation mode: deterministic stub engine + cognition, no docker,
+    # no claude. Proves the plumbing around the agent; never use in production.
+    from .stub_engine import stub_engine, stub_goal_planner, stub_grill, stub_spec_planner
+
+    sys.stderr.write(
+        "⚠ DEVCLAW_ENGINE=stub — deterministic stub engine + cognition "
+        "(NO OpenHands, NO claude). For harness validation only.\n"
+    )
+    queue = TaskQueue(store, planner=stub_goal_planner, runner=stub_engine)
+    projects = ProjectService(ProjectStore(), queue, grill_caller=stub_grill, spec_planner=stub_spec_planner)
+else:
+    queue = TaskQueue(store)
+    projects = ProjectService(ProjectStore(), queue)
 mcp: FastMCP = FastMCP(SERVER_NAME, version=__version__)
 
 LimitField = Field(ge=1, le=1000)
