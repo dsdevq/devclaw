@@ -1,27 +1,31 @@
-"""In-process async task executor.
+"""Async task executor — DB-driven, crash-safe, heartbeat-paced.
 
-The MCP handler calls ``submit()`` or ``submit_program()`` and gets an id back
-immediately; the OpenHands subprocesses run in the background (asyncio tasks)
-and the state store flips rows when they settle. Single-writer-to-state by
-design — only this queue mutates task rows.
+The MCP handler calls ``submit()`` / ``submit_program()`` and gets an id back
+immediately; engine runs happen in the background and the state store is flipped
+when they settle. Single-writer-to-state by design — only this queue mutates rows.
 
-Programs (DAGs):
-  ``submit_program()`` returns a program_id synchronously and then, in the
-  background, (1) runs the planner, (2) on success persists tasks with
-  depends_on remapped to UUIDs and schedules tasks whose deps are satisfied,
-  (3) on planner failure marks the program failed and fires its notify. When a
-  child settles, the queue schedules newly-ready siblings, decrements the
-  in-flight counter, and once nothing is in flight and the program is terminal
-  fires the program-level notify.
+**Scheduling is reconciled from DB state, not from in-memory counters.** The core
+is :meth:`_pump`: read what's runnable from the store, claim it atomically, launch
+up to the concurrency caps. Three things call it — ``submit``, a task settling,
+and a periodic **heartbeat tick** — and they're all idempotent because
+``claim_pending`` is the final guard. Because concurrency is derived from the
+``running`` rows (not a counter that dies with the process), the system is
+**crash-safe**: :meth:`recover` resets orphaned ``running`` tasks at startup and
+the next pump resumes them. That's the "ephemeral body / durable mind" model — a
+build survives restarts.
 
-Failure policy: a single sibling failure makes the program "sticky failed" —
-pending siblings won't start, in-flight ones run to completion.
+**Cheap-idle guard:** every pump first asks the store "is there any work?" (one
+COUNT) and returns immediately if not — an idle tick costs ~nothing, so we never
+burn the engine on empty ticks.
 
-Notifications:
-  - Standalone tasks fire their own notify_url on terminal state, bounded
-    retries (1s/2s/4s).
-  - Program-child tasks do NOT fire per-task callbacks — only the program-level
-    notify fires once the program terminates (one program in, one notify out).
+Programs (DAGs): a program is planned (the planner → tasks with deps), then each
+pump schedules ready tasks (deps all ``done``) up to the per-program + global
+caps. A single sibling failure makes the program "sticky failed" — pending
+siblings don't start, in-flight ones run to completion, then the program fails.
+
+Notifications: standalone tasks fire their own ``notify_url`` on terminal state
+(bounded retries); program-child tasks don't — only the program-level notify
+fires once the program terminates (one program in, one notify out).
 """
 
 from __future__ import annotations
@@ -42,6 +46,10 @@ from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
 MAX_CONCURRENT_PER_PROGRAM = int(os.environ.get("DEVCLAW_MAX_CONCURRENT_PER_PROGRAM", "2"))
+#: global cap on concurrently-running tasks across all programs — backpressure
+GLOBAL_MAX_CONCURRENT = int(os.environ.get("DEVCLAW_MAX_CONCURRENT", "4"))
+#: heartbeat interval — the tick re-derives scheduling from DB state
+TICK_SECONDS = float(os.environ.get("DEVCLAW_TICK_SECONDS", "10"))
 
 PlannerFn = Callable[[str, str], Awaitable[list[PlannedTask]]]
 #: the execution engine — orchestration depends on this seam, not on OpenHands
@@ -59,10 +67,12 @@ class TaskQueue:
         # Injectable for tests — default to the real planner / sandcastle runner.
         self._planner: PlannerFn = planner or (lambda g, w: plan_goal(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
-        #: in-flight counter per program, enforces the concurrency cap
-        self._running_by_program: dict[str, int] = {}
         #: retain background task refs so they aren't garbage-collected mid-run
         self._bg: set[asyncio.Task] = set()
+        #: program_ids whose planner is in flight — guards against double-plan
+        self._planning: set[str] = set()
+        #: the heartbeat tick task (started by the server, not in tests)
+        self._tick_task: Optional[asyncio.Task] = None
 
     def _spawn(self, coro: Awaitable) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
@@ -82,7 +92,7 @@ class TaskQueue:
             await asyncio.gather(*list(self._bg), return_exceptions=True)
             await asyncio.sleep(0)
 
-    # ---- standalone task path -------------------------------------------
+    # ---- submission -----------------------------------------------------
 
     def submit(
         self,
@@ -96,19 +106,8 @@ class TaskQueue:
         self._store.create_task(
             id=task_id, kind=kind, workspace_dir=workspace_dir, goal=goal, notify_url=notify_url
         )
-        self._spawn(self._execute_standalone(task_id, kind, workspace_dir, goal))
+        self._pump()
         return task_id
-
-    async def _execute_standalone(
-        self, task_id: str, kind: TaskKind, workspace_dir: str, goal: str
-    ) -> None:
-        self._store.mark_running(task_id)
-        await self._run_and_settle(task_id, kind, workspace_dir, goal)
-        final = self._store.get_task(task_id)
-        if final and final.notify_url:
-            await self._notify_task(final)
-
-    # ---- program path ---------------------------------------------------
 
     def submit_program(
         self, *, workspace_dir: str, goal: str, notify_url: Optional[str] = None
@@ -117,60 +116,124 @@ class TaskQueue:
         self._store.create_program(
             id=program_id, goal=goal, workspace_dir=workspace_dir, notify_url=notify_url
         )
+        self._planning.add(program_id)
         self._spawn(self._plan_and_start(program_id, workspace_dir, goal))
         return program_id
 
-    async def _plan_and_start(self, program_id: str, workspace_dir: str, goal: str) -> None:
-        try:
-            planned = await self._planner(goal, workspace_dir)
-        except Exception as err:
-            msg = f"planner: {err}" if isinstance(err, PlannerError) else str(err)
-            self._store.mark_program_failed(program_id, msg)
-            program = self._store.get_program(program_id)
-            if program:
-                await self._notify_program(program, [])
-            return
+    # ---- crash recovery + heartbeat -------------------------------------
 
-        # Map planner keys -> real UUIDs, then persist tasks with depends_on
-        # remapped. The whole insert runs before any task is scheduled, so the
-        # dep graph is fully consistent by the time the first task starts.
-        key_to_uuid = {p.key: str(uuid.uuid4()) for p in planned}
-        for idx, p in enumerate(planned):
-            dep_uuids: list[str] = []
-            for k in p.depends_on_keys:
-                u = key_to_uuid.get(k)
-                if not u:  # should never happen — validate_plan rejects dangling refs
-                    raise RuntimeError(f"planner produced dangling ref '{k}'")
-                dep_uuids.append(u)
-            self._store.create_task(
-                id=key_to_uuid[p.key],
-                kind=p.kind,
-                workspace_dir=workspace_dir,
-                goal=p.goal,
-                notify_url=None,  # per-task notify omitted — only program-level fires
-                program_id=program_id,
-                depends_on=dep_uuids,
-                order_idx=idx,
+    def recover(self) -> int:
+        """One-time crash recovery — call at startup, BEFORE ticking/serving.
+
+        A task left ``running`` by a dead process has no live execution behind
+        it, so reset it to ``pending`` to be re-run; log each reap. Programs left
+        non-terminal are picked up by the next pump (re-planned if they never got
+        tasks). Returns the number of tasks reaped.
+        """
+        reaped = self._store.reset_running_to_pending()
+        for tid in reaped:
+            t = self._store.get_task(tid)
+            self._store.append_event(
+                task_id=tid,
+                program_id=t.program_id if t else None,
+                type="reaped",
+                source="devclaw",
+                payload_json=json.dumps(
+                    {"reason": "orphaned running task reset to pending on startup"}
+                ),
             )
-        self._store.mark_program_running(program_id)
-        self._schedule_ready(program_id)
+        if reaped:
+            sys.stderr.write(f"task-queue: recovered {len(reaped)} orphaned running task(s)\n")
+        return len(reaped)
 
-    def _schedule_ready(self, program_id: str) -> None:
-        """Find pending tasks whose deps are all done and launch up to the
-        concurrency cap. Safe to call repeatedly — claim_pending is atomic. If
-        the program has already failed (sticky), launch nothing."""
-        program = self._store.get_program(program_id)
-        if not program or program.status in ("failed", "done"):
+    def start_ticking(self) -> None:
+        """Start the heartbeat. Pumps immediately (resumes recovered work), then
+        every TICK_SECONDS. Idempotent."""
+        if self._tick_task is None or self._tick_task.done():
+            self._tick_task = asyncio.ensure_future(self._tick_loop())
+
+    async def stop_ticking(self) -> None:
+        if self._tick_task is not None:
+            self._tick_task.cancel()
+            try:
+                await self._tick_task
+            except asyncio.CancelledError:
+                pass
+            self._tick_task = None
+
+    async def _tick_loop(self) -> None:
+        while True:
+            try:
+                self._pump()
+            except Exception as err:  # a bad tick must never kill the heartbeat
+                sys.stderr.write(f"task-queue: tick pump failed: {err}\n")
+            await asyncio.sleep(TICK_SECONDS)
+
+    # ---- the reconcile core ---------------------------------------------
+
+    def _pump(self) -> None:
+        """Reconcile execution against DB state: launch what's runnable up to the
+        global + per-program caps, and terminalize finished programs. Synchronous
+        and atomic (no awaits between reading counts and claiming), so concurrent
+        callers can't over-launch; ``claim_pending`` is the final guard. Returns
+        fast when there's no work (cheap-idle guard)."""
+        if not self._store.has_active_work():
             return
-        tasks = self._store.list_program_tasks(program_id)
-        by_id = {t.id: t for t in tasks}
-        # If any task already failed, suppress new launches. The program's
-        # transition to 'failed' happens in _advance_program once in-flight = 0.
+        running = self._store.count_running()
+
+        # Standalone pending tasks (no deps) — oldest first, up to the global cap.
+        if running < GLOBAL_MAX_CONCURRENT:
+            for t in self._store.list_pending_standalone(limit=GLOBAL_MAX_CONCURRENT):
+                if running >= GLOBAL_MAX_CONCURRENT:
+                    break
+                if self._store.claim_pending(t.id):
+                    running += 1
+                    self._launch(t.id, t.kind, t.workspace_dir, t.goal, None)
+
+        # Programs: re-plan stalled ones, terminalize complete ones, schedule ready.
+        for p in self._store.list_nonterminal_programs():
+            tasks = self._store.list_program_tasks(p.id)
+            if p.status == "planning" and not tasks:
+                if p.id not in self._planning:  # planner died before persisting → re-plan
+                    self._planning.add(p.id)
+                    self._spawn(self._plan_and_start(p.id, p.workspace_dir, p.goal))
+                continue
+            if self._maybe_terminalize(p, tasks):
+                continue
+            running = self._schedule_program(p, tasks, running)
+
+    def _maybe_terminalize(self, program: Program, tasks: list[Task]) -> bool:
+        """Mark the program done/failed (+ notify) if it has reached a terminal
+        state. Returns True if it did."""
+        all_done = len(tasks) > 0 and all(t.status == "done" for t in tasks)
+        any_failed = any(t.status == "failed" for t in tasks)
+        running_in_prog = sum(1 for t in tasks if t.status == "running")
+        if all_done:
+            self._store.mark_program_done(program.id)
+            final = self._store.get_program(program.id)
+            if final:
+                self._spawn(self._notify_program(final, tasks))
+            return True
+        # sticky failure: fail once no sibling is still running
+        if any_failed and running_in_prog == 0:
+            first_err = next((t.error for t in tasks if t.status == "failed"), None) or "task failed"
+            self._store.mark_program_failed(program.id, first_err)
+            final = self._store.get_program(program.id)
+            if final:
+                self._spawn(self._notify_program(final, tasks))
+            return True
+        return False
+
+    def _schedule_program(self, program: Program, tasks: list[Task], running: int) -> int:
+        """Launch a program's ready tasks (deps all done) up to both caps. A
+        present failure suppresses new launches (sticky). Returns the updated
+        global running tally."""
         if any(t.status == "failed" for t in tasks):
-            return
-        in_flight = self._running_by_program.get(program_id, 0)
+            return running
+        by_id = {t.id: t for t in tasks}
+        running_in_prog = sum(1 for t in tasks if t.status == "running")
         for t in tasks:
-            if in_flight >= MAX_CONCURRENT_PER_PROGRAM:
+            if running >= GLOBAL_MAX_CONCURRENT or running_in_prog >= MAX_CONCURRENT_PER_PROGRAM:
                 break
             if t.status != "pending":
                 continue
@@ -181,51 +244,76 @@ class TaskQueue:
                 continue
             if not self._store.claim_pending(t.id):  # lost the race
                 continue
-            in_flight += 1
-            self._running_by_program[program_id] = in_flight
-            self._spawn(
-                self._execute_program_task(program_id, t.id, t.kind, t.workspace_dir, t.goal)
-            )
+            running += 1
+            running_in_prog += 1
+            self._launch(t.id, t.kind, t.workspace_dir, t.goal, program.id)
+        return running
 
-    async def _execute_program_task(
-        self, program_id: str, task_id: str, kind: TaskKind, workspace_dir: str, goal: str
+    def _launch(
+        self,
+        task_id: str,
+        kind: TaskKind,
+        workspace_dir: str,
+        goal: str,
+        program_id: Optional[str],
     ) -> None:
+        self._spawn(self._execute(task_id, kind, workspace_dir, goal, program_id))
+
+    async def _execute(
+        self,
+        task_id: str,
+        kind: TaskKind,
+        workspace_dir: str,
+        goal: str,
+        program_id: Optional[str],
+    ) -> None:
+        # The task is already 'running' (claim_pending set it); just run + settle.
         await self._run_and_settle(task_id, kind, workspace_dir, goal)
-        # Decrement in-flight, then re-evaluate scheduling + termination.
-        n = self._running_by_program.get(program_id, 1) - 1
-        if n <= 0:
-            self._running_by_program.pop(program_id, None)
-        else:
-            self._running_by_program[program_id] = n
-        self._advance_program(program_id)
+        if program_id is None:
+            final = self._store.get_task(task_id)
+            if final and final.notify_url:
+                await self._notify_task(final)
+        # A global slot freed; this program may now be complete or have newly-ready
+        # tasks; another program may be able to start. Re-pump.
+        self._pump()
 
-    def _advance_program(self, program_id: str) -> None:
-        """Evaluate program state after a child terminated: all done -> done +
-        notify; any failed and nothing in flight -> failed + notify (sticky);
-        otherwise schedule newly-ready tasks."""
-        program = self._store.get_program(program_id)
-        if not program or program.status in ("done", "failed"):
-            return  # already terminal — notify already fired (or will, in another path)
-        tasks = self._store.list_program_tasks(program_id)
-        all_done = len(tasks) > 0 and all(t.status == "done" for t in tasks)
-        any_failed = any(t.status == "failed" for t in tasks)
-        in_flight = self._running_by_program.get(program_id, 0)
+    async def _plan_and_start(self, program_id: str, workspace_dir: str, goal: str) -> None:
+        try:
+            try:
+                planned = await self._planner(goal, workspace_dir)
+            except Exception as err:
+                msg = f"planner: {err}" if isinstance(err, PlannerError) else str(err)
+                self._store.mark_program_failed(program_id, msg)
+                program = self._store.get_program(program_id)
+                if program:
+                    await self._notify_program(program, [])
+                return
 
-        if all_done:
-            self._store.mark_program_done(program_id)
-            final = self._store.get_program(program_id)
-            if final:
-                self._spawn(self._notify_program(final, tasks))
-            return
-        if any_failed and in_flight == 0:
-            first_err = next((t.error for t in tasks if t.status == "failed"), None) or "task failed"
-            self._store.mark_program_failed(program_id, first_err)
-            final = self._store.get_program(program_id)
-            if final:
-                self._spawn(self._notify_program(final, tasks))
-            return
-        if not any_failed:
-            self._schedule_ready(program_id)
+            # Map planner keys -> real UUIDs, then persist tasks with depends_on
+            # remapped. The whole insert runs before any task is scheduled, so the
+            # dep graph is fully consistent by the time the first task starts.
+            key_to_uuid = {p.key: str(uuid.uuid4()) for p in planned}
+            for idx, p in enumerate(planned):
+                dep_uuids: list[str] = []
+                for k in p.depends_on_keys:
+                    u = key_to_uuid.get(k)
+                    if not u:  # should never happen — validate_plan rejects dangling refs
+                        raise RuntimeError(f"planner produced dangling ref '{k}'")
+                    dep_uuids.append(u)
+                self._store.create_task(
+                    id=key_to_uuid[p.key],
+                    kind=p.kind,
+                    workspace_dir=workspace_dir,
+                    goal=p.goal,
+                    notify_url=None,  # per-task notify omitted — only program-level fires
+                    program_id=program_id,
+                    depends_on=dep_uuids,
+                    order_idx=idx,
+                )
+            self._store.mark_program_running(program_id)
+        finally:
+            self._planning.discard(program_id)
+        self._pump()
 
     # ---- shared runner --------------------------------------------------
 

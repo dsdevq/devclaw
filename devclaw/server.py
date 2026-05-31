@@ -18,6 +18,7 @@ State: SQLite at $DEVCLAW_DB (default ./devclaw.db).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -297,8 +298,6 @@ async def program_events(request: Request) -> Response:
 
     async def gen():
         nonlocal cursor
-        import asyncio
-
         yield {"comment": "ok"}  # forces EventSource onopen even with zero events
         while True:
             if await request.is_disconnected():
@@ -377,22 +376,41 @@ class AuthMiddleware:
 # ===== entrypoint ============================================================
 
 
+async def _serve_stdio() -> None:
+    queue.start_ticking()  # heartbeat: resumes recovered work + advances DAGs
+    await mcp.run_stdio_async()
+
+
+async def _serve_http() -> None:
+    import uvicorn
+    from starlette.middleware import Middleware
+
+    app = mcp.http_app(path="/mcp", middleware=[Middleware(AuthMiddleware)])
+    queue.start_ticking()
+    config = uvicorn.Config(app, host=HTTP_HOST, port=HTTP_PORT, log_level="warning")
+    await uvicorn.Server(config).serve()
+
+
 def main() -> None:
     transport = os.environ.get("DEVCLAW_TRANSPORT", "stdio")
-    if transport == "stdio":
-        sys.stderr.write(f"{SERVER_NAME} v{__version__} ready (stdio, db={DB_PATH})\n")
-        mcp.run(transport="stdio")
-    elif transport == "http":
-        import uvicorn
-        from starlette.middleware import Middleware
-
-        app = mcp.http_app(path="/mcp", middleware=[Middleware(AuthMiddleware)])
-        sys.stderr.write(
-            f"{SERVER_NAME} v{__version__} ready (http://{HTTP_HOST}:{HTTP_PORT}/mcp, db={DB_PATH})\n"
-        )
-        uvicorn.run(app, host=HTTP_HOST, port=HTTP_PORT, log_level="warning")
-    else:
+    if transport not in ("stdio", "http"):
         raise SystemExit(f'Unknown DEVCLAW_TRANSPORT={transport}; expected "stdio" or "http"')
+
+    # Crash recovery before anything serves: reset tasks left 'running' by a
+    # dead process so the heartbeat resumes them. Sync — runs before the loop.
+    reaped = queue.recover()
+
+    if transport == "stdio":
+        sys.stderr.write(
+            f"{SERVER_NAME} v{__version__} ready (stdio, db={DB_PATH}, recovered={reaped})\n"
+        )
+        asyncio.run(_serve_stdio())
+    else:
+        sys.stderr.write(
+            f"{SERVER_NAME} v{__version__} ready "
+            f"(http://{HTTP_HOST}:{HTTP_PORT}/mcp, db={DB_PATH}, recovered={reaped})\n"
+        )
+        asyncio.run(_serve_http())
 
 
 if __name__ == "__main__":

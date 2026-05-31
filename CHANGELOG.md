@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- **Durability + crash recovery (build-from-scratch step 2).** Scheduling is now reconciled from DB state by a single `_pump`, so concurrency is crash-consistent (derived from `running` rows, not an in-memory counter). On startup `recover()` resets tasks orphaned in `running` by a dead process back to `pending` (logged as a `reaped` event); a **heartbeat tick** (`DEVCLAW_TICK_SECONDS`, default 10s) advances DAGs and resumes recovered work from disk, so a multi-day build survives restarts. A **cheap-idle guard** makes an idle tick ~free (one COUNT). New **global concurrency cap** `DEVCLAW_MAX_CONCURRENT` (default 4) with backpressure, alongside the per-program cap.
+
 ### Changed
 - **Rewrote the host orchestration from TypeScript to all-Python.** The MCP server is now [FastMCP](https://github.com/jlowin/fastmcp) (`devclaw/server.py`); the planner, SQLite state store, async task queue, and docker-sandbox runner are Python modules under `devclaw/`. The TypeScript (`src/`, `test/`, `package.json`, `tsconfig.json`) is gone. Behaviour, MCP tool surface, wire shapes, transports (stdio + streamable-HTTP), the `/dashboard` + SSE feed, and the `DEVCLAW_TOKEN` bearer auth are all preserved. Rationale: OpenHands has a Python-only SDK, so Python was already mandatory inside the sandbox — going all-Python collapses the two-language split into one toolchain. Run it with `devclaw-mcp` (or `python -m devclaw.server`); test with `pytest`. The in-sandbox `openhands-runner/runner.py` is unchanged.
 
