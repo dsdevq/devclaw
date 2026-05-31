@@ -41,6 +41,8 @@ class Project:
     transcript: list[dict] = field(default_factory=list)
     spec: Optional[str] = None
     program_id: Optional[str] = None
+    #: steering messages injected during the build: [{message, applied_to_pending_tasks, ts}]
+    steer_log: list[dict] = field(default_factory=list)
     created_at: int = field(default_factory=_now_ms)
 
     def to_dict(self) -> dict:
@@ -79,6 +81,19 @@ class ProjectStore:
         (d / "idea.md").write_text(project.idea + "\n")
         if project.spec:
             (d / "spec.md").write_text(project.spec + "\n")
+
+    def append_steer(self, project: Project, message: str, applied: int) -> None:
+        """Record a steering message on the project + mirror it to an append-only
+        inbox file (the human-readable steer trail)."""
+        ts = _now_ms()
+        project.steer_log.append(
+            {"message": message, "applied_to_pending_tasks": applied, "ts": ts}
+        )
+        self.save(project)
+        d = self._dir(project.id)
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "steer-inbox.jsonl").open("a") as f:
+            f.write(json.dumps({"message": message, "applied": applied, "ts": ts}) + "\n")
 
     def record_answer(self, project: Project, answer: str) -> None:
         """Fold the outstanding question + the user's answer into the transcript."""

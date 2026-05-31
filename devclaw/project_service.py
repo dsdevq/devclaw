@@ -88,5 +88,23 @@ class ProjectService:
         self._store.save(project)
         return {"project_id": project.id, "status": "approved", "program_id": program_id}
 
+    async def steer(self, project_id: str, message: str) -> dict:
+        """Inject direction into a build without stopping it. The message is folded
+        into the project's program's not-yet-started tasks (running/done untouched)
+        and recorded in the steer log. A no-op-on-tasks if the project isn't
+        building yet — still recorded."""
+        project = self._store.get(project_id)
+        if project is None:
+            raise KeyError(project_id)
+        applied = 0
+        if project.status == "approved" and project.program_id:
+            applied = len(self._queue.steer_program(project.program_id, message))
+        self._store.append_steer(project, message, applied)
+        return {
+            "project_id": project.id,
+            "status": project.status,
+            "applied_to_pending_tasks": applied,
+        }
+
     def get(self, project_id: str) -> Optional[Project]:
         return self._store.get(project_id)

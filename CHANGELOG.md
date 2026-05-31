@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- **Steer inbox — redirect a running build (build-from-scratch step 5).** New `steer(project_id, message)` MCP tool (14 tools total) injects mid-build direction (e.g. "use Postgres, not SQLite") into the project's **not-yet-started** tasks — running/done tasks are untouched, so a long build responds to direction without restarting. Recorded in the project's `steer_log` + an append-only `steer-inbox.jsonl`. Task mutation goes through `TaskQueue.steer_program` (single-writer); `StateStore.append_note_to_pending_tasks` does the pending-only update.
+
 ### Fixed
 - Eval harness bugs surfaced by the stub validation: `evals/run.py` passed a **relative** `accept.sh` path to a subprocess whose cwd is the workspace (→ phantom acceptance failures), and `accept.sh` assumed a bare `python` on PATH. Now the accept path is absolute and the check runs under the harness's own interpreter (`$EVAL_PYTHON`); the golden project's contract is `python3 -m jyq`.
 

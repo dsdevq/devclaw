@@ -246,6 +246,18 @@ async def get_project(project_id: str) -> str:
 
 
 @mcp.tool
+async def steer(project_id: str, message: str) -> str:
+    """Inject direction into a running build without stopping it. The message is
+    folded into the project's not-yet-started tasks (work already running or done
+    is untouched) and recorded in the project's steer log. Use to redirect
+    mid-build — e.g. 'actually use Postgres, not SQLite'."""
+    try:
+        return json.dumps(await projects.steer(project_id, message), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown project_id: {project_id}")
+
+
+@mcp.tool
 async def approve_spec(project_id: str) -> str:
     """Approve a ready project spec and start building. Decomposes the spec into a
     milestone task DAG and hands it to the executor; returns the program_id. Poll

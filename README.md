@@ -77,6 +77,7 @@ For a whole project (not one task), DevClaw **grills you to a shared spec first*
 | `answer_question(project_id, answer)` | Answer the current question → the next one, or `status: ready` + the spec |
 | `get_project(project_id)` | Full state — idea, transcript, spec, the running program |
 | `approve_spec(project_id)` | Approve the spec → plan it into a milestone DAG → start the build (returns `program_id`) |
+| `steer(project_id, message)` | Redirect a *running* build — folds direction into not-yet-started tasks (running/done untouched) |
 
 The grill (one question at a time, each with a recommended answer) adapts [Matt Pocock's MIT `grill-me`](https://github.com/mattpocock/skills); the build runs as a program you can watch with `get_program` / the dashboard. The agreed spec + interview transcript are written to `$DEVCLAW_STATE/projects/<id>/` for the human record.
 
