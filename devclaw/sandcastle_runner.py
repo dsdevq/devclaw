@@ -1,11 +1,12 @@
-"""Per-task docker sandbox runner.
+"""Per-task docker sandbox runner — the OpenHands :class:`~devclaw.engine.Engine`.
 
+This is the one concrete Engine implementation (see ``engine.py`` for the seam).
 Spawns ``docker run --rm`` against the devclaw-sandbox image for each task. The
 container's ENTRYPOINT runs the OpenHands runner (``openhands-runner/runner.py``),
 which streams one prefixed JSON line per event (``event: {...}``) plus a single
 terminating ``result: {...}`` line. This module:
 
-  - Translates an ``OpenHandsRequest`` into a docker invocation.
+  - Translates an ``EngineRequest`` into a docker invocation.
   - Bind-mounts the host workspace into /workspace and ~/.claude read-only into
     /home/agent/.claude (Pro OAuth posture: the claude CLI inside the sandbox
     can read tokens but not write back).
@@ -25,44 +26,16 @@ import asyncio
 import json
 import os
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable, Optional, Union
+from typing import Optional
 
-from .state_store import TaskKind
+from .engine import EngineEvent, EngineRequest, EngineResult
 
 SANDBOX_IMAGE = os.environ.get("DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest")
 DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
 # Container-side mount targets. Match the Dockerfile's expectations.
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
-
-
-@dataclass
-class OpenHandsRequest:
-    """Inputs the runner needs to launch one OpenHands run. The same kinds the
-    MCP tool surface exposes; runner.py picks the right system-prompt per kind."""
-
-    kind: TaskKind
-    workspace_dir: str
-    goal: str
-    #: optional callback, one call per ``event:`` line the runner emits
-    on_event: Optional[Callable[["RunnerEvent"], None]] = None
-
-
-@dataclass
-class RunnerEvent:
-    id: Optional[str]
-    type: str
-    source: str
-    ts: Union[int, str]
-    payload: object
-
-
-# Terminal verdict from one run. Mirrors the ``result: {...}`` line shape that
-# runner.py emits. status == "ok" carries workspace_dir/message (+ agent_output
-# for debugging); status == "error" carries error (+ optional trace).
-OpenHandsResult = dict
 
 
 class SandcastleRunnerError(Exception):
@@ -90,9 +63,9 @@ def _translate_workspace_path(workspace_dir: str) -> str:
     return workspace_dir
 
 
-async def run_sandcastle(req: OpenHandsRequest) -> OpenHandsResult:
-    """Run one task inside a fresh sandbox container. Resolves with an
-    OpenHandsResult dict so it's a drop-in runner for TaskQueue."""
+async def run_sandcastle(req: EngineRequest) -> EngineResult:
+    """Run one task inside a fresh sandbox container. An :class:`~devclaw.engine.Engine`
+    — resolves with an EngineResult dict so TaskQueue can drive it."""
     # DEVCLAW_HOST_CLAUDE_DIR is a HOST path passed straight to docker as a bind
     # source. When devclaw-mcp runs in a container, that path intentionally does
     # NOT exist in the container's view — we pass the string through and let
@@ -143,7 +116,7 @@ async def run_sandcastle(req: OpenHandsRequest) -> OpenHandsResult:
             ),
         }
 
-    result: Optional[OpenHandsResult] = None
+    result: Optional[EngineResult] = None
     stderr_chunks: list[bytes] = []
 
     async def drain_stderr() -> None:
@@ -163,7 +136,7 @@ async def run_sandcastle(req: OpenHandsRequest) -> OpenHandsResult:
                 try:
                     data = json.loads(line[len("event: ") :])
                     req.on_event(
-                        RunnerEvent(
+                        EngineEvent(
                             id=data.get("id"),
                             type=data.get("type", ""),
                             source=data.get("source", ""),
