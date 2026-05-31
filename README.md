@@ -98,6 +98,8 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 npm start
 |---|---|---|
 | `DEVCLAW_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `DEVCLAW_PORT` | `8000` | HTTP port |
+| `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address (set `127.0.0.1` to restrict to loopback) |
+| `DEVCLAW_TOKEN` | — | When set, the HTTP transport requires it on every route except `/health` — via `Authorization: Bearer <token>` or a `?token=` query param. Unset = no auth (local dev). |
 | `DEVCLAW_DB` | (temp) | SQLite path for state |
 | `DEVCLAW_SANDBOX_IMAGE` | — | per-task sandbox image (see `.sandcastle/Dockerfile`) |
 | `CLAUDE_CODE_EXECUTABLE` / `CLAUDE_CONFIG_DIR` | — | OAuth-session passthrough |

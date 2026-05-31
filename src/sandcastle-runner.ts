@@ -18,8 +18,8 @@
  * Container lifecycle: --rm + the per-task --name make destroy-on-exit
  * automatic. No persistent on-host state.
  *
- * This file replaces openhands-runner's "spawn python directly on host" path
- * for production. Tests still inject a stub runner so they don't need docker.
+ * Tests inject a stub runner (via TaskQueue's `runner` param) so they don't
+ * need docker.
  */
 
 import { spawn } from "node:child_process";
@@ -83,8 +83,8 @@ class SandcastleRunnerError extends Error {
 }
 
 /**
- * Run one task inside a fresh sandbox container. Resolves with the same
- * shape as `runOpenHands` so it's a drop-in for TaskQueue.
+ * Run one task inside a fresh sandbox container. Resolves with an
+ * OpenHandsResult so it's a drop-in runner for TaskQueue.
  */
 export async function runSandcastle(
   req: SandcastleRunRequest,

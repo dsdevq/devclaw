@@ -1,5 +1,5 @@
 /**
- * SQLite state store for DevClaw v2 tasks.
+ * SQLite state store for DevClaw tasks.
  *
  * Tracks every task DevClaw has been asked to run, its current status, and
  * the result (or error) once it terminates. better-sqlite3 is sync, fast,

@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 /**
- * DevClaw v2 — MCP server (slice 2: async + state + http).
+ * DevClaw — MCP server.
  *
- * Tools:
- *   - implement_feature(workspace_dir, goal) → { task_id }   (async, returns immediately)
- *   - get_status(task_id)                    → Task row from state store
- *   - list_tasks({status?, limit?})          → Task rows
+ * Tools (every task/program submission is async — returns an id immediately
+ * and runs in the background):
+ *   - implement_feature / fix_bug / review_repository → { task_id }
+ *   - start_program(workspace_dir, goal)              → { program_id }  (planner decomposes into a task DAG)
+ *   - get_status(task_id)            / list_tasks({status?, kind?, limit?})
+ *   - get_program(program_id)        / list_programs({limit?})
+ *   - get_events({program_id | task_id, since_id?, limit?})
  *
  * Transport:
- *   - DEVCLAW_TRANSPORT=stdio  (default) — for local dev + the existing smoke/runtime tests
- *   - DEVCLAW_TRANSPORT=http             — streamable-http on $DEVCLAW_PORT (default 8000)
+ *   - DEVCLAW_TRANSPORT=stdio (default) — local dev + runtime tests
+ *   - DEVCLAW_TRANSPORT=http            — streamable-http on $DEVCLAW_PORT (default 8000);
+ *                                         also serves /dashboard + /programs/:id/events (SSE)
  *
  * State:
  *   - SQLite at $DEVCLAW_DB (default ./devclaw.db)
@@ -25,12 +29,17 @@ import {
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
+import { createRequire } from "node:module";
 
 import { StateStore } from "./state-store.js";
 import { TaskQueue } from "./task-queue.js";
 
 const SERVER_NAME = "devclaw";
-const SERVER_VERSION = "0.0.5";
+// Single source of truth: read the package version instead of duplicating a
+// literal. Resolves to the repo-root package.json whether we run from dist/
+// (built) or src/ (tsx dev).
+const nodeRequire = createRequire(import.meta.url);
+const SERVER_VERSION: string = nodeRequire("../package.json").version;
 
 const DB_PATH = resolve(process.cwd(), process.env["DEVCLAW_DB"] ?? "devclaw.db");
 const TRANSPORT = process.env["DEVCLAW_TRANSPORT"] ?? "stdio";
@@ -39,6 +48,13 @@ const HTTP_PORT = Number(process.env["DEVCLAW_PORT"] ?? "8000");
 // network (e.g. openclaw-gateway) can reach the MCP endpoint. Set
 // DEVCLAW_HOST=127.0.0.1 to restrict to the host loopback.
 const HTTP_HOST = process.env["DEVCLAW_HOST"] ?? "0.0.0.0";
+// Optional bearer-token guard for the HTTP transport. When DEVCLAW_TOKEN is
+// set, every route except /health requires it — via `Authorization: Bearer
+// <token>` (MCP clients) or a `?token=<token>` query param (the browser
+// dashboard + EventSource, which cannot set request headers). Unset → auth
+// disabled (local dev stays frictionless).
+const AUTH_TOKEN = process.env["DEVCLAW_TOKEN"] ?? "";
+const TOKEN_QS = AUTH_TOKEN ? `?token=${encodeURIComponent(AUTH_TOKEN)}` : "";
 
 const store = new StateStore(DB_PATH);
 const queue = new TaskQueue(store);
@@ -562,7 +578,7 @@ function handleDashboardIndex(res: ServerResponse): void {
       );
       return (
         `<tr>` +
-        `<td><a href="/dashboard/${p.id}">${p.id.slice(0, 8)}</a></td>` +
+        `<td><a href="/dashboard/${p.id}${TOKEN_QS}">${p.id.slice(0, 8)}</a></td>` +
         `<td>${escapeHtml(p.status)}</td>` +
         `<td>${created}</td>` +
         `<td>${goal}</td>` +
@@ -612,13 +628,13 @@ function handleDashboardProgram(res: ServerResponse, programId: string): void {
  .source{color:#8b949e}
  .id{color:#6e7681}
 </style></head><body>
-<p><a href="/dashboard">&larr; all programs</a></p>
+<p><a href="/dashboard${TOKEN_QS}">&larr; all programs</a></p>
 <h1>program ${escapeHtml(programId)} <small>(${escapeHtml(program.status)})</small></h1>
 <p>${goal}</p>
 <div id="events"></div>
 <script>
  const box = document.getElementById('events');
- const src = new EventSource('/programs/${programId}/events');
+ const src = new EventSource('/programs/${programId}/events${TOKEN_QS}');
  src.onmessage = (e) => {
    try {
      const ev = JSON.parse(e.data);
@@ -745,6 +761,26 @@ function safeParse(s: string): unknown {
   }
 }
 
+/**
+ * Bearer-token gate for the HTTP transport. No-op (always true) when
+ * DEVCLAW_TOKEN is unset. Accepts the token via the Authorization header
+ * (MCP clients) or a ?token= query param (browser dashboard + EventSource,
+ * which can't set headers).
+ */
+function isAuthorized(req: IncomingMessage, rawUrl: string): boolean {
+  if (!AUTH_TOKEN) return true;
+  const header = req.headers["authorization"];
+  if (typeof header === "string" && header === `Bearer ${AUTH_TOKEN}`) {
+    return true;
+  }
+  const q = rawUrl.indexOf("?");
+  if (q >= 0) {
+    const token = new URLSearchParams(rawUrl.slice(q + 1)).get("token");
+    if (token === AUTH_TOKEN) return true;
+  }
+  return false;
+}
+
 async function runHttp(): Promise<void> {
   // Streamable HTTP transport, stateless, **new Server + transport per
   // request**. Two SDK invariants force this exact shape:
@@ -777,11 +813,24 @@ async function runHttp(): Promise<void> {
   // framing objects are recreated.
 
   const httpServer = createServer(async (httpReq, httpRes) => {
-    const url = httpReq.url ?? "";
+    const rawUrl = httpReq.url ?? "";
+    const qIdx = rawUrl.indexOf("?");
+    const url = qIdx >= 0 ? rawUrl.slice(0, qIdx) : rawUrl;
 
     if (url === "/health") {
       httpRes.writeHead(200, { "content-type": "application/json" });
       httpRes.end(JSON.stringify({ ok: true, name: SERVER_NAME, version: SERVER_VERSION }));
+      return;
+    }
+
+    // Auth gate (no-op when DEVCLAW_TOKEN unset). /health stays open above so
+    // container/compose health checks don't need the token.
+    if (!isAuthorized(httpReq, rawUrl)) {
+      httpRes.writeHead(401, {
+        "content-type": "application/json",
+        "www-authenticate": "Bearer",
+      });
+      httpRes.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
 
