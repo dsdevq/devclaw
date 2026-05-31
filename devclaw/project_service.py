@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Optional
 
-from .elicitation import next_step
-from .planner import PlannedTask, call_claude, plan_spec
+from .elicitation import grill_caller as _grill_caller, next_step
+from .planner import PlannedTask, plan_spec
 from .project_store import Project, ProjectStore
 from .task_queue import TaskQueue
 
@@ -25,7 +25,7 @@ class ProjectService:
         store: ProjectStore,
         queue: TaskQueue,
         *,
-        grill_caller: GrillCaller = call_claude,
+        grill_caller: GrillCaller = _grill_caller,
         spec_planner: SpecPlanner = plan_spec,
     ) -> None:
         self._store = store

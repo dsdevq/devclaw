@@ -121,6 +121,9 @@ def main() -> None:
     workspace_dir = req.get("workspace_dir")
     goal = req.get("goal")
     kind = req.get("kind", "implement_feature")
+    # Model tier for the agent. The host passes it in the payload; fall back to
+    # DEVCLAW_EXEC_MODEL for a manual `docker run`. None → the ACP server default.
+    acp_model = req.get("model") or os.environ.get("DEVCLAW_EXEC_MODEL") or None
     if not workspace_dir or not goal:
         _emit_result(
             {
@@ -207,6 +210,8 @@ def main() -> None:
                     "PATH": os.environ.get("PATH", ""),
                     "HOME": os.environ.get("HOME", ""),
                 },
+                # Tier the agent's model; None → claude-agent-acp's default.
+                acp_model=acp_model,
             )
             conversation = Conversation(
                 agent=agent,
