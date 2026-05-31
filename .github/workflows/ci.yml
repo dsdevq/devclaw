@@ -28,4 +28,4 @@ jobs:
         run: |
           pipx install yamllint
           yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' \
-            .github/workflows/ examples/ 2>&1 || true
+            .github/workflows/ 2>&1 || true

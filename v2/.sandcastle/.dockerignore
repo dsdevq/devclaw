@@ -1,9 +1,0 @@
-node_modules
-dist
-test
-src
-*.db
-*.db-shm
-*.db-wal
-.venv
-python-runner/.venv
