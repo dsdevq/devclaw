@@ -20,7 +20,7 @@
     "test:state-program": "tsx test/unit-state-program.ts",
     "test:unit": "tsx test/unit-planner.ts && tsx test/unit-state-program.ts",
     "test:dag": "tsx test/runtime-program-dag-stub.ts",
-    "python:install": "python3 -m venv python-runner/.venv && python-runner/.venv/bin/pip install -q -r python-runner/requirements.txt"
+    "openhands:install": "python3 -m venv openhands-runner/.venv && openhands-runner/.venv/bin/pip install -q -r openhands-runner/requirements.txt"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

@@ -42,7 +42,7 @@ src/
 ├── state-store.ts       # SQLite: programs, tasks, append-only events
 ├── task-queue.ts        # async task lifecycle + concurrency
 └── sandcastle-runner.ts # `docker run --rm` per task; streams events from the runner
-python-runner/
+openhands-runner/
 ├── runner.py            # OpenHands SDK invocation; emits event/result lines on stdout
 └── requirements.txt     # openhands-sdk
 .sandcastle/Dockerfile   # per-task sandbox image
@@ -82,7 +82,7 @@ Inside the per-task sandbox, `~/.claude` is bind-mounted **read-only** (auth wor
 
 ```bash
 npm install
-npm run python:install        # creates python-runner/.venv with openhands-sdk
+npm run openhands:install     # creates openhands-runner/.venv with openhands-sdk
 npm install -g @agentclientprotocol/claude-agent-acp   # ACP adapter (one-time, global)
 
 npm run build

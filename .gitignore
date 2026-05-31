@@ -21,7 +21,7 @@ dist/
 *.log
 
 # Python
-python-runner/.venv/
+openhands-runner/.venv/
 __pycache__/
 *.pyc
 .pytest_cache/

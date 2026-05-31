@@ -5,7 +5,7 @@
 # host's ~/.claude read-only at /home/agent/.claude, then exec's runner.py.
 # Container vaporizes on exit.
 #
-# Image is rebuilt whenever python-runner/ or this Dockerfile changes.
+# Image is rebuilt whenever openhands-runner/ or this Dockerfile changes.
 # Build from the repo root:
 #   docker build -t devclaw-sandbox:latest -f .sandcastle/Dockerfile .
 
@@ -37,7 +37,7 @@ RUN apt-get update \
 # Install python deps system-wide so the agent user can import them without
 # its own venv. openhands-sdk pulls in a long tail of deps; the image is fat
 # but that's fine — it's built once per sandbox version.
-COPY python-runner/requirements.txt /tmp/requirements.txt
+COPY openhands-runner/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Claude CLI + claude-agent-acp via npm. Pinned so image is reproducible.
@@ -46,7 +46,7 @@ RUN npm install -g \
       @agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION} \
  && npm cache clean --force
 
-COPY --chown=agent:agent python-runner/runner.py /opt/devclaw/runner.py
+COPY --chown=agent:agent openhands-runner/runner.py /opt/devclaw/runner.py
 
 USER agent
 WORKDIR /workspace

@@ -6,4 +6,4 @@ src
 *.db-shm
 *.db-wal
 .venv
-python-runner/.venv
+openhands-runner/.venv
