@@ -69,6 +69,10 @@ class TaskQueue:
         self._runner: RunnerFn = runner or run_sandcastle
         #: retain background task refs so they aren't garbage-collected mid-run
         self._bg: set[asyncio.Task] = set()
+        #: task_id -> the live asyncio.Task running its engine, so cancel() can
+        #: reach in and tear a specific run down (the docker subprocess dies via
+        #: the runner's finally). Only ever holds genuinely in-flight tasks.
+        self._running_tasks: dict[str, asyncio.Task] = {}
         #: program_ids whose planner is in flight — guards against double-plan
         self._planning: set[str] = set()
         #: the heartbeat tick task (started by the server, not in tests)
@@ -87,6 +91,70 @@ class TaskQueue:
         mutation goes through the queue."""
         note = f"\n\n[STEER UPDATE]: {message}"
         return self._store.append_note_to_pending_tasks(program_id, note)
+
+    # ---- cancellation (deliberate abort) --------------------------------
+
+    def _abort_live_task(self, task_id: str) -> None:
+        """Tear down the in-flight execution of one task, if any. The DB row must
+        already be 'cancelled' (terminal) BEFORE this — so the CancelledError that
+        propagates out of the run can't be re-settled as 'failed' (mark_failed
+        guards on pending/running). The runner's finally kills the container."""
+        task = self._running_tasks.get(task_id)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Abort one task. Marks it 'cancelled' (no-op if already terminal), then
+        tears down its live run. If the task belongs to a program, the program is
+        sticky-cancelled on the next pump (a hole in the DAG blocks its dependents).
+        Returns True iff the task was actually pending/running (i.e. abortable)."""
+        moved = self._store.mark_task_cancelled(task_id)
+        if not moved:
+            return False  # already done/failed/cancelled — nothing to abort
+        task = self._store.get_task(task_id)
+        self._store.append_event(
+            task_id=task_id,
+            program_id=task.program_id if task else None,
+            type="cancelled",
+            source="devclaw",
+            payload_json=json.dumps({"reason": "cancelled by client"}),
+        )
+        self._abort_live_task(task_id)
+        # A slot may have freed (standalone) or the program now needs to
+        # terminalize as cancelled — reconcile.
+        self._pump()
+        return True
+
+    def cancel_program(self, program_id: str) -> bool:
+        """Abort a whole program: cancel its pending tasks (so nothing new starts),
+        tear down every running task, and mark the program 'cancelled'. Returns
+        True iff the program was non-terminal (i.e. abortable)."""
+        program = self._store.get_program(program_id)
+        if program is None or program.status in ("done", "failed", "cancelled"):
+            return False
+        # Stop scheduling first, then drain in-flight work.
+        cancelled_pending = self._store.cancel_program_pending_tasks(program_id)
+        running = [
+            t.id
+            for t in self._store.list_program_tasks(program_id)
+            if t.status == "running"
+        ]
+        for tid in running:
+            self._store.mark_task_cancelled(tid)
+            self._abort_live_task(tid)
+        self._store.mark_program_cancelled(program_id, error="cancelled by client")
+        for tid in cancelled_pending + running:
+            self._store.append_event(
+                task_id=tid,
+                program_id=program_id,
+                type="cancelled",
+                source="devclaw",
+                payload_json=json.dumps({"reason": "program cancelled by client"}),
+            )
+        # Cancelling freed global concurrency slots (the running rows are now
+        # terminal) — let other pending work / programs claim them.
+        self._pump()
+        return True
 
     async def drain(self) -> None:
         """Await all in-flight background work. Used by tests for determinism.
@@ -215,6 +283,7 @@ class TaskQueue:
         state. Returns True if it did."""
         all_done = len(tasks) > 0 and all(t.status == "done" for t in tasks)
         any_failed = any(t.status == "failed" for t in tasks)
+        any_cancelled = any(t.status == "cancelled" for t in tasks)
         running_in_prog = sum(1 for t in tasks if t.status == "running")
         if all_done:
             self._store.mark_program_done(program.id)
@@ -222,10 +291,25 @@ class TaskQueue:
             if final:
                 self._spawn(self._notify_program(final, tasks))
             return True
-        # sticky failure: fail once no sibling is still running
-        if any_failed and running_in_prog == 0:
-            first_err = next((t.error for t in tasks if t.status == "failed"), None) or "task failed"
-            self._store.mark_program_failed(program.id, first_err)
+        # Sticky terminal: a failed or cancelled child blocks its dependents, so
+        # the program can't complete. Terminalize once no sibling is still in
+        # flight. Failure outranks cancellation (an error is worth surfacing).
+        if (any_failed or any_cancelled) and running_in_prog == 0:
+            if any_failed:
+                first_err = (
+                    next((t.error for t in tasks if t.status == "failed"), None)
+                    or "task failed"
+                )
+                self._store.mark_program_failed(program.id, first_err)
+            else:
+                # Sweep still-pending siblings to cancelled too, so they don't
+                # dangle 'pending' under a terminal program (which would keep
+                # has_active_work() true forever). The failure path above leaves
+                # them as-is — unchanged behavior, deliberately.
+                self._store.cancel_program_pending_tasks(program.id)
+                self._store.mark_program_cancelled(
+                    program.id, error="a task was cancelled"
+                )
             final = self._store.get_program(program.id)
             if final:
                 self._spawn(self._notify_program(final, tasks))
@@ -234,9 +318,9 @@ class TaskQueue:
 
     def _schedule_program(self, program: Program, tasks: list[Task], running: int) -> int:
         """Launch a program's ready tasks (deps all done) up to both caps. A
-        present failure suppresses new launches (sticky). Returns the updated
-        global running tally."""
-        if any(t.status == "failed" for t in tasks):
+        present failure OR cancellation suppresses new launches (sticky) — the
+        program is about to terminalize. Returns the updated global running tally."""
+        if any(t.status in ("failed", "cancelled") for t in tasks):
             return running
         by_id = {t.id: t for t in tasks}
         running_in_prog = sum(1 for t in tasks if t.status == "running")
@@ -265,7 +349,11 @@ class TaskQueue:
         goal: str,
         program_id: Optional[str],
     ) -> None:
-        self._spawn(self._execute(task_id, kind, workspace_dir, goal, program_id))
+        task = self._spawn(self._execute(task_id, kind, workspace_dir, goal, program_id))
+        # Index it for cancel(); drop the ref the moment it settles so the map
+        # only ever names genuinely in-flight runs.
+        self._running_tasks[task_id] = task
+        task.add_done_callback(lambda _t, tid=task_id: self._running_tasks.pop(tid, None))
 
     async def _execute(
         self,

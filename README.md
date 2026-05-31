@@ -11,7 +11,7 @@ MCP client (OpenClaw / Claude Code / any MCP host)
   │   implement_feature / fix_bug / review_repository / start_program …
   ▼
 DevClaw  (Python)
-  ├── MCP server     FastMCP — stdio + streamable-HTTP, 9 tools, dashboard + SSE
+  ├── MCP server     FastMCP — stdio + streamable-HTTP, 16 tools, dashboard + SSE
   ├── planner        Goal → task DAG (single-task passthrough for small goals)
   ├── state store    SQLite — programs, tasks, append-only events
   └── sandcastle     `docker run --rm` per task — RO ~/.claude mount, destroyed on exit
@@ -37,7 +37,7 @@ The full rationale — including why OpenHands and sandbox isolation are **ortho
 
 ```
 devclaw/
-├── server.py            # FastMCP server — 9 tools, dashboard + SSE, bearer-auth middleware
+├── server.py            # FastMCP server — 16 tools, dashboard + SSE, bearer-auth middleware
 ├── planner.py           # Goal → task DAG (shells out to `claude --print`)
 ├── state_store.py       # SQLite: programs, tasks, append-only events
 ├── task_queue.py        # async task lifecycle (asyncio) + concurrency
@@ -64,6 +64,7 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 | `get_status(task_id)` | One task's status / result / PR |
 | `list_tasks(...)` | Task history, filterable |
 | `get_events(...)` | Replayable event feed (also a live SSE stream over HTTP) |
+| `cancel_task(task_id)` / `cancel_program(program_id)` | Abort in-flight work — tears down the sandbox, marks it `cancelled` (terminal; not retried or recovered) |
 
 Async by default: a tool call returns a `task_id` immediately and the work runs in the background. Pass a `notify_url` to get a callback on completion/block instead of polling.
 

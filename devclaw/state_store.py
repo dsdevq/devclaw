@@ -19,15 +19,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
 
-TaskStatus = Literal["pending", "running", "done", "failed"]
+# cancelled — deliberately aborted by a client (distinct from 'failed', which is
+#   an execution error). Terminal, so crash recovery (which only revives
+#   'running' rows) never resurrects it — an abort stays aborted across restarts.
+TaskStatus = Literal["pending", "running", "done", "failed", "cancelled"]
 TaskKind = Literal["implement_feature", "fix_bug", "review_repository"]
 # Programs hold a DAG of tasks decomposed from a single high-level goal.
-#   planning — planner still decomposing (claude subprocess in flight)
-#   running  — tasks exist, none failed, not all terminal yet
-#   done     — every task is 'done'
-#   failed   — planner failed OR any task failed (sticky; siblings are not
-#              scheduled after a failure — see TaskQueue for the policy)
-ProgramStatus = Literal["planning", "running", "done", "failed"]
+#   planning  — planner still decomposing (claude subprocess in flight)
+#   running   — tasks exist, none failed/cancelled, not all terminal yet
+#   done      — every task is 'done'
+#   failed    — planner failed OR any task failed (sticky; siblings are not
+#               scheduled after a failure — see TaskQueue for the policy)
+#   cancelled — aborted by a client; a cancelled child is sticky like a failure
+ProgramStatus = Literal["planning", "running", "done", "failed", "cancelled"]
 
 
 def _now_ms() -> int:
@@ -337,6 +341,42 @@ class StateStore:
             )
             self._db.commit()
 
+    def mark_task_cancelled(self, task_id: str) -> bool:
+        """Abort a task. Transitions pending/running -> cancelled (terminal).
+        Returns True iff a row moved — False if the task was already terminal
+        (done/failed/cancelled), so a settle that lands a hair later can't
+        clobber it (mark_done/mark_failed also guard on pending/running). Used
+        by the queue's cancel path; the live execution is torn down separately."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE tasks SET status = 'cancelled', completed_at = ? "
+                "WHERE id = ? AND status IN ('pending', 'running')",
+                (_now_ms(), task_id),
+            )
+            self._db.commit()
+            return cur.rowcount == 1
+
+    def cancel_program_pending_tasks(self, program_id: str) -> list[str]:
+        """Bulk-cancel every PENDING task of a program (work not yet handed to
+        the engine) so nothing new starts. Running tasks are torn down live by
+        the queue, not here. Returns the cancelled task ids (for the audit log)."""
+        with self._lock:
+            ids = [
+                r["id"]
+                for r in self._db.execute(
+                    "SELECT id FROM tasks WHERE program_id = ? AND status = 'pending'",
+                    (program_id,),
+                ).fetchall()
+            ]
+            if ids:
+                self._db.execute(
+                    "UPDATE tasks SET status = 'cancelled', completed_at = ? "
+                    "WHERE program_id = ? AND status = 'pending'",
+                    (_now_ms(), program_id),
+                )
+                self._db.commit()
+        return ids
+
     def get_task(self, task_id: str) -> Optional[Task]:
         with self._lock:
             row = self._db.execute(
@@ -408,6 +448,18 @@ class StateStore:
         with self._lock:
             self._db.execute(
                 "UPDATE programs SET status = 'failed', error = ?, completed_at = ? "
+                "WHERE id = ? AND status IN ('planning', 'running')",
+                (error, _now_ms(), program_id),
+            )
+            self._db.commit()
+
+    def mark_program_cancelled(self, program_id: str, error: Optional[str] = None) -> None:
+        """Abort a program. Transitions planning/running -> cancelled (terminal).
+        ``error`` carries a human reason (e.g. which task triggered it); it lands
+        in the same column failures use, so notify payloads stay uniform."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE programs SET status = 'cancelled', error = ?, completed_at = ? "
                 "WHERE id = ? AND status IN ('planning', 'running')",
                 (error, _now_ms(), program_id),
             )

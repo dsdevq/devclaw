@@ -181,6 +181,34 @@ may run a while; that's the point. `get_program` shows tasks grouped by mileston
 
 ---
 
+## 6b. L5 — abort a running build (the kill switch)
+
+Crash recovery (L3) is automatic; this is the *deliberate* stop. Start any program
+(L2) or build (L4), let a task reach `running`, then abort it:
+
+```bash
+# abort one task (its sandbox is torn down; the task goes terminal 'cancelled'):
+python drive.py cancel_task '{"task_id":"<id>"}'        # → {"cancelled":true,"status":"cancelled"}
+
+# or abort the whole program (stops scheduling + tears down every running child):
+python drive.py cancel_program '{"program_id":"<id>"}'  # → {"cancelled":true,"status":"cancelled"}
+```
+
+Confirm the abort holds:
+
+```bash
+python drive.py get_program '{"program_id":"<id>"}'   # status: cancelled; tasks cancelled
+docker ps --filter name=devclaw-                      # the sandbox container is gone (rm -f)
+```
+
+**The recovery interplay is the point.** `cancelled` is terminal, and startup
+`recover()` only revives `running` rows — so kill the server right after a cancel
+and restart it: the cancelled work stays cancelled (it is NOT resurrected, unlike
+an orphaned `running` task). `cancel_program` on an already-terminal program is a
+safe no-op (`{"cancelled":false}`).
+
+---
+
 ## 7. What to watch
 
 - **Dashboard** `http://localhost:8000/dashboard` → click a program for the live SSE event stream.
