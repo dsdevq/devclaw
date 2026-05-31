@@ -37,3 +37,6 @@ build/
 auth-profiles.json
 *.pem
 *.key
+
+# Eval run artifacts (results, not source)
+evals/runs/
