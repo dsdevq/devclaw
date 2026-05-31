@@ -23,7 +23,13 @@ import json
 import os
 from typing import Awaitable, Callable
 
-from .planner import PlannerError, call_claude, extract_json
+from .planner import PlannerError, claude_with_model, extract_json
+
+#: the grill is conversational requirement-gathering — Sonnet is the right tier
+#: (frequent, quality-sensitive, but not Opus-hard). Empty → account default.
+GRILL_MODEL = os.environ.get("DEVCLAW_GRILL_MODEL", "sonnet") or None
+#: default cognition caller for the grill, bound to the grill tier
+grill_caller = claude_with_model(GRILL_MODEL)
 
 #: hard cap so a grill can't loop forever — after this many answered turns the
 #: model is forced to finalize the spec from what it has.
@@ -112,7 +118,7 @@ def validate_step(parsed: object) -> dict:
 async def next_step(
     idea: str,
     transcript: list[dict],
-    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
+    claude_caller: Callable[[str], Awaitable[str]] = grill_caller,
 ) -> dict:
     """Run one grill turn. Returns an 'ask' step (next question + recommendation)
     or a 'done' step (the finalized spec). Forces finalization once the question

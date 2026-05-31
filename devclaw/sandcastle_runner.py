@@ -33,6 +33,13 @@ from .engine import EngineEvent, EngineRequest, EngineResult
 
 SANDBOX_IMAGE = os.environ.get("DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest")
 DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
+# The model the in-sandbox OpenHands agent runs on — this is the heavy coding
+# path and the bulk of the Pro/Max quota burn, so it defaults to Sonnet (strong
+# at code, far lighter than Opus); set DEVCLAW_EXEC_MODEL=claude-opus-4-8 to opt
+# a run up to Opus. Passed to the runner, which hands it to ACPAgent as the
+# `acp_model` (Claude ACP selects it via session _meta). Must be a full model id,
+# not an alias. Empty → the ACP server's default.
+EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
 # Container-side mount targets. Match the Dockerfile's expectations.
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
@@ -79,7 +86,12 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
     container_name = f"devclaw-{uuid.uuid4().hex[:8]}"
 
     payload = json.dumps(
-        {"kind": req.kind, "workspace_dir": CONTAINER_WORKSPACE, "goal": req.goal}
+        {
+            "kind": req.kind,
+            "workspace_dir": CONTAINER_WORKSPACE,
+            "goal": req.goal,
+            "model": EXEC_MODEL,  # the in-sandbox agent's tier; None → ACP default
+        }
     )
 
     docker_args = [

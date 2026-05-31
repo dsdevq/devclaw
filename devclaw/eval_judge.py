@@ -13,10 +13,17 @@ validation, and aggregation are pure, so this is unit-testable with a stub.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from typing import Awaitable, Callable, Optional
 
-from .planner import PlannerError, call_claude, extract_json
+from .planner import PlannerError, claude_with_model, extract_json
+
+#: the judge buckets a run into a fixed vocabulary + a suggestion — bounded
+#: classification, so Haiku is the right tier. Empty → account default.
+JUDGE_MODEL = os.environ.get("DEVCLAW_JUDGE_MODEL", "haiku") or None
+#: default cognition caller for the judge, bound to the judge tier
+judge_caller = claude_with_model(JUDGE_MODEL)
 
 #: controlled failure-mode vocabulary — keep stable so verdicts aggregate.
 CATEGORIES = (
@@ -145,7 +152,7 @@ async def judge_run(
     events: list[dict],
     acceptance: Optional[bool],
     accept_output: str = "",
-    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
+    claude_caller: Callable[[str], Awaitable[str]] = judge_caller,
 ) -> dict:
     """Diagnose one run into a validated verdict. ``claude_caller`` is injected so
     tests can stub the subprocess."""

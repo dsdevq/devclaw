@@ -119,6 +119,17 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
 | `DEVCLAW_HOST_CLAUDE_DIR` | `~/.claude` | host path bind-mounted read-only into each sandbox |
 
+### Model tiering
+
+Cognition is tiered per role so an autonomous run doesn't burn the Pro/Max quota on Opus where a lighter model does the job (no API key = the limit is your session quota, not a bill). Host roles take a `claude --model` value (alias like `sonnet`/`opus`); the exec engine takes a full model id. Set any to empty to fall back to the account default.
+
+| Var | Default | Role |
+|---|---|---|
+| `DEVCLAW_PLANNER_MODEL` | `opus` | planner (`plan_goal`/`plan_spec`) — rare, high-leverage decomposition |
+| `DEVCLAW_GRILL_MODEL` | `sonnet` | the build-from-scratch elicitation grill |
+| `DEVCLAW_JUDGE_MODEL` | `haiku` | the eval failure-analysis judge |
+| `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **the OpenHands coding agent — the token/quota bulk.** Set `claude-opus-4-8` to opt a run up to Opus. |
+
 ## Tests
 
 ```bash

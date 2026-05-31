@@ -24,6 +24,16 @@ PLANNER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_PLANNER_TIMEOUT_MS", "90000"))
 CLAUDE_BIN = os.environ.get("DEVCLAW_CLAUDE_BIN", "claude")
 MAX_TASKS_PER_PLAN = 20
 
+# Per-role model tiering. Running every cognition call on the account default
+# (Opus) burns the Pro/Max quota fast and is slow; tier each role to the lightest
+# model that does its job. These are `claude --model` values (an alias like
+# 'sonnet'/'opus', or a full id). Planning is rare + high-leverage → Opus; the
+# grill is conversational → Sonnet (set in elicitation.py); the eval judge is
+# bounded classification → Haiku (set in eval_judge.py). The heavy coding path
+# (OpenHands) is tiered separately via DEVCLAW_EXEC_MODEL. An empty value →
+# the CLI's account default (no --model flag passed).
+PLANNER_MODEL = os.environ.get("DEVCLAW_PLANNER_MODEL", "opus") or None
+
 VALID_KINDS: tuple[TaskKind, ...] = ("implement_feature", "fix_bug", "review_repository")
 
 
@@ -187,9 +197,21 @@ def validate_plan(parsed: object) -> list[PlannedTask]:
     return ordered
 
 
-async def call_claude(prompt: str) -> str:
-    """Spawn ``claude --print`` with the planner prompt and return its stdout.
-    Injected into ``plan_goal`` so tests can stub the subprocess."""
+def _build_claude_argv(prompt: str, model: str | None) -> list[str]:
+    """Argv for a ``claude --print`` call. ``--model`` is inserted only when a
+    model is given (else the CLI uses the account default). Pure → unit-tested."""
+    argv = [CLAUDE_BIN, "--print", "--output-format=text"]
+    if model:
+        argv += ["--model", model]
+    argv.append(prompt)
+    return argv
+
+
+async def call_claude(prompt: str, model: str | None = None) -> str:
+    """Spawn ``claude --print`` with the prompt and return its stdout. ``model``
+    picks the tier (alias or full id); None → account default. Injected into the
+    planners/grill/judge so tests can stub the subprocess; each role binds its
+    own model via :func:`claude_with_model`."""
     env = dict(os.environ)
     # Belt + suspenders: never let an API key override the OAuth session.
     env.pop("ANTHROPIC_API_KEY", None)
@@ -197,10 +219,7 @@ async def call_claude(prompt: str) -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            CLAUDE_BIN,
-            "--print",
-            "--output-format=text",
-            prompt,
+            *_build_claude_argv(prompt, model),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -224,6 +243,21 @@ async def call_claude(prompt: str) -> str:
     return stdout
 
 
+def claude_with_model(model: str | None) -> Callable[[str], Awaitable[str]]:
+    """A one-argument ``claude`` caller bound to a model — the default cognition
+    caller for a role, so each role shells out at its own tier while keeping the
+    1-arg ``claude_caller`` seam the planners/grill/judge inject for tests."""
+
+    async def _caller(prompt: str) -> str:
+        return await call_claude(prompt, model=model)
+
+    return _caller
+
+
+#: planning (plan_goal + plan_spec) runs at the planner tier
+_planner_caller = claude_with_model(PLANNER_MODEL)
+
+
 def _parse_plan(raw: str) -> list[PlannedTask]:
     """Extract → parse → validate a planner response into an ordered DAG."""
     json_text = extract_json(raw)
@@ -237,7 +271,7 @@ def _parse_plan(raw: str) -> list[PlannedTask]:
 async def plan_goal(
     goal: str,
     workspace_dir: str,
-    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
+    claude_caller: Callable[[str], Awaitable[str]] = _planner_caller,
 ) -> list[PlannedTask]:
     """Plan a bare goal string (the small-bounded `start_program` case)."""
     raw = await claude_caller(build_planner_prompt(goal, workspace_dir))
@@ -301,7 +335,7 @@ Return the JSON now."""
 async def plan_spec(
     spec: str,
     workspace_dir: str,
-    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
+    claude_caller: Callable[[str], Awaitable[str]] = _planner_caller,
 ) -> list[PlannedTask]:
     """Decompose an approved spec into a milestone-ordered DAG. Same validated
     DAG shape as plan_goal, with per-task milestones populated."""
