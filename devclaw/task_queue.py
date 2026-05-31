@@ -80,6 +80,14 @@ class TaskQueue:
         task.add_done_callback(self._bg.discard)
         return task
 
+    def steer_program(self, program_id: str, message: str) -> list[str]:
+        """Fold a steering message into a running program's not-yet-started tasks
+        (the agent reads it when it picks them up). Running/done tasks are left
+        alone. Returns the ids of the pending tasks updated. Single-writer: task
+        mutation goes through the queue."""
+        note = f"\n\n[STEER UPDATE]: {message}"
+        return self._store.append_note_to_pending_tasks(program_id, note)
+
     async def drain(self) -> None:
         """Await all in-flight background work. Used by tests for determinism.
 
