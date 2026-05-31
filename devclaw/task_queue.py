@@ -35,15 +35,17 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
+from .engine import Engine, EngineEvent, EngineRequest
 from .planner import PlannedTask, PlannerError, plan_goal
-from .sandcastle_runner import OpenHandsRequest, OpenHandsResult, RunnerEvent, run_sandcastle
+from .sandcastle_runner import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
 MAX_CONCURRENT_PER_PROGRAM = int(os.environ.get("DEVCLAW_MAX_CONCURRENT_PER_PROGRAM", "2"))
 
 PlannerFn = Callable[[str, str], Awaitable[list[PlannedTask]]]
-RunnerFn = Callable[[OpenHandsRequest], Awaitable[OpenHandsResult]]
+#: the execution engine — orchestration depends on this seam, not on OpenHands
+RunnerFn = Engine
 
 
 class TaskQueue:
@@ -234,7 +236,7 @@ class TaskQueue:
         row = self._store.get_task(task_id)
         program_id = row.program_id if row else None
 
-        def on_event(event: RunnerEvent) -> None:
+        def on_event(event: EngineEvent) -> None:
             try:
                 self._store.append_event(
                     task_id=task_id,
@@ -249,7 +251,7 @@ class TaskQueue:
 
         try:
             result = await self._runner(
-                OpenHandsRequest(kind=kind, workspace_dir=workspace_dir, goal=goal, on_event=on_event)
+                EngineRequest(kind=kind, workspace_dir=workspace_dir, goal=goal, on_event=on_event)
             )
             if result.get("status") == "ok":
                 self._store.mark_done(task_id, json.dumps(result))

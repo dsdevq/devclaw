@@ -6,8 +6,8 @@ sticky failure, and event recording — the logic the old test:dag harness cover
 
 import pytest
 
+from devclaw.engine import EngineEvent, EngineRequest
 from devclaw.planner import PlannedTask
-from devclaw.sandcastle_runner import OpenHandsRequest, RunnerEvent
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
 
@@ -20,10 +20,10 @@ def store(tmp_path):
 
 
 def _ok_runner(record: list[str]):
-    async def runner(req: OpenHandsRequest):
+    async def runner(req: EngineRequest):
         record.append(req.goal)
         if req.on_event:
-            req.on_event(RunnerEvent(id="1", type="ActionEvent", source="agent", ts=0, payload={"g": req.goal}))
+            req.on_event(EngineEvent(id="1", type="ActionEvent", source="agent", ts=0, payload={"g": req.goal}))
         return {"status": "ok", "workspaceDir": req.workspace_dir, "message": f"did: {req.goal}"}
     return runner
 
@@ -73,7 +73,7 @@ async def test_program_planner_failure_marks_failed(store):
 
 
 async def test_task_failure_propagates_to_program(store):
-    async def failing_runner(req: OpenHandsRequest):
+    async def failing_runner(req: EngineRequest):
         return {"status": "error", "error": "kaboom"}
 
     async def planner(goal, workspace_dir):
