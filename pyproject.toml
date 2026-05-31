@@ -1,0 +1,25 @@
+[project]
+name = "devclaw"
+version = "0.0.1"
+description = "DevClaw — MCP server orchestrating OpenHands for autonomous coding tasks"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.3",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+devclaw-mcp = "devclaw.server:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["devclaw"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

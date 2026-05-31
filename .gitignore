@@ -14,17 +14,15 @@ Thumbs.db
 .cache/
 /tmp-workspaces/
 
-# Node / TypeScript build
-node_modules/
-dist/
-.tsbuildinfo
-*.log
-
 # Python
+.venv/
+*.log
 openhands-runner/.venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+*.egg-info/
+build/
 
 # Anything that looks like personal state should not be in this repo
 .env

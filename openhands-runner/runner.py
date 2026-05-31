@@ -1,9 +1,9 @@
 """
-DevClaw v2 — OpenHands runner.
+DevClaw — OpenHands runner (runs inside the per-task sandbox container).
 
-Spawned as a subprocess (host process or sandcastle-runner docker exec) by
-the TypeScript MCP server. Reads a single JSON request from argv[1] and
-streams progress to stdout, one prefixed line at a time:
+Spawned by the host sandcastle runner via ``docker run``. Reads a single JSON
+request from argv[1] and streams progress to stdout, one prefixed line at a
+time:
 
     event: {"id":"...","type":"ActionEvent","source":"agent","payload":{...},"ts":...}
     event: {"id":"...","type":"ObservationEvent",...}
@@ -155,7 +155,7 @@ def main() -> None:
                 "status": "error",
                 "error": (
                     "openhands-sdk not importable. Install with: "
-                    "`npm run openhands:install` from the repo root."
+                    "`pip install -r openhands-runner/requirements.txt`."
                 ),
                 "trace": str(exc),
             }

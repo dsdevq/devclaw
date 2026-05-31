@@ -10,8 +10,8 @@ It is **not** a chatbot and **not** a rebuild of OpenHands. OpenHands owns the h
 MCP client (OpenClaw / Claude Code / any MCP host)
   │   implement_feature / fix_bug / review_repository / start_program …
   ▼
-DevClaw  (TypeScript)
-  ├── MCP server     stdio + streamable-HTTP, 9 tools
+DevClaw  (Python)
+  ├── MCP server     FastMCP — stdio + streamable-HTTP, 9 tools, dashboard + SSE
   ├── planner        Goal → task DAG (single-task passthrough for small goals)
   ├── state store    SQLite — programs, tasks, append-only events
   └── sandcastle     `docker run --rm` per task — RO ~/.claude mount, destroyed on exit
@@ -36,31 +36,31 @@ The full rationale — including why OpenHands and sandbox isolation are **ortho
 ## Layout
 
 ```
-src/
-├── mcp-server.ts        # stdio + streamable-HTTP MCP server, 9 tools, dashboard + SSE
-├── planner.ts           # Goal → task DAG
-├── state-store.ts       # SQLite: programs, tasks, append-only events
-├── task-queue.ts        # async task lifecycle + concurrency
-└── sandcastle-runner.ts # `docker run --rm` per task; streams events from the runner
+devclaw/
+├── server.py            # FastMCP server — 9 tools, dashboard + SSE, bearer-auth middleware
+├── planner.py           # Goal → task DAG (shells out to `claude --print`)
+├── state_store.py       # SQLite: programs, tasks, append-only events
+├── task_queue.py        # async task lifecycle (asyncio) + concurrency
+└── sandcastle_runner.py # `docker run --rm` per task; streams events from the runner
 openhands-runner/
 ├── runner.py            # OpenHands SDK invocation; emits event/result lines on stdout
 └── requirements.txt     # openhands-sdk
 .sandcastle/Dockerfile   # per-task sandbox image
-test/                    # unit + runtime harnesses (see package.json scripts)
+tests/                   # pytest — planner, state store, queue/DAG (stubbed; no docker)
 docs/architecture-v2.md  # the architectural contract — read before touching the runner/store/sandbox
 ```
 
-TypeScript orchestrates; Python touches OpenHands. The language boundary keeps the OpenHands agent loop isolated from the long-running DevClaw process.
+DevClaw is all Python. The only language boundary left is the process boundary: `openhands-runner/runner.py` runs the (Python-only) OpenHands SDK *inside* the sandbox container, isolated from the long-running host process — it talks to the host over a line-delimited JSON protocol on stdout.
 
 ## MCP tools
 
 | Tool | Does |
 |---|---|
-| `implement_feature(repo, goal, …)` | Run a single feature task |
-| `fix_bug(repo, description, …)` | Run a single bug-fix task |
-| `review_repository(repo, …)` | Read-only review (no writes — invariant runtime-checked) |
-| `start_program(goal, …)` | Decompose a large goal into a task DAG and run it |
-| `get_program(id)` / `list_programs()` | Program status + the task DAG |
+| `implement_feature(workspace_dir, goal, …)` | Run a single feature task |
+| `fix_bug(workspace_dir, description, …)` | Run a single bug-fix task |
+| `review_repository(workspace_dir, …)` | Read-only review (no writes — invariant runtime-checked) |
+| `start_program(workspace_dir, goal, …)` | Decompose a large goal into a task DAG and run it |
+| `get_program(program_id)` / `list_programs()` | Program status + the task DAG |
 | `get_status(task_id)` | One task's status / result / PR |
 | `list_tasks(...)` | Task history, filterable |
 | `get_events(...)` | Replayable event feed (also a live SSE stream over HTTP) |
@@ -69,28 +69,23 @@ Async by default: a tool call returns a `task_id` immediately and the work runs 
 
 ## Auth (the design constraint)
 
-DevClaw inherits a Claude Code OAuth session — it never uses an API key. `ANTHROPIC_API_KEY` is **actively refused** at both the TypeScript and Python layers so a stray key can't silently switch autonomous runs onto metered billing.
-
-```bash
-export CLAUDE_CODE_EXECUTABLE=/path/to/claude   # the CLI to drive
-export CLAUDE_CONFIG_DIR=$HOME/.claude          # the OAuth session to reuse
-```
-
-Inside the per-task sandbox, `~/.claude` is bind-mounted **read-only** (auth works); nothing else from the host is mounted (the container is destroyed on exit, so no persistent state escapes).
+DevClaw inherits a `claude` OAuth session — it never uses an API key. `ANTHROPIC_API_KEY` is **actively refused** at both the host (planner) and sandbox layers so a stray key can't silently switch autonomous runs onto metered billing. All you need is a logged-in `claude` CLI: the planner shells out to it, and the per-task sandbox bind-mounts `~/.claude` **read-only** (auth works; nothing else from the host is mounted, and the container is destroyed on exit so no state escapes).
 
 ## Run it
 
 ```bash
-npm install
-npm run openhands:install     # creates openhands-runner/.venv with openhands-sdk
+python -m venv .venv && source .venv/bin/activate
+pip install -e .                       # the host orchestrator (FastMCP + httpx)
+pip install -r openhands-runner/requirements.txt   # only needed inside the sandbox image
 npm install -g @agentclientprotocol/claude-agent-acp   # ACP adapter (one-time, global)
 
-npm run build
-DEVCLAW_TRANSPORT=stdio npm start        # local dev (MCP over stdio)
+DEVCLAW_TRANSPORT=stdio devclaw-mcp        # local dev (MCP over stdio)
 # or HTTP for a long-running service:
-DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 npm start
+DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 #   → MCP at /mcp, live dashboard at /dashboard, SSE at /programs/:id/events
 ```
+
+(`devclaw-mcp` is the console script; `python -m devclaw.server` works too.)
 
 ### Useful env
 
@@ -100,20 +95,21 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 npm start
 | `DEVCLAW_PORT` | `8000` | HTTP port |
 | `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address (set `127.0.0.1` to restrict to loopback) |
 | `DEVCLAW_TOKEN` | — | When set, the HTTP transport requires it on every route except `/health` — via `Authorization: Bearer <token>` or a `?token=` query param. Unset = no auth (local dev). |
-| `DEVCLAW_DB` | (temp) | SQLite path for state |
-| `DEVCLAW_SANDBOX_IMAGE` | — | per-task sandbox image (see `.sandcastle/Dockerfile`) |
-| `CLAUDE_CODE_EXECUTABLE` / `CLAUDE_CONFIG_DIR` | — | OAuth-session passthrough |
+| `DEVCLAW_DB` | `./devclaw.db` | SQLite path for state |
+| `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image (see `.sandcastle/Dockerfile`) |
+| `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
+| `DEVCLAW_HOST_CLAUDE_DIR` | `~/.claude` | host path bind-mounted read-only into each sandbox |
 
 ## Tests
 
 ```bash
-npm run test:unit     # planner + state store — no Docker needed
-npm run test:dag      # local DAG stub harness
+pip install -e ".[dev]"
+pytest          # planner + state store + queue/DAG, all stubbed — no docker, no claude
 ```
 
 ## Status
 
-v2 is the live runtime; the original v1 (a LangGraph orchestrator + markdown skills driven by cron) has been retired and removed — it survives in git history if you need the prior art. Slices 1–5 are shipped on `main`: MCP server → SQLite state → planner DAG → sandcastle isolation → event stream + dashboard.
+DevClaw is the live runtime. It was rewritten from TypeScript to all-Python (FastMCP) — the host orchestration now matches the language of the OpenHands SDK it drives, so there's a single toolchain. The original v1 (a LangGraph orchestrator + markdown skills driven by cron) was retired earlier and lives only in git history.
 
 ## What this is NOT
 
