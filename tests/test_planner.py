@@ -8,6 +8,7 @@ from devclaw.planner import (
     PlannerError,
     extract_json,
     plan_goal,
+    plan_spec,
     validate_plan,
 )
 
@@ -119,6 +120,36 @@ def test_non_array_rejected():
 def test_missing_goal_rejected():
     with pytest.raises(PlannerError, match="missing 'goal'"):
         validate_plan(_plan({"key": "a"}))
+
+
+def test_milestone_optional_defaults_none():
+    out = validate_plan(_plan({"key": "a", "goal": "g"}))
+    assert out[0].milestone is None
+
+
+def test_milestone_parsed_when_present():
+    out = validate_plan(_plan({"key": "a", "goal": "g", "milestone": "M1 scaffold"}))
+    assert out[0].milestone == "M1 scaffold"
+
+
+# ---- plan_spec (with stubbed claude) ----
+
+
+async def test_plan_spec_decomposes_into_milestoned_dag():
+    async def stub(prompt):
+        assert "APPROVED SPEC" in prompt  # the spec is embedded in the prompt
+        return json.dumps(
+            {
+                "tasks": [
+                    {"key": "m1", "goal": "scaffold", "milestone": "M1", "kind": "implement_feature"},
+                    {"key": "m2", "goal": "auth", "milestone": "M2", "depends_on": ["m1"]},
+                ]
+            }
+        )
+
+    out = await plan_spec("# spec\n## Milestones\n- M1\n- M2", "/ws", stub)
+    assert [t.key for t in out] == ["m1", "m2"]  # topo order
+    assert out[0].milestone == "M1" and out[1].milestone == "M2"
 
 
 # ---- plan_goal (with stubbed claude) ----

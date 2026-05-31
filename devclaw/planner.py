@@ -35,6 +35,8 @@ class PlannedTask:
     kind: TaskKind
     #: keys (not UUIDs) of other tasks in this plan that must finish first
     depends_on_keys: list[str] = field(default_factory=list)
+    #: the spec milestone this task serves (plan-from-spec only; else None)
+    milestone: str | None = None
 
 
 class PlannerError(Exception):
@@ -122,6 +124,7 @@ def validate_plan(parsed: object) -> list[PlannedTask]:
         goal = t.get("goal").strip() if isinstance(t.get("goal"), str) else ""
         kind_raw = t.get("kind") if isinstance(t.get("kind"), str) else "implement_feature"
         deps_raw = t.get("depends_on")
+        milestone = t.get("milestone").strip() if isinstance(t.get("milestone"), str) else None
         if not key:
             raise PlannerError("Task missing 'key'")
         if not goal:
@@ -144,7 +147,15 @@ def validate_plan(parsed: object) -> list[PlannedTask]:
                     raise PlannerError(f"Task '{key}' depends on itself")
                 depends_on_keys.append(d.strip())
         seen.add(key)
-        tasks.append(PlannedTask(key=key, goal=goal, kind=kind_raw, depends_on_keys=depends_on_keys))
+        tasks.append(
+            PlannedTask(
+                key=key,
+                goal=goal,
+                kind=kind_raw,
+                depends_on_keys=depends_on_keys,
+                milestone=milestone or None,
+            )
+        )
 
     # Validate all dep refs resolve.
     for t in tasks:
@@ -213,17 +224,86 @@ async def call_claude(prompt: str) -> str:
     return stdout
 
 
-async def plan_goal(
-    goal: str,
-    workspace_dir: str,
-    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
-) -> list[PlannedTask]:
-    """Full planner entry point: prompt Claude, validate, return ordered DAG."""
-    prompt = build_planner_prompt(goal, workspace_dir)
-    raw = await claude_caller(prompt)
+def _parse_plan(raw: str) -> list[PlannedTask]:
+    """Extract → parse → validate a planner response into an ordered DAG."""
     json_text = extract_json(raw)
     try:
         parsed = json.loads(json_text)
     except json.JSONDecodeError as err:
         raise PlannerError(f"Planner JSON parse failed: {err}", raw) from err
     return validate_plan(parsed)
+
+
+async def plan_goal(
+    goal: str,
+    workspace_dir: str,
+    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
+) -> list[PlannedTask]:
+    """Plan a bare goal string (the small-bounded `start_program` case)."""
+    raw = await claude_caller(build_planner_prompt(goal, workspace_dir))
+    return _parse_plan(raw)
+
+
+# ===== plan-from-spec ========================================================
+# The build-a-project-from-scratch path: decompose an *approved spec* (the
+# shared understanding produced by the elicitation grill) into a milestone-
+# ordered DAG. Richer than plan_goal — the model is grounded in the spec's
+# milestones, acceptance criteria, scope, and constraints.
+
+SPEC_SYSTEM_PROMPT = """You are DevClaw's planner. You are given an APPROVED
+project spec — a shared understanding of what to build and how. Decompose it
+into a directed acyclic graph (DAG) of tasks that, executed in dependency order,
+build the project to the spec.
+
+Rules:
+- Walk the spec's milestones in order. Each task serves exactly one milestone;
+  set "milestone" to that milestone's name.
+- Each task is bounded: an autonomous coding agent finishes it in one run. Each
+  task's "goal" is a concrete, self-contained instruction grounded in the spec
+  (reference the relevant acceptance criteria so the work is checkable).
+- Respect SCOPE: do not add tasks for anything the spec lists as out-of-scope.
+- Respect CONSTRAINTS (stack, deps, hosting, non-negotiables) from the spec.
+- Use "depends_on" only for genuine ordering (a task needs another's output —
+  e.g. scaffolding before features, an API contract before its frontend). Tasks
+  in the same milestone with no real dependency should run in parallel (empty
+  depends_on).
+- Prefer fewer, larger tasks over many tiny ones. A typical milestone is 1-4
+  tasks. Don't pad.
+- Task "kind" must be one of: implement_feature, fix_bug, review_repository.
+  Default to implement_feature.
+
+Respond with STRICT JSON ONLY - no prose, no markdown fences. Schema:
+
+{
+  "tasks": [
+    {
+      "key": "<short stable id, e.g. 'm1-scaffold'>",
+      "goal": "<concrete instruction for the agent, grounded in the spec>",
+      "kind": "implement_feature" | "fix_bug" | "review_repository",
+      "milestone": "<the milestone name this task serves>",
+      "depends_on": ["<key of another task in this plan>", ...]
+    }
+  ]
+}"""
+
+
+def build_spec_planner_prompt(spec: str, workspace_dir: str) -> str:
+    return f"""{SPEC_SYSTEM_PROMPT}
+
+Workspace: {workspace_dir}
+
+APPROVED SPEC:
+{spec}
+
+Return the JSON now."""
+
+
+async def plan_spec(
+    spec: str,
+    workspace_dir: str,
+    claude_caller: Callable[[str], Awaitable[str]] = call_claude,
+) -> list[PlannedTask]:
+    """Decompose an approved spec into a milestone-ordered DAG. Same validated
+    DAG shape as plan_goal, with per-task milestones populated."""
+    raw = await claude_caller(build_spec_planner_prompt(spec, workspace_dir))
+    return _parse_plan(raw)
