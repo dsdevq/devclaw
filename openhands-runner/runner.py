@@ -142,7 +142,10 @@ def main() -> None:
 
     os.makedirs(workspace_dir, exist_ok=True)
 
-    claude_exec = os.environ.get("CLAUDE_CODE_EXECUTABLE") or "/home/dsdevqq/.local/bin/claude"
+    # Default to a PATH lookup — inside the sandbox the Dockerfile sets
+    # CLAUDE_CODE_EXECUTABLE=/usr/bin/claude, so this fallback only matters for
+    # host/misconfigured runs. (Was a hardcoded personal path — a leak + footgun.)
+    claude_exec = os.environ.get("CLAUDE_CODE_EXECUTABLE") or "claude"
     claude_cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
     try:
