@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Plan-from-spec (build-from-scratch step 3).** New `planner.plan_spec(spec, workspace_dir)` decomposes an *approved spec* (the shared understanding from the elicitation grill) into a **milestone-ordered DAG** — grounded in the spec's milestones, acceptance criteria, scope, and constraints, distinct from the bare-goal `plan_goal`. Tasks now carry an optional `milestone` (new SQLite column + forward-compat ALTER, surfaced in `get_program`/`list_tasks`), persisted by the queue. The `build_project` tool that produces the spec lands in step 4.
 - **Durability + crash recovery (build-from-scratch step 2).** Scheduling is now reconciled from DB state by a single `_pump`, so concurrency is crash-consistent (derived from `running` rows, not an in-memory counter). On startup `recover()` resets tasks orphaned in `running` by a dead process back to `pending` (logged as a `reaped` event); a **heartbeat tick** (`DEVCLAW_TICK_SECONDS`, default 10s) advances DAGs and resumes recovered work from disk, so a multi-day build survives restarts. A **cheap-idle guard** makes an idle tick ~free (one COUNT). New **global concurrency cap** `DEVCLAW_MAX_CONCURRENT` (default 4) with backpressure, alongside the per-program cap.
 
 ### Changed

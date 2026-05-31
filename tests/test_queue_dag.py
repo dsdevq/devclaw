@@ -62,6 +62,20 @@ async def test_program_dag_runs_in_dependency_order(store):
     assert all(t.status == "done" for t in tasks)
 
 
+async def test_program_persists_milestones(store):
+    async def planner(goal, workspace_dir):
+        return [
+            PlannedTask(key="a", goal="scaffold", kind="implement_feature", depends_on_keys=[], milestone="M1"),
+            PlannedTask(key="b", goal="feature", kind="implement_feature", depends_on_keys=["a"], milestone="M2"),
+        ]
+
+    q = TaskQueue(store, planner=planner, runner=_ok_runner([]))
+    program_id = q.submit_program(workspace_dir="/ws", goal="x")
+    await q.drain()
+    by_goal = {t.goal: t.milestone for t in store.list_program_tasks(program_id)}
+    assert by_goal == {"scaffold": "M1", "feature": "M2"}
+
+
 async def test_program_planner_failure_marks_failed(store):
     async def planner(goal, workspace_dir):
         raise RuntimeError("planner exploded")

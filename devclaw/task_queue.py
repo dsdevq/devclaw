@@ -309,6 +309,7 @@ class TaskQueue:
                     program_id=program_id,
                     depends_on=dep_uuids,
                     order_idx=idx,
+                    milestone=p.milestone,
                 )
             self._store.mark_program_running(program_id)
         finally:
