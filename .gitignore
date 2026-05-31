@@ -12,6 +12,19 @@ Thumbs.db
 # Local scratch
 /tmp/
 .cache/
+/tmp-workspaces/
+
+# Node / TypeScript build
+node_modules/
+dist/
+.tsbuildinfo
+*.log
+
+# Python
+python-runner/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
 
 # Anything that looks like personal state should not be in this repo
 .env

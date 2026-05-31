@@ -6,7 +6,7 @@
 # Container vaporizes on exit.
 #
 # Image is rebuilt whenever python-runner/ or this Dockerfile changes.
-# Build from the v2/ directory:
+# Build from the repo root:
 #   docker build -t devclaw-sandbox:latest -f .sandcastle/Dockerfile .
 
 FROM python:3.13-slim

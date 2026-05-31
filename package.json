@@ -1,7 +1,7 @@
 {
-  "name": "@devclaw/v2",
+  "name": "devclaw",
   "version": "0.0.1",
-  "description": "DevClaw v2 — MCP server orchestrating OpenHands for autonomous coding tasks",
+  "description": "DevClaw — MCP server orchestrating OpenHands for autonomous coding tasks",
   "type": "module",
   "private": true,
   "bin": {

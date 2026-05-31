@@ -155,7 +155,7 @@ def main() -> None:
                 "status": "error",
                 "error": (
                     "openhands-sdk not importable. Install with: "
-                    "`npm run python:install` from the v2/ directory."
+                    "`npm run python:install` from the repo root."
                 ),
                 "trace": str(exc),
             }

@@ -1,7 +1,7 @@
 # DevClaw Architecture v2
 
-**Status:** Design. Supersedes the current skill-based + cron-driven approach.
-**Decision:** Adopt OpenHands as the execution engine. DevClaw becomes a thin orchestration layer.
+**Status:** Live. This is the current architecture; it superseded and replaced the v1 skill-based + cron-driven approach, which has been removed (see git history for the prior art).
+**Decision:** Adopt OpenHands as the execution engine. DevClaw is a thin orchestration layer.
 
 ---
 
@@ -240,18 +240,9 @@ You don't babysit. DevClaw reports. You decide only when there's a real blocker.
 
 ---
 
-## Migration from v1
+## Migration from v1 (complete)
 
-The current skill-based approach stays alive during migration. The migration path:
-
-1. Deploy OpenHands as a sibling container
-2. Wire ACP backend (Claude Code)
-3. Build DevClaw MCP server (thin wrapper over OpenHands API)
-4. Build planner (start with single-task passthrough, add decomposition later)
-5. Build poller + notification path
-6. Cut over `implement_feature` calls from skills → DevClaw MCP
-7. Deprecate skills one by one as DevClaw handles each case
-8. Delete old skills once DevClaw has baked for 2 weeks
+The cutover from the v1 skill-based + cron-driven approach to this design is done. The original path — deploy OpenHands, wire the ACP backend, build the MCP server / planner / poller, cut `implement_feature` over from the skills, then retire the skills — has run to completion. The v1 orchestrator and skills have been removed from the repo; they remain in git history as prior art.
 
 ---
 
@@ -262,5 +253,3 @@ The current skill-based approach stays alive during migration. The migration pat
 - [OpenHands REST API](https://docs.openhands.dev/usage/rest-api)
 - [OpenHands SDK](https://docs.openhands.dev/usage/sdk)
 - [OpenHands Docker deployment](https://docs.openhands.dev/usage/docker)
-- [DevClaw v1 architecture (tasks)](./architecture-tasks.md) — what this supersedes
-- [DevClaw v1 architecture (curator)](./architecture-curator.md) — what this supersedes
