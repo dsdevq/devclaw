@@ -51,6 +51,31 @@ polish the feature, the rate at a new SHA should climb vs. the old one — that'
 which is unit-tested (`tests/test_evals.py`) so the *scoring* is trustworthy even
 though the live runs aren't reproducible.
 
+## Failure analysis (`--judge`)
+
+Add `--judge` to automate the "what went wrong?" step. After each run a second
+`claude` call reads the spec, the task DAG, an event digest, and the acceptance
+result, then buckets the run into a **fixed failure-mode vocabulary** — so failures
+*aggregate*:
+
+```bash
+python evals/run.py evals/json-yaml-cli --n 5 --judge
+```
+
+```
+=== SUMMARY ===
+{ … "failure_analysis": {
+      "runs_judged": 5,
+      "by_category": {"success": 3, "acceptance_gap": 1, "engine_failure": 1},
+      "top_failure_mode": "acceptance_gap" } }
+```
+
+Categories: `success · planning_error · incomplete_build · constraint_violation ·
+acceptance_gap · engine_failure · stuck · other`. Each run's verdict (category +
+diagnosis + a concrete suggestion) is saved in its `run-*.json`. `top_failure_mode`
+tells you where to spend the next polish pass. The judge scoring/vocab is unit-tested
+(`tests/test_eval_judge.py`); the diagnosis text is `claude`'s.
+
 ## Add a project
 Create `evals/<slug>/` with:
 - `idea.txt` — the `build_project` idea (pin the interface contract so acceptance is well-defined)
