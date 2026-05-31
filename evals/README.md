@@ -15,7 +15,25 @@ The grill is answered from a **fixed script** (`answers.txt`), so the spec is he
 roughly constant and you're measuring the **build**, not the interview. (Evaluating
 the grill itself is a separate concern.)
 
-## Run it
+## Validate the harness first (offline, no docker/claude)
+
+Before spending real runs, prove the *plumbing* with the stub engine — a
+deterministic build + cognition (`DEVCLAW_ENGINE=stub`). The whole pipeline runs
+with no docker and no claude, so a live failure is isolated to the agent, not the
+harness:
+
+```bash
+pip install -e . pyyaml
+DEVCLAW_ENGINE=stub DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp &   # stub server
+python evals/run.py evals/json-yaml-cli --n 3
+# expect: acceptance_pass_rate = 1.0  (the stub builds a real jyq for the golden project)
+```
+
+If that's green, the MCP tools, grill loop, approval, scheduling, execution
+wiring, scoring, and archiving all work — the only unknown left for a live run is
+real agent quality.
+
+## Run it (live)
 
 ```bash
 # 1. real engine up (see ../docs/live-shakedown.md for setup):
