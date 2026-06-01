@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- **`.NET`-capable sandbox image variant.** `.sandcastle/Dockerfile.dotnet` builds `devclaw-sandbox-dotnet` = the base sandbox + the .NET 10 SDK (python/node/claude/runner reused), selected per-run via `DEVCLAW_SANDBOX_IMAGE`. Keeps the *default* sandbox lean — .NET ships only in this variant — so the agent can build/run/test .NET repos (lifekit-dashboard, finance-sentry) and the verify gate can run `dotnet test`. (Longer-term the per-task box should derive from the project's own declared base image, keeping devclaw language-agnostic; this variant is the pragmatic first step.)
+
+### Added
 - **Per-task wall-clock timeout — a hung run fails cleanly instead of burning quota forever.** A task that exceeds `DEVCLAW_TASK_TIMEOUT_S` (default 1800s, `<=0` disables) is cancelled — which tears down its sandbox via the runner's existing teardown path — and marked `failed` with a clear reason, then notified like any other terminal state. Motivated by the live smoke, where a silent post-init agent hang ran 6+ minutes and leaked its container. Shares the cancellation/teardown path with explicit `cancel_task`, so semantics are consistent. It's a coarse backstop (catches both silent hangs and busy-loops); a finer no-progress timer that kills a *silent* hang faster is a natural follow-up. Covered by `tests/test_task_timeout.py`.
 
 ### Fixed
