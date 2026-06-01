@@ -2,7 +2,7 @@
 
 Tools (every task/program submission is async — returns an id immediately and
 runs in the background):
-  - implement_feature / fix_bug / review_repository -> {task_id}
+  - implement_feature / fix_bug / review_repository / onboard -> {task_id}
   - start_program(workspace_dir, goal)              -> {program_id}  (planner decomposes into a task DAG)
   - get_status(task_id)            / list_tasks(status?, kind?, limit?)
   - get_program(program_id)        / list_programs(limit?)
@@ -171,6 +171,35 @@ async def review_repository(
 
 
 @mcp.tool
+async def onboard(
+    workspace_dir: str, focus: str = "", notify_url: Optional[str] = None
+) -> str:
+    """Onboard a repository: analyze it and write a DRAFT AGENTS.md so future
+    tasks start informed. OpenHands inspects the workspace READ-ONLY (it modifies
+    no file except the AGENTS.md it writes) and captures COMPREHENSION ONLY —
+    stack, layout, how to build/run/test (incl. the command to use as the verify
+    gate), conventions, and setup gotchas. Project direction / decision-log are
+    deliberately out of scope.
+
+    Human-in-the-loop: the draft is NOT authoritative until you review it. It
+    lands in the repo working tree (review it via `git diff`) and the agent's
+    summary appears in the task's result_json once status=done. If the repo
+    already has an AGENTS.md, the agent validates it against the real repo and
+    keeps what's still accurate — only correcting what's wrong or missing —
+    rather than clobbering hand-written project memory. Returns task_id
+    immediately; same optional notify_url as implement_feature."""
+    if not workspace_dir:
+        raise ToolError("onboard requires workspace_dir")
+    task_id = queue.submit(
+        kind="onboard",
+        workspace_dir=workspace_dir,
+        goal=focus or "general onboarding",
+        notify_url=notify_url,
+    )
+    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
+
+
+@mcp.tool
 async def start_program(
     workspace_dir: str, goal: str, notify_url: Optional[str] = None
 ) -> str:
@@ -242,7 +271,7 @@ async def get_events(
 @mcp.tool
 async def list_tasks(
     status: Optional[Literal["pending", "running", "done", "failed", "cancelled"]] = None,
-    kind: Optional[Literal["implement_feature", "fix_bug", "review_repository"]] = None,
+    kind: Optional[Literal["implement_feature", "fix_bug", "review_repository", "onboard"]] = None,
     limit: Annotated[int, Field(ge=1, le=1000)] = 20,
 ) -> str:
     """List recent tasks, most-recent first. Optionally filter by status or kind."""
