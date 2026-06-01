@@ -138,6 +138,19 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
         f"{host_bind_path}:{CONTAINER_WORKSPACE}",
         "-v",
         f"{claude_dir}:{CONTAINER_CLAUDE_DIR}:ro",
+        # ~/.claude is mounted RO (OAuth posture: read tokens, don't write back),
+        # but the in-sandbox `claude` CLI must write per-session scratch *under*
+        # it — `session-env/<uuid>` (a working dir per shell session) and
+        # `shell-snapshots/`. On the RO mount those mkdirs fail with EROFS, which
+        # breaks EVERY terminal tool call the agent makes (observed: a build that
+        # had written working code then churned and timed out because it couldn't
+        # run its own verification). Overlay just those two subpaths with a
+        # writable tmpfs — the credentials stay RO, the scratch dirs become
+        # writable. The host dirs exist, so the tmpfs mounts over real mountpoints.
+        "--tmpfs",
+        f"{CONTAINER_CLAUDE_DIR}/session-env:rw,exec",
+        "--tmpfs",
+        f"{CONTAINER_CLAUDE_DIR}/shell-snapshots:rw,exec",
         "-e",
         "OPENHANDS_SUPPRESS_BANNER=1",
         SANDBOX_IMAGE,
