@@ -59,6 +59,10 @@ class Task:
     #: optional verify-gate command run after the agent finishes; its exit code
     #: decides done-vs-failed (the agent's self-report is not trusted). None → no gate.
     verify_cmd: Optional[str]
+    #: deliver the change as a branch/PR after a successful run (open_pr tasks)
+    deliver: bool
+    #: the delivered PR URL (or None if not delivered / only a local branch)
+    pr_url: Optional[str]
 
     def to_dict(self) -> dict:
         return {
@@ -78,6 +82,8 @@ class Task:
             "orderIdx": self.order_idx,
             "milestone": self.milestone,
             "verifyCmd": self.verify_cmd,
+            "deliver": self.deliver,
+            "prUrl": self.pr_url,
         }
 
 
@@ -154,6 +160,8 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         order_idx=r["order_idx"],
         milestone=r["milestone"],
         verify_cmd=r["verify_cmd"],
+        deliver=bool(r["deliver"]),
+        pr_url=r["pr_url"],
     )
 
 
@@ -214,7 +222,9 @@ class StateStore:
                   depends_on      TEXT,
                   order_idx       INTEGER,
                   milestone       TEXT,
-                  verify_cmd      TEXT
+                  verify_cmd      TEXT,
+                  deliver         INTEGER NOT NULL DEFAULT 0,
+                  pr_url          TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS programs (
@@ -251,6 +261,8 @@ class StateStore:
                 "ALTER TABLE tasks ADD COLUMN order_idx INTEGER",
                 "ALTER TABLE tasks ADD COLUMN milestone TEXT",
                 "ALTER TABLE tasks ADD COLUMN verify_cmd TEXT",
+                "ALTER TABLE tasks ADD COLUMN deliver INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE tasks ADD COLUMN pr_url TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -286,13 +298,14 @@ class StateStore:
         order_idx: Optional[int] = None,
         milestone: Optional[str] = None,
         verify_cmd: Optional[str] = None,
+        deliver: bool = False,
     ) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT INTO tasks
                      (id, kind, status, workspace_dir, goal, notify_url, created_at,
-                      program_id, depends_on, order_idx, milestone, verify_cmd)
-                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      program_id, depends_on, order_idx, milestone, verify_cmd, deliver)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     kind,
@@ -305,7 +318,16 @@ class StateStore:
                     order_idx,
                     milestone,
                     verify_cmd,
+                    1 if deliver else 0,
                 ),
+            )
+            self._db.commit()
+
+    def set_pr_url(self, task_id: str, pr_url: Optional[str]) -> None:
+        """Record the delivered PR URL (or None for a local-only branch)."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE tasks SET pr_url = ? WHERE id = ?", (pr_url, task_id)
             )
             self._db.commit()
 

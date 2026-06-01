@@ -39,6 +39,7 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
+from .delivery import deliver_change
 from .engine import Engine, EngineEvent, EngineRequest
 from .planner import PlannedTask, PlannerError, plan_goal
 from .sandcastle_runner import run_sandcastle
@@ -204,6 +205,7 @@ class TaskQueue:
         goal: str,
         notify_url: Optional[str] = None,
         verify_cmd: Optional[str] = None,
+        deliver: bool = False,
     ) -> str:
         task_id = str(uuid.uuid4())
         self._store.create_task(
@@ -213,6 +215,7 @@ class TaskQueue:
             goal=goal,
             notify_url=notify_url,
             verify_cmd=verify_cmd,
+            deliver=deliver,
         )
         self._pump()
         return task_id
@@ -399,6 +402,20 @@ class TaskQueue:
         await self._run_and_settle(task_id, kind, workspace_dir, goal)
         if program_id is None:
             final = self._store.get_task(task_id)
+            # Delivery: a verified change is only useful if it comes back as
+            # something to REVIEW. For an open_pr task that settled `done`, turn
+            # the change into a branch/PR (best-effort; never un-does the done
+            # task) and record the URL so the notify carries it.
+            if final and final.status == "done" and final.deliver:
+                try:
+                    delivery = await deliver_change(
+                        workspace_dir=workspace_dir, task_id=task_id, goal=goal
+                    )
+                    self._store.set_pr_url(task_id, delivery.get("pr_url"))
+                    sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")
+                except Exception as err:  # delivery must never crash a done task
+                    sys.stderr.write(f"task-queue: delivery failed task={task_id}: {err}\n")
+                final = self._store.get_task(task_id)  # refresh so notify sees pr_url
             if final and final.notify_url:
                 await self._notify_task(final)
         # A global slot freed; this program may now be complete or have newly-ready
@@ -564,6 +581,7 @@ class TaskQueue:
             "goal": task.goal,
             "result_json": task.result_json,
             "error": task.error,
+            "pr_url": task.pr_url,
             "terminated_at": task.completed_at,
         }
         await self._post_with_retries(task.notify_url, payload, f"task={task.id}")
