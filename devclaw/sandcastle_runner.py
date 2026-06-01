@@ -7,9 +7,11 @@ which streams one prefixed JSON line per event (``event: {...}``) plus a single
 terminating ``result: {...}`` line. This module:
 
   - Translates an ``EngineRequest`` into a docker invocation.
-  - Bind-mounts the host workspace into /workspace and ~/.claude read-only into
-    /home/agent/.claude (Pro OAuth posture: the claude CLI inside the sandbox
-    can read tokens but not write back).
+  - Bind-mounts the host workspace into /workspace and a CURATED allowlist of
+    entries under ~/.claude (default: just the OAuth credential) read-only into
+    /home/agent/.claude — auth in, the host's personal skills/plugins/MCP/global
+    CLAUDE.md out (Pro OAuth posture: read tokens, don't write back). See
+    ``SANDBOX_CLAUDE_ALLOWLIST``.
   - Streams stdout line-by-line; routes ``event:`` lines through ``on_event``
     and parses the final ``result:`` line as the result.
   - Refuses to forward ANTHROPIC_API_KEY into the container (same belt +
@@ -43,6 +45,26 @@ EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
 # Container-side mount targets. Match the Dockerfile's expectations.
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
+
+# Which entries under the host ~/.claude get bound into the sandbox config dir.
+# Default: ONLY the OAuth credential — the one file `claude` needs to authenticate
+# (verified: it auths with `.credentials.json` alone, even with the config-dir root
+# non-writable). We deliberately do NOT mount the whole host ~/.claude: that dir
+# also holds skills/, plugins/ (+ their MCP servers that need absent network/auth),
+# the global CLAUDE.md (which points at the unmounted ~/memory, so its instructions
+# are dead in here), and projects/ + history — projecting all of that into the
+# engineer is non-reproducible and full of tools that fail or mislead. The PM hands
+# the engineer a curated toolbox, not the keys to the whole house. Add entries
+# (relative to ~/.claude) via DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST only with intent;
+# they must exist on the host — we don't stat (the host path is invisible when
+# devclaw itself runs containerized) so a missing entry surfaces as a docker bind
+# error, not a silent skip.
+_DEFAULT_CLAUDE_ALLOWLIST = (".credentials.json",)
+SANDBOX_CLAUDE_ALLOWLIST: tuple[str, ...] = tuple(
+    e.strip()
+    for e in os.environ.get("DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST", "").split(",")
+    if e.strip()
+) or _DEFAULT_CLAUDE_ALLOWLIST
 
 
 class SandcastleRunnerError(Exception):
@@ -103,6 +125,60 @@ def _translate_workspace_path(workspace_dir: str) -> str:
     return workspace_dir
 
 
+def _build_claude_mounts(claude_dir: str, allowlist: tuple[str, ...]) -> list[str]:
+    """``-v`` args binding ONLY the allowlisted entries under the host ~/.claude
+    into the sandbox config dir, each read-only. The curated boundary: auth in,
+    the rest of the host's personal Claude setup out. See ``SANDBOX_CLAUDE_ALLOWLIST``
+    for the rationale."""
+    base = claude_dir.rstrip("/")
+    args: list[str] = []
+    for rel in allowlist:
+        rel = rel.strip("/")
+        args += ["-v", f"{base}/{rel}:{CONTAINER_CLAUDE_DIR}/{rel}:ro"]
+    return args
+
+
+def _build_docker_args(
+    *,
+    container_name: str,
+    host_bind_path: str,
+    claude_dir: str,
+    payload: str,
+    allowlist: tuple[str, ...] = SANDBOX_CLAUDE_ALLOWLIST,
+) -> list[str]:
+    """Assemble the full ``docker run`` argv for one task. Pure (no I/O) so the
+    mount posture — curated claude allowlist, writable scratch tmpfs, no API-key
+    leak, host networking — is unit-testable without docker."""
+    return [
+        "run",
+        "--rm",
+        "--name",
+        container_name,
+        "--network",
+        "host",  # claude OAuth refresh needs egress; tighten later via allowlist.
+        "-v",
+        f"{host_bind_path}:{CONTAINER_WORKSPACE}",
+        # Curated claude config: only the allowlisted auth, read-only (NOT the whole
+        # host ~/.claude — see SANDBOX_CLAUDE_ALLOWLIST).
+        *_build_claude_mounts(claude_dir, allowlist),
+        # The config dir is non-writable (RO binds), but the claude CLI must write
+        # per-session scratch *under* it — `session-env/<uuid>` (a working dir per
+        # shell session) + `shell-snapshots/`. On the RO mount those mkdirs hit
+        # EROFS, which breaks EVERY terminal tool call the agent makes. Overlay just
+        # those two subpaths with a writable tmpfs — auth stays RO, scratch becomes
+        # writable. (Verified: claude auths + runs with only the credential present
+        # and the config root non-writable, so this scratch overlay is all it needs.)
+        "--tmpfs",
+        f"{CONTAINER_CLAUDE_DIR}/session-env:rw,exec",
+        "--tmpfs",
+        f"{CONTAINER_CLAUDE_DIR}/shell-snapshots:rw,exec",
+        "-e",
+        "OPENHANDS_SUPPRESS_BANNER=1",
+        SANDBOX_IMAGE,
+        payload,
+    ]
+
+
 async def run_sandcastle(req: EngineRequest) -> EngineResult:
     """Run one task inside a fresh sandbox container. An :class:`~devclaw.engine.Engine`
     — resolves with an EngineResult dict so TaskQueue can drive it."""
@@ -124,38 +200,18 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
             "workspace_dir": CONTAINER_WORKSPACE,
             "goal": req.goal,
             "model": EXEC_MODEL,  # the in-sandbox agent's tier; None → ACP default
+            # verify gate runs INSIDE the container after the agent finishes —
+            # same toolchain + workspace the agent built in (None → no gate).
+            "verify_cmd": req.verify_cmd,
         }
     )
 
-    docker_args = [
-        "run",
-        "--rm",
-        "--name",
-        container_name,
-        "--network",
-        "host",  # claude OAuth refresh needs egress; tighten later via allowlist.
-        "-v",
-        f"{host_bind_path}:{CONTAINER_WORKSPACE}",
-        "-v",
-        f"{claude_dir}:{CONTAINER_CLAUDE_DIR}:ro",
-        # ~/.claude is mounted RO (OAuth posture: read tokens, don't write back),
-        # but the in-sandbox `claude` CLI must write per-session scratch *under*
-        # it — `session-env/<uuid>` (a working dir per shell session) and
-        # `shell-snapshots/`. On the RO mount those mkdirs fail with EROFS, which
-        # breaks EVERY terminal tool call the agent makes (observed: a build that
-        # had written working code then churned and timed out because it couldn't
-        # run its own verification). Overlay just those two subpaths with a
-        # writable tmpfs — the credentials stay RO, the scratch dirs become
-        # writable. The host dirs exist, so the tmpfs mounts over real mountpoints.
-        "--tmpfs",
-        f"{CONTAINER_CLAUDE_DIR}/session-env:rw,exec",
-        "--tmpfs",
-        f"{CONTAINER_CLAUDE_DIR}/shell-snapshots:rw,exec",
-        "-e",
-        "OPENHANDS_SUPPRESS_BANNER=1",
-        SANDBOX_IMAGE,
-        payload,
-    ]
+    docker_args = _build_docker_args(
+        container_name=container_name,
+        host_bind_path=host_bind_path,
+        claude_dir=claude_dir,
+        payload=payload,
+    )
 
     try:
         proc = await asyncio.create_subprocess_exec(

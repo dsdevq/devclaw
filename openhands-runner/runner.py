@@ -22,23 +22,43 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
 
+# Wall-clock cap for the verify gate subprocess so a hung test suite can't hang
+# the task forever (the agent's own wall-clock guard is separate — improvement #3).
+_VERIFY_TIMEOUT_S = int(os.environ.get("DEVCLAW_VERIFY_TIMEOUT_S", "900"))
+
+
+# Operating instructions prepended to the user's goal before it's sent to the ACP
+# agent (Claude Code). Cheap behavioral scaffolding: the agent is capable, but a
+# RAW goal made it start blind on an existing repo — it didn't read the project's
+# own conventions and didn't verify its own work. This briefs it on the repo and
+# tells it to self-verify. (Shaped by OpenHands' prompting guidance: concrete,
+# location-aware, scoped, run the tests.) devclaw's own verify gate still
+# double-checks the result — this is the engineer self-checking, not the gate.
+_CONTEXT_PREAMBLE = (
+    "You are working in the repository in your current working directory. Before "
+    "changing anything, get your bearings: read the project's own guide if present "
+    "(AGENTS.md, CLAUDE.md, or README.md in the repo root) and the existing code "
+    "around what you're touching, so your change matches the project's conventions "
+    "and structure."
+)
+_VERIFY_CODA = (
+    "Keep the change focused — do not refactor unrelated code. When done, VERIFY "
+    "your work: run the project's existing test/build command and iterate until it "
+    "passes. Finish with a short summary of what you changed and how you verified it."
+)
 
 _KIND_WRAPPERS = {
     "implement_feature": (
-        # No wrapper for implement_feature — the user's goal IS the instruction.
-        "{goal}"
+        f"{_CONTEXT_PREAMBLE}\n\n{_VERIFY_CODA}\n\nFeature to implement:\n{{goal}}"
     ),
     "fix_bug": (
-        "You are fixing a bug. Read the existing code in the current workspace "
-        "first to understand what's there before making changes. Make the "
-        "smallest change that fixes the bug; do NOT refactor unrelated code. "
-        "After fixing, run whatever test suite exists in the project to confirm "
-        "your fix works.\n\n"
-        "Bug description:\n{goal}"
+        f"{_CONTEXT_PREAMBLE} Make the smallest change that fixes the bug.\n\n"
+        f"{_VERIFY_CODA}\n\nBug description:\n{{goal}}"
     ),
     "review_repository": (
         "You are reviewing this repository — READ ONLY. Do NOT modify, create, "
@@ -56,6 +76,40 @@ _KIND_WRAPPERS = {
 def _wrap_goal(kind: str, goal: str) -> str:
     template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
     return template.format(goal=goal)
+
+
+def _run_verify(cmd: str, workspace_dir: str, timeout: int = _VERIFY_TIMEOUT_S) -> dict:
+    """Run the verify gate in the workspace AFTER the agent finishes and return a
+    verdict. The agent saying "done" isn't trusted — the project's own
+    test/build command exiting 0 is what "done" means. Run via the shell so a
+    full command line works ("npm run build && npm run test:ci"); combined
+    stdout+stderr, tail-truncated. Never raises — a crash/timeout is a failed
+    gate, not a runner crash."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = (exc.output or "") + (exc.stderr or "")
+        return {
+            "ran": True, "cmd": cmd, "passed": False, "exit_code": None,
+            "timed_out": True, "output": partial[-4000:],
+        }
+    except OSError as exc:
+        return {
+            "ran": True, "cmd": cmd, "passed": False, "exit_code": None,
+            "timed_out": False, "output": f"failed to run verify command: {exc}",
+        }
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    return {
+        "ran": True, "cmd": cmd, "passed": proc.returncode == 0,
+        "exit_code": proc.returncode, "timed_out": False, "output": combined[-4000:],
+    }
 
 
 # `sys.__stdout__` is the original stdout the process was started with —
@@ -124,6 +178,7 @@ def main() -> None:
     # Model tier for the agent. The host passes it in the payload; fall back to
     # DEVCLAW_EXEC_MODEL for a manual `docker run`. None → the ACP server default.
     acp_model = req.get("model") or os.environ.get("DEVCLAW_EXEC_MODEL") or None
+    verify_cmd = req.get("verify_cmd")  # optional gate run after the agent finishes
     if not workspace_dir or not goal:
         _emit_result(
             {
@@ -232,14 +287,36 @@ def main() -> None:
         )
         sys.exit(1)
 
-    _emit_result(
-        {
-            "status": "ok",
-            "workspace_dir": workspace_dir,
-            "message": "OpenHands completed.",
-            "agent_output": captured_stdout.getvalue(),
-        }
-    )
+    result_payload = {
+        "status": "ok",
+        "workspace_dir": workspace_dir,
+        "message": "OpenHands completed.",
+        "agent_output": captured_stdout.getvalue(),
+    }
+
+    # Verify gate: the agent loop finished, but "done" means the project's own
+    # test/build command passes — run it now and attach the verdict. The host
+    # (TaskQueue) decides done-vs-failed from `verify.passed`; here we just run it
+    # and report. Emitted as an event too so it shows in the live stream.
+    if verify_cmd:
+        verify = _run_verify(verify_cmd, workspace_dir)
+        result_payload["verify"] = verify
+        _emit_event(
+            {
+                "id": "verify",
+                "type": "VerifyResult",
+                "source": "devclaw",
+                "ts": time.time(),
+                "payload": {
+                    "cmd": verify["cmd"],
+                    "passed": verify["passed"],
+                    "exit_code": verify["exit_code"],
+                    "timed_out": verify["timed_out"],
+                },
+            }
+        )
+
+    _emit_result(result_payload)
 
 
 if __name__ == "__main__":
