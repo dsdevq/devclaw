@@ -58,6 +58,12 @@ TICK_SECONDS = float(os.environ.get("DEVCLAW_TICK_SECONDS", "10"))
 #: but this also catches busy-loops. <=0 disables. Generous default so a
 #: legitimately long feature build isn't reaped mid-flight.
 TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "1800"))
+#: how many times to RE-RUN a task that fails its verify gate (or errors), each
+#: time with the failure fed back into the goal, before escalating. The gate
+#: catches a bad result; retry gives the agent a bounded second chance to
+#: self-correct (a fix that didn't fully land, a transient error). 0 disables.
+#: NOT applied to timeouts — a stuck run would likely just hang again.
+TASK_MAX_RETRIES = int(os.environ.get("DEVCLAW_MAX_RETRIES", "1"))
 
 PlannerFn = Callable[[str, str], Awaitable[list[PlannedTask]]]
 #: the execution engine — orchestration depends on this seam, not on OpenHands
@@ -486,43 +492,64 @@ class TaskQueue:
             except Exception as err:  # event writes must never crash the run
                 sys.stderr.write(f"task-queue: append_event failed task={task_id}: {err}\n")
 
-        request = EngineRequest(
-            kind=kind,
-            workspace_dir=workspace_dir,
-            goal=goal,
-            on_event=on_event,
-            verify_cmd=verify_cmd,
-        )
-        try:
-            # Wall-clock guard: on timeout, wait_for cancels the runner coroutine,
-            # which propagates into run_sandcastle's finally → docker rm -f, so the
-            # sandbox is torn down before we mark the task failed. Same cancellation
-            # path the explicit cancel_task uses, so teardown semantics are shared.
-            if TASK_TIMEOUT_S > 0:
-                result = await asyncio.wait_for(self._runner(request), timeout=TASK_TIMEOUT_S)
-            else:
-                result = await self._runner(request)
-            if result.get("status") != "ok":
-                self._store.mark_failed(task_id, result.get("error", "unknown error"))
-                return
-            # The agent loop finished — but "done" means the verify gate passed,
-            # not that the agent said so. A failed gate fails the task (the gate
-            # output is captured so a human / retry can see what broke).
-            verify = result.get("verify")
-            if verify and verify.get("ran") and not verify.get("passed"):
-                self._store.mark_failed(task_id, _verify_failure_summary(verify))
-            else:
-                self._store.mark_done(task_id, json.dumps(result))
-        except asyncio.TimeoutError:
-            # The sandbox was torn down by the cancelled runner's finally.
-            self._store.mark_failed(
-                task_id,
-                f"task exceeded the {TASK_TIMEOUT_S:.0f}s wall-clock timeout with no "
-                f"terminal result — sandbox torn down. Raise DEVCLAW_TASK_TIMEOUT_S "
-                f"if this was a legitimately long task.",
+        # Retry-on-fail completes the reliability triad (verify + RETRY + human): a
+        # gate-fail or a transient agent error is re-run, each time with the failure
+        # fed back into the goal so the agent can self-correct, up to a bounded cap;
+        # then it's escalated (the notify fires on the terminal state). Timeouts are
+        # NOT retried — a stuck run would likely just hang again — they escalate now.
+        attempts = 1 + max(0, TASK_MAX_RETRIES)
+        last_failure = "unknown error"
+        for attempt in range(attempts):
+            attempt_goal = goal if attempt == 0 else (
+                f"{goal}\n\n[Automatic retry {attempt}/{attempts - 1}] Your previous "
+                f"attempt did not pass verification. What went wrong:\n{last_failure}\n\n"
+                f"Diagnose the cause and fix it; do not repeat the same mistake."
             )
-        except Exception as err:
-            self._store.mark_failed(task_id, str(err))
+            request = EngineRequest(
+                kind=kind,
+                workspace_dir=workspace_dir,
+                goal=attempt_goal,
+                on_event=on_event,
+                verify_cmd=verify_cmd,
+            )
+            try:
+                # Wall-clock guard: on timeout, wait_for cancels the runner coroutine,
+                # which propagates into run_sandcastle's finally → docker rm -f, so the
+                # sandbox is torn down. Same cancellation path explicit cancel_task uses
+                # (CancelledError is not an Exception, so a real cancel still propagates).
+                if TASK_TIMEOUT_S > 0:
+                    result = await asyncio.wait_for(self._runner(request), timeout=TASK_TIMEOUT_S)
+                else:
+                    result = await self._runner(request)
+            except asyncio.TimeoutError:
+                self._store.mark_failed(
+                    task_id,
+                    f"task exceeded the {TASK_TIMEOUT_S:.0f}s wall-clock timeout with no "
+                    f"terminal result — sandbox torn down. Raise DEVCLAW_TASK_TIMEOUT_S "
+                    f"if this was a legitimately long task.",
+                )
+                return
+            except Exception as err:
+                last_failure = str(err)  # unexpected runner error — retryable
+            else:
+                if result.get("status") != "ok":
+                    last_failure = result.get("error", "unknown error")
+                else:
+                    # "done" means the verify gate passed, not that the agent said so.
+                    verify = result.get("verify")
+                    if verify and verify.get("ran") and not verify.get("passed"):
+                        last_failure = _verify_failure_summary(verify)
+                    else:
+                        self._store.mark_done(task_id, json.dumps(result))
+                        return
+            if attempt < attempts - 1:
+                sys.stderr.write(
+                    f"task-queue: task {task_id} attempt {attempt + 1}/{attempts} failed; "
+                    f"retrying with the failure fed back\n"
+                )
+        # every attempt failed — escalate.
+        suffix = f" (failed after {attempts} attempts)" if attempts > 1 else ""
+        self._store.mark_failed(task_id, f"{last_failure}{suffix}")
 
     # ---- notify ---------------------------------------------------------
 

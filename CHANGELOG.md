@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Retry-on-fail — the third leg of the reliability triad (verify + retry + human).** A task that fails its verify gate, or hits a transient agent error, is re-run up to `DEVCLAW_MAX_RETRIES` (default 1) — each retry feeds the failure back into the goal ("your previous attempt did not pass verification: …; diagnose and fix") so the agent self-corrects rather than repeating the same mistake — then escalates (the `notify_url` fires on the terminal `failed`). **Timeouts are not retried** (a stuck run would likely just hang again — escalate immediately). Builds directly on the verify gate: the gate catches a bad result, retry gives a bounded second chance. `CancelledError` still propagates, so an explicit `cancel_task` is never retried. Covered by `tests/test_task_retry.py`.
 - **`.NET`-capable sandbox image variant.** `.sandcastle/Dockerfile.dotnet` builds `devclaw-sandbox-dotnet` = the base sandbox + the .NET 10 SDK (python/node/claude/runner reused), selected per-run via `DEVCLAW_SANDBOX_IMAGE`. Keeps the *default* sandbox lean — .NET ships only in this variant — so the agent can build/run/test .NET repos (lifekit-dashboard, finance-sentry) and the verify gate can run `dotnet test`. (Longer-term the per-task box should derive from the project's own declared base image, keeping devclaw language-agnostic; this variant is the pragmatic first step.)
 
 ### Added
