@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 from .engine import EngineRequest, EngineResult
-from .runner_io import consume_runner_output
+from .runner_io import STREAM_LINE_LIMIT, consume_runner_output
 
 _REPO = Path(__file__).resolve().parents[1]
 # the in-sandbox runner, run here on the host
@@ -59,6 +59,7 @@ async def run_host(req: EngineRequest) -> EngineResult:
             payload,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=STREAM_LINE_LIMIT,  # event lines can exceed asyncio's 64 KiB default
             env=_strip_api_keys(dict(os.environ)),
         )
     except OSError as exc:
