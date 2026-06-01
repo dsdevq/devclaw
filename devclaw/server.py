@@ -92,6 +92,7 @@ async def implement_feature(
     goal: str,
     notify_url: Optional[str] = None,
     verify_cmd: Optional[str] = None,
+    open_pr: bool = False,
 ) -> str:
     """Submit a natural-language coding goal to be executed by OpenHands in the
     given workspace_dir. Returns a task_id immediately; the task runs
@@ -103,7 +104,11 @@ async def implement_feature(
     gate the task: after the agent finishes, DevClaw runs that command in the
     workspace and the task only succeeds if it exits 0 — the agent's own
     "I'm done" is not trusted. A failing gate marks the task failed with the
-    command output captured."""
+    command output captured.
+
+    Pass open_pr=True to DELIVER a successful change as something you review: on
+    `done`, DevClaw commits it to a branch, pushes, and opens a PR (best-effort;
+    needs git push auth + a GitHub remote), recording the PR URL on the task."""
     if not workspace_dir or not goal:
         raise ToolError("implement_feature requires workspace_dir and goal")
     task_id = queue.submit(
@@ -112,6 +117,7 @@ async def implement_feature(
         goal=goal,
         notify_url=notify_url,
         verify_cmd=verify_cmd,
+        deliver=open_pr,
     )
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
@@ -122,6 +128,7 @@ async def fix_bug(
     description: str,
     notify_url: Optional[str] = None,
     verify_cmd: Optional[str] = None,
+    open_pr: bool = False,
 ) -> str:
     """Submit a bug-fix task. Like implement_feature, but with a prompt that
     biases OpenHands toward reading existing code first, making the smallest
@@ -129,7 +136,8 @@ async def fix_bug(
     immediately. Same optional notify_url as implement_feature.
 
     Pass verify_cmd (e.g. the repo's test command) to gate the fix: DevClaw runs
-    it after the agent finishes and only marks the task done if it exits 0."""
+    it after the agent finishes and only marks the task done if it exits 0.
+    Pass open_pr=True to deliver a successful fix as a branch/PR you review."""
     if not workspace_dir or not description:
         raise ToolError("fix_bug requires workspace_dir and description")
     task_id = queue.submit(
@@ -138,6 +146,7 @@ async def fix_bug(
         goal=description,
         notify_url=notify_url,
         verify_cmd=verify_cmd,
+        deliver=open_pr,
     )
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 

@@ -126,6 +126,7 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_TICK_SECONDS` | `10` | heartbeat interval — advances DAGs and resumes recovered work from DB state |
 | `DEVCLAW_TASK_TIMEOUT_S` | `1800` | per-task wall-clock cap — a run exceeding it is cancelled (its sandbox torn down) and the task marked `failed`, so a hung agent fails cleanly instead of burning quota. `<=0` disables. |
 | `DEVCLAW_MAX_RETRIES` | `1` | re-runs of a task that fails its verify gate (or errors), each with the failure fed back into the goal, before escalating. `0` disables. Timeouts are never retried. |
+| `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery (or use a logged-in `gh`). Separate from the Claude OAuth pillar — this is git access, not cognition billing. |
 | `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | wall-clock cap for the verify-gate command (the `verify_cmd` run after the agent finishes); on expiry the gate fails the task. |
 | `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image (see `.sandcastle/Dockerfile`) |
 | `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
