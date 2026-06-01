@@ -53,7 +53,8 @@ AUTH_TOKEN = os.environ.get("DEVCLAW_TOKEN", "")
 TOKEN_QS = f"?token={urllib.parse.quote(AUTH_TOKEN)}" if AUTH_TOKEN else ""
 
 store = StateStore(DB_PATH)
-if os.environ.get("DEVCLAW_ENGINE") == "stub":
+_engine = os.environ.get("DEVCLAW_ENGINE", "")
+if _engine == "stub":
     # Harness-validation mode: deterministic stub engine + cognition, no docker,
     # no claude. Proves the plumbing around the agent; never use in production.
     from .stub_engine import stub_engine, stub_goal_planner, stub_grill, stub_spec_planner
@@ -64,6 +65,16 @@ if os.environ.get("DEVCLAW_ENGINE") == "stub":
     )
     queue = TaskQueue(store, planner=stub_goal_planner, runner=stub_engine)
     projects = ProjectService(ProjectStore(), queue, grill_caller=stub_grill, spec_planner=stub_spec_planner)
+elif _engine == "host":
+    # Real cognition + real OpenHands, but run on the HOST with NO sandbox.
+    from .host_runner import run_host
+
+    sys.stderr.write(
+        "⚠ DEVCLAW_ENGINE=host — OpenHands runs on the HOST with NO sandbox "
+        "isolation (agent has full filesystem access). Dev/validation only.\n"
+    )
+    queue = TaskQueue(store, runner=run_host)
+    projects = ProjectService(ProjectStore(), queue)
 else:
     queue = TaskQueue(store)
     projects = ProjectService(ProjectStore(), queue)

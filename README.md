@@ -102,6 +102,14 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 
 (`devclaw-mcp` is the console script; `python -m devclaw.server` works too.)
 
+### Engine modes (`DEVCLAW_ENGINE`)
+
+| Value | Engine | Isolation | Use |
+|---|---|---|---|
+| *(unset)* | OpenHands in a per-task **docker sandbox** | ✅ full | production |
+| `host` | OpenHands **on the host** (no container) | ⚠ **none** — agent has full filesystem access | dev/CI/validation where docker is unavailable |
+| `stub` | deterministic stub (no OpenHands, no claude) | n/a | harness validation (`evals/`) |
+
 ### Useful env
 
 | Var | Default | Purpose |
