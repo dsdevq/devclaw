@@ -127,6 +127,7 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image (see `.sandcastle/Dockerfile`) |
 | `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
 | `DEVCLAW_HOST_CLAUDE_DIR` | `~/.claude` | host path bind-mounted read-only into each sandbox |
+| `DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST` | `.credentials.json` | comma-separated entries **under** `~/.claude` bound (read-only) into each sandbox. Default = only the OAuth credential; the rest of the host `~/.claude` (skills, plugins + their MCP servers, the global `CLAUDE.md`, `projects/` history) is deliberately **not** projected into the agent. Add entries only with intent — they must exist on the host. |
 
 ### Model tiering
 
