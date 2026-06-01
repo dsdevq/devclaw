@@ -31,7 +31,7 @@ import uuid
 from pathlib import Path
 
 from .engine import EngineRequest, EngineResult
-from .runner_io import consume_runner_output
+from .runner_io import STREAM_LINE_LIMIT, consume_runner_output
 
 SANDBOX_IMAGE = os.environ.get("DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest")
 DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
@@ -223,6 +223,9 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
             *docker_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # large per-line buffer — a single event can exceed the 64 KiB default
+            # (big diffs / file observations); see STREAM_LINE_LIMIT.
+            limit=STREAM_LINE_LIMIT,
             env=_strip_api_keys(dict(os.environ)),
         )
     except OSError as exc:

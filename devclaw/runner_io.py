@@ -16,6 +16,15 @@ from typing import Callable, Optional
 
 from .engine import EngineEvent, EngineResult
 
+#: StreamReader line-buffer limit for runner stdout. The runner emits one JSON
+#: object per line (``event:`` / ``result:``), and a single event can be large —
+#: a file read/write observation, a big diff. asyncio's DEFAULT 64 KiB limit
+#: crashed a real feature run ("Separator is not found, and chunk exceed the
+#: limit") on an oversized event line, failing an otherwise-correct task. 64 MiB
+#: is far above any real event while still bounding memory. Both engines pass this
+#: to ``create_subprocess_exec(limit=...)`` so the shared reader below never trips.
+STREAM_LINE_LIMIT = 64 * 1024 * 1024
+
 
 async def consume_runner_output(
     proc: asyncio.subprocess.Process,
