@@ -48,6 +48,23 @@ def test_fix_bug_keeps_smallest_change_and_verifies(runner):
     assert "BUG-TOKEN" in wrapped
 
 
+def test_feature_and_fix_carry_a_code_quality_bar(runner):
+    # the brief now demands production-quality code, not just a green suite — the
+    # fix for "the agent only ever ships a working version"
+    for kind in ("implement_feature", "fix_bug"):
+        w = runner._wrap_goal(kind, "X").lower()
+        assert "production code-quality" in w
+        assert "no-op" in w                       # no dead/no-op code
+        assert "necessary but not sufficient" in w  # green gate != good code
+        assert "senior engineer" in w             # re-read your own diff critically
+
+
+def test_quality_bar_is_only_for_code_changes(runner):
+    # read-only review + onboarding don't write feature code, so they don't get it
+    for kind in ("review_repository", "onboard"):
+        assert "no-op" not in runner._wrap_goal(kind, "X").lower()
+
+
 def test_review_repository_stays_read_only(runner):
     wrapped = runner._wrap_goal("review_repository", "look at auth")
     assert "READ ONLY" in wrapped

@@ -12,7 +12,7 @@ import subprocess
 import pytest
 
 from devclaw import delivery
-from devclaw.delivery import _commit_title, _extract_pr_url, _slug, deliver_change
+from devclaw.delivery import _extract_pr_url, _pr_body, _pr_title, _slug, deliver_change
 from devclaw.engine import EngineRequest
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
@@ -36,10 +36,37 @@ def _branch(path) -> str:
 # ---- pure helpers ----------------------------------------------------------
 
 
-def test_slug_and_title():
+def test_slug():
     assert _slug("Add a GET /api/version endpoint!") == "add-a-get-api-version-endpoint"
     assert _slug("") == "change"
-    assert _commit_title("Fix the thing\nmore detail") == "Fix the thing"
+    # truncates on a word boundary, never mid-word
+    long = _slug("Add a GET api crons id endpoint that returns the single cron")
+    assert len(long) <= 40 and not long.endswith("-") and "-ret" not in long
+
+
+def test_pr_title_is_clean_and_conventional():
+    # conventional-commit prefix from kind; backticks stripped; word-boundary cut
+    t = _pr_title("Add a `GET /api/crons/{id}` endpoint", kind="implement_feature")
+    assert t.startswith("feat: ")
+    assert "`" not in t
+    assert _pr_title("Harden the reject path", kind="fix_bug").startswith("fix: ")
+    # long goals are truncated on a word boundary with an ellipsis, within the cap
+    longt = _pr_title("Add " + "word " * 40, kind="implement_feature")
+    assert len(longt) <= 72 and longt.endswith("…")
+    # no kind → no prefix, still cleaned
+    assert _pr_title("just do the thing").startswith("just do the thing")
+
+
+def test_pr_body_carries_ticket_gate_and_caveat():
+    verify = {"ran": True, "cmd": "dotnet test", "passed": True, "exit_code": 0}
+    body = _pr_body("Add an endpoint", "abcd1234", verify, " Program.cs | 6 +\n 1 file changed")
+    assert "## What" in body and "Add an endpoint" in body
+    assert "Gate `dotnet test` passed" in body
+    assert "## Files changed" in body and "Program.cs" in body
+    assert "review before merging" in body.lower()  # the honest caveat
+    # degrades cleanly when there was no gate
+    nogate = _pr_body("x", "id", None, None)
+    assert "## Verification" not in nogate and "## Files changed" not in nogate
 
 
 def test_extract_pr_url():
