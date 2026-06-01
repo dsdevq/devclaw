@@ -47,19 +47,23 @@ CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
 
 # Which entries under the host ~/.claude get bound into the sandbox config dir.
-# Default: ONLY the OAuth credential — the one file `claude` needs to authenticate
-# (verified: it auths with `.credentials.json` alone, even with the config-dir root
-# non-writable). We deliberately do NOT mount the whole host ~/.claude: that dir
-# also holds skills/, plugins/ (+ their MCP servers that need absent network/auth),
-# the global CLAUDE.md (which points at the unmounted ~/memory, so its instructions
-# are dead in here), and projects/ + history — projecting all of that into the
-# engineer is non-reproducible and full of tools that fail or mislead. The PM hands
-# the engineer a curated toolbox, not the keys to the whole house. Add entries
-# (relative to ~/.claude) via DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST only with intent;
-# they must exist on the host — we don't stat (the host path is invisible when
-# devclaw itself runs containerized) so a missing entry surfaces as a docker bind
-# error, not a silent skip.
-_DEFAULT_CLAUDE_ALLOWLIST = (".credentials.json",)
+# Default: the OAuth *identity pair* — `.credentials.json` (the token) AND
+# `.claude.json` (the account identity: oauthAccount + userID). Both are needed:
+# `claude --print` authenticates with the credential alone, but the ACP *agentic*
+# loop hangs after init without `.claude.json` (it needs the account identity to
+# act, not just the token — auth != agency; this was a live-found regression when
+# the default was credential-only). `.claude.json` here carries identity + caches,
+# NOT the leak (no mcpServers, projects empty). We still deliberately do NOT mount
+# the whole host ~/.claude: that dir also holds skills/, plugins/ (+ their MCP
+# servers that need absent network/auth), the global CLAUDE.md (which points at the
+# unmounted ~/memory, so its instructions are dead in here), and projects/ +
+# history — projecting all of that into the engineer is non-reproducible and full
+# of tools that fail or mislead. The PM hands the engineer a curated toolbox, not
+# the keys to the whole house. Add entries (relative to ~/.claude) via
+# DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST only with intent; they must exist on the host —
+# we don't stat (the host path is invisible when devclaw itself runs containerized)
+# so a missing entry surfaces as a docker bind error, not a silent skip.
+_DEFAULT_CLAUDE_ALLOWLIST = (".credentials.json", ".claude.json")
 SANDBOX_CLAUDE_ALLOWLIST: tuple[str, ...] = tuple(
     e.strip()
     for e in os.environ.get("DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST", "").split(",")
