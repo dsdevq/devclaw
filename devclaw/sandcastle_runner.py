@@ -200,6 +200,9 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
             "workspace_dir": CONTAINER_WORKSPACE,
             "goal": req.goal,
             "model": EXEC_MODEL,  # the in-sandbox agent's tier; None → ACP default
+            # verify gate runs INSIDE the container after the agent finishes —
+            # same toolchain + workspace the agent built in (None → no gate).
+            "verify_cmd": req.verify_cmd,
         }
     )
 

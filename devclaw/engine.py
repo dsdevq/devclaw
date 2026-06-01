@@ -44,11 +44,18 @@ class EngineRequest:
     goal: str
     #: optional callback, invoked once per :class:`EngineEvent` the engine emits
     on_event: Optional[Callable[[EngineEvent], None]] = None
+    #: optional verify gate — a shell command the engine runs in the workspace
+    #: AFTER the agent finishes. Its exit code is the real definition of "done"
+    #: (the agent's own "I'm finished" is not trusted). None → no gate.
+    verify_cmd: Optional[str] = None
 
 
 #: Terminal verdict from one task. ``status == "ok"`` carries
 #: ``workspaceDir``/``message`` (+ ``agent_output`` for debugging);
-#: ``status == "error"`` carries ``error`` (+ optional ``trace``).
+#: ``status == "error"`` carries ``error`` (+ optional ``trace``). When a
+#: ``verify_cmd`` ran, ``result["verify"]`` carries the gate verdict
+#: ``{ran, cmd, passed, exit_code, timed_out, output}`` — the orchestration
+#: (not the engine) decides done-vs-failed from ``passed``.
 EngineResult = dict
 
 

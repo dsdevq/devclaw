@@ -88,33 +88,56 @@ LimitField = Field(ge=1, le=1000)
 
 @mcp.tool
 async def implement_feature(
-    workspace_dir: str, goal: str, notify_url: Optional[str] = None
+    workspace_dir: str,
+    goal: str,
+    notify_url: Optional[str] = None,
+    verify_cmd: Optional[str] = None,
 ) -> str:
     """Submit a natural-language coding goal to be executed by OpenHands in the
     given workspace_dir. Returns a task_id immediately; the task runs
     asynchronously. Poll get_status(task_id), or pass notify_url to be pushed
     the result. Use for new features / open-ended changes; prefer fix_bug for an
-    existing defect, and review_repository for a read-only review."""
+    existing defect, and review_repository for a read-only review.
+
+    Pass verify_cmd (e.g. "dotnet test", "npm run build && npm run test:ci") to
+    gate the task: after the agent finishes, DevClaw runs that command in the
+    workspace and the task only succeeds if it exits 0 — the agent's own
+    "I'm done" is not trusted. A failing gate marks the task failed with the
+    command output captured."""
     if not workspace_dir or not goal:
         raise ToolError("implement_feature requires workspace_dir and goal")
     task_id = queue.submit(
-        kind="implement_feature", workspace_dir=workspace_dir, goal=goal, notify_url=notify_url
+        kind="implement_feature",
+        workspace_dir=workspace_dir,
+        goal=goal,
+        notify_url=notify_url,
+        verify_cmd=verify_cmd,
     )
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
 @mcp.tool
 async def fix_bug(
-    workspace_dir: str, description: str, notify_url: Optional[str] = None
+    workspace_dir: str,
+    description: str,
+    notify_url: Optional[str] = None,
+    verify_cmd: Optional[str] = None,
 ) -> str:
     """Submit a bug-fix task. Like implement_feature, but with a prompt that
     biases OpenHands toward reading existing code first, making the smallest
     fix, not refactoring unrelated code, and running the tests. Returns task_id
-    immediately. Same optional notify_url as implement_feature."""
+    immediately. Same optional notify_url as implement_feature.
+
+    Pass verify_cmd (e.g. the repo's test command) to gate the fix: DevClaw runs
+    it after the agent finishes and only marks the task done if it exits 0."""
     if not workspace_dir or not description:
         raise ToolError("fix_bug requires workspace_dir and description")
     task_id = queue.submit(
-        kind="fix_bug", workspace_dir=workspace_dir, goal=description, notify_url=notify_url
+        kind="fix_bug",
+        workspace_dir=workspace_dir,
+        goal=description,
+        notify_url=notify_url,
+        verify_cmd=verify_cmd,
     )
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 

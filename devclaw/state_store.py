@@ -56,6 +56,9 @@ class Task:
     order_idx: Optional[int]
     #: the spec milestone this task serves (set by plan-from-spec; else None)
     milestone: Optional[str]
+    #: optional verify-gate command run after the agent finishes; its exit code
+    #: decides done-vs-failed (the agent's self-report is not trusted). None → no gate.
+    verify_cmd: Optional[str]
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +77,7 @@ class Task:
             "dependsOn": self.depends_on,
             "orderIdx": self.order_idx,
             "milestone": self.milestone,
+            "verifyCmd": self.verify_cmd,
         }
 
 
@@ -149,6 +153,7 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         depends_on=depends_on,
         order_idx=r["order_idx"],
         milestone=r["milestone"],
+        verify_cmd=r["verify_cmd"],
     )
 
 
@@ -208,7 +213,8 @@ class StateStore:
                   program_id      TEXT,
                   depends_on      TEXT,
                   order_idx       INTEGER,
-                  milestone       TEXT
+                  milestone       TEXT,
+                  verify_cmd      TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS programs (
@@ -244,6 +250,7 @@ class StateStore:
                 "ALTER TABLE tasks ADD COLUMN depends_on TEXT",
                 "ALTER TABLE tasks ADD COLUMN order_idx INTEGER",
                 "ALTER TABLE tasks ADD COLUMN milestone TEXT",
+                "ALTER TABLE tasks ADD COLUMN verify_cmd TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -278,13 +285,14 @@ class StateStore:
         depends_on: Optional[list[str]] = None,
         order_idx: Optional[int] = None,
         milestone: Optional[str] = None,
+        verify_cmd: Optional[str] = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT INTO tasks
                      (id, kind, status, workspace_dir, goal, notify_url, created_at,
-                      program_id, depends_on, order_idx, milestone)
-                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      program_id, depends_on, order_idx, milestone, verify_cmd)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     kind,
@@ -296,6 +304,7 @@ class StateStore:
                     json.dumps(depends_on) if depends_on else None,
                     order_idx,
                     milestone,
+                    verify_cmd,
                 ),
             )
             self._db.commit()

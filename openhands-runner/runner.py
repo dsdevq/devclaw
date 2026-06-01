@@ -22,9 +22,14 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
+
+# Wall-clock cap for the verify gate subprocess so a hung test suite can't hang
+# the task forever (the agent's own wall-clock guard is separate — improvement #3).
+_VERIFY_TIMEOUT_S = int(os.environ.get("DEVCLAW_VERIFY_TIMEOUT_S", "900"))
 
 
 # Operating instructions prepended to the user's goal before it's sent to the ACP
@@ -71,6 +76,40 @@ _KIND_WRAPPERS = {
 def _wrap_goal(kind: str, goal: str) -> str:
     template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
     return template.format(goal=goal)
+
+
+def _run_verify(cmd: str, workspace_dir: str, timeout: int = _VERIFY_TIMEOUT_S) -> dict:
+    """Run the verify gate in the workspace AFTER the agent finishes and return a
+    verdict. The agent saying "done" isn't trusted — the project's own
+    test/build command exiting 0 is what "done" means. Run via the shell so a
+    full command line works ("npm run build && npm run test:ci"); combined
+    stdout+stderr, tail-truncated. Never raises — a crash/timeout is a failed
+    gate, not a runner crash."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = (exc.output or "") + (exc.stderr or "")
+        return {
+            "ran": True, "cmd": cmd, "passed": False, "exit_code": None,
+            "timed_out": True, "output": partial[-4000:],
+        }
+    except OSError as exc:
+        return {
+            "ran": True, "cmd": cmd, "passed": False, "exit_code": None,
+            "timed_out": False, "output": f"failed to run verify command: {exc}",
+        }
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    return {
+        "ran": True, "cmd": cmd, "passed": proc.returncode == 0,
+        "exit_code": proc.returncode, "timed_out": False, "output": combined[-4000:],
+    }
 
 
 # `sys.__stdout__` is the original stdout the process was started with —
@@ -139,6 +178,7 @@ def main() -> None:
     # Model tier for the agent. The host passes it in the payload; fall back to
     # DEVCLAW_EXEC_MODEL for a manual `docker run`. None → the ACP server default.
     acp_model = req.get("model") or os.environ.get("DEVCLAW_EXEC_MODEL") or None
+    verify_cmd = req.get("verify_cmd")  # optional gate run after the agent finishes
     if not workspace_dir or not goal:
         _emit_result(
             {
@@ -247,14 +287,36 @@ def main() -> None:
         )
         sys.exit(1)
 
-    _emit_result(
-        {
-            "status": "ok",
-            "workspace_dir": workspace_dir,
-            "message": "OpenHands completed.",
-            "agent_output": captured_stdout.getvalue(),
-        }
-    )
+    result_payload = {
+        "status": "ok",
+        "workspace_dir": workspace_dir,
+        "message": "OpenHands completed.",
+        "agent_output": captured_stdout.getvalue(),
+    }
+
+    # Verify gate: the agent loop finished, but "done" means the project's own
+    # test/build command passes — run it now and attach the verdict. The host
+    # (TaskQueue) decides done-vs-failed from `verify.passed`; here we just run it
+    # and report. Emitted as an event too so it shows in the live stream.
+    if verify_cmd:
+        verify = _run_verify(verify_cmd, workspace_dir)
+        result_payload["verify"] = verify
+        _emit_event(
+            {
+                "id": "verify",
+                "type": "VerifyResult",
+                "source": "devclaw",
+                "ts": time.time(),
+                "payload": {
+                    "cmd": verify["cmd"],
+                    "passed": verify["passed"],
+                    "exit_code": verify["exit_code"],
+                    "timed_out": verify["timed_out"],
+                },
+            }
+        )
+
+    _emit_result(result_payload)
 
 
 if __name__ == "__main__":

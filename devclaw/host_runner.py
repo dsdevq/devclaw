@@ -44,7 +44,13 @@ async def run_host(req: EngineRequest) -> EngineResult:
     The workspace path is used as-is (no bind-mount / no path translation)."""
     Path(req.workspace_dir).mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
-        {"kind": req.kind, "workspace_dir": req.workspace_dir, "goal": req.goal}
+        {
+            "kind": req.kind,
+            "workspace_dir": req.workspace_dir,
+            "goal": req.goal,
+            # verify gate runs on the host after the agent finishes (host toolchain).
+            "verify_cmd": req.verify_cmd,
+        }
     )
     try:
         proc = await asyncio.create_subprocess_exec(

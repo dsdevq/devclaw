@@ -56,6 +56,18 @@ PlannerFn = Callable[[str, str], Awaitable[list[PlannedTask]]]
 RunnerFn = Engine
 
 
+def _verify_failure_summary(verify: dict) -> str:
+    """Human-readable failure reason for a task whose verify gate didn't pass —
+    stored as the task error so a human (or a retry) can see what broke."""
+    cmd = verify.get("cmd", "")
+    if verify.get("timed_out"):
+        head = f"verify gate timed out: `{cmd}`"
+    else:
+        head = f"verify gate failed (exit {verify.get('exit_code')}): `{cmd}`"
+    out = (verify.get("output") or "").strip()
+    return f"{head}\n{out[-1500:]}" if out else head
+
+
 class TaskQueue:
     def __init__(
         self,
@@ -177,10 +189,16 @@ class TaskQueue:
         workspace_dir: str,
         goal: str,
         notify_url: Optional[str] = None,
+        verify_cmd: Optional[str] = None,
     ) -> str:
         task_id = str(uuid.uuid4())
         self._store.create_task(
-            id=task_id, kind=kind, workspace_dir=workspace_dir, goal=goal, notify_url=notify_url
+            id=task_id,
+            kind=kind,
+            workspace_dir=workspace_dir,
+            goal=goal,
+            notify_url=notify_url,
+            verify_cmd=verify_cmd,
         )
         self._pump()
         return task_id
@@ -442,9 +460,10 @@ class TaskQueue:
     async def _run_and_settle(
         self, task_id: str, kind: TaskKind, workspace_dir: str, goal: str
     ) -> None:
-        # Resolve program_id once so on_event doesn't re-query per event.
+        # Resolve program_id + the verify gate once so on_event doesn't re-query.
         row = self._store.get_task(task_id)
         program_id = row.program_id if row else None
+        verify_cmd = row.verify_cmd if row else None
 
         def on_event(event: EngineEvent) -> None:
             try:
@@ -461,12 +480,25 @@ class TaskQueue:
 
         try:
             result = await self._runner(
-                EngineRequest(kind=kind, workspace_dir=workspace_dir, goal=goal, on_event=on_event)
+                EngineRequest(
+                    kind=kind,
+                    workspace_dir=workspace_dir,
+                    goal=goal,
+                    on_event=on_event,
+                    verify_cmd=verify_cmd,
+                )
             )
-            if result.get("status") == "ok":
-                self._store.mark_done(task_id, json.dumps(result))
-            else:
+            if result.get("status") != "ok":
                 self._store.mark_failed(task_id, result.get("error", "unknown error"))
+                return
+            # The agent loop finished — but "done" means the verify gate passed,
+            # not that the agent said so. A failed gate fails the task (the gate
+            # output is captured so a human / retry can see what broke).
+            verify = result.get("verify")
+            if verify and verify.get("ran") and not verify.get("passed"):
+                self._store.mark_failed(task_id, _verify_failure_summary(verify))
+            else:
+                self._store.mark_done(task_id, json.dumps(result))
         except Exception as err:
             self._store.mark_failed(task_id, str(err))
 
