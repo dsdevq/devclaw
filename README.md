@@ -11,7 +11,7 @@ MCP client (OpenClaw / Claude Code / any MCP host)
   │   implement_feature / fix_bug / review_repository / start_program …
   ▼
 DevClaw  (Python)
-  ├── MCP server     FastMCP — stdio + streamable-HTTP, 16 tools, dashboard + SSE
+  ├── MCP server     FastMCP — stdio + streamable-HTTP, 17 tools, dashboard + SSE
   ├── planner        Goal → task DAG (single-task passthrough for small goals)
   ├── state store    SQLite — programs, tasks, append-only events
   └── sandcastle     `docker run --rm` per task — RO ~/.claude mount, destroyed on exit
@@ -37,7 +37,7 @@ The full rationale — including why OpenHands and sandbox isolation are **ortho
 
 ```
 devclaw/
-├── server.py            # FastMCP server — 16 tools, dashboard + SSE, bearer-auth middleware
+├── server.py            # FastMCP server — 17 tools, dashboard + SSE, bearer-auth middleware
 ├── planner.py           # Goal → task DAG (shells out to `claude --print`)
 ├── state_store.py       # SQLite: programs, tasks, append-only events
 ├── task_queue.py        # async task lifecycle (asyncio) + concurrency
@@ -59,6 +59,7 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 | `implement_feature(workspace_dir, goal, …)` | Run a single feature task |
 | `fix_bug(workspace_dir, description, …)` | Run a single bug-fix task |
 | `review_repository(workspace_dir, …)` | Read-only review (no writes — invariant runtime-checked) |
+| `onboard(workspace_dir, …)` | Analyze a repo and write a draft `AGENTS.md` (comprehension only) for you to review |
 | `start_program(workspace_dir, goal, …)` | Decompose a large goal into a task DAG and run it |
 | `get_program(program_id)` / `list_programs()` | Program status + the task DAG |
 | `get_status(task_id)` | One task's status / result / PR |
