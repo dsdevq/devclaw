@@ -27,18 +27,33 @@ import time
 import traceback
 
 
+# Operating instructions prepended to the user's goal before it's sent to the ACP
+# agent (Claude Code). Cheap behavioral scaffolding: the agent is capable, but a
+# RAW goal made it start blind on an existing repo — it didn't read the project's
+# own conventions and didn't verify its own work. This briefs it on the repo and
+# tells it to self-verify. (Shaped by OpenHands' prompting guidance: concrete,
+# location-aware, scoped, run the tests.) devclaw's own verify gate still
+# double-checks the result — this is the engineer self-checking, not the gate.
+_CONTEXT_PREAMBLE = (
+    "You are working in the repository in your current working directory. Before "
+    "changing anything, get your bearings: read the project's own guide if present "
+    "(AGENTS.md, CLAUDE.md, or README.md in the repo root) and the existing code "
+    "around what you're touching, so your change matches the project's conventions "
+    "and structure."
+)
+_VERIFY_CODA = (
+    "Keep the change focused — do not refactor unrelated code. When done, VERIFY "
+    "your work: run the project's existing test/build command and iterate until it "
+    "passes. Finish with a short summary of what you changed and how you verified it."
+)
+
 _KIND_WRAPPERS = {
     "implement_feature": (
-        # No wrapper for implement_feature — the user's goal IS the instruction.
-        "{goal}"
+        f"{_CONTEXT_PREAMBLE}\n\n{_VERIFY_CODA}\n\nFeature to implement:\n{{goal}}"
     ),
     "fix_bug": (
-        "You are fixing a bug. Read the existing code in the current workspace "
-        "first to understand what's there before making changes. Make the "
-        "smallest change that fixes the bug; do NOT refactor unrelated code. "
-        "After fixing, run whatever test suite exists in the project to confirm "
-        "your fix works.\n\n"
-        "Bug description:\n{goal}"
+        f"{_CONTEXT_PREAMBLE} Make the smallest change that fixes the bug.\n\n"
+        f"{_VERIFY_CODA}\n\nBug description:\n{{goal}}"
     ),
     "review_repository": (
         "You are reviewing this repository — READ ONLY. Do NOT modify, create, "
