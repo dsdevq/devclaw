@@ -29,9 +29,11 @@ def _claude_mount_targets(args: list[str]) -> list[str]:
 # ---- the shipped default allowlist (intent + regression guard) ----
 
 
-def test_default_allowlist_is_credential_only():
-    # The whole point of 1a: auth in, everything else out.
-    assert sc.SANDBOX_CLAUDE_ALLOWLIST == (".credentials.json",)
+def test_default_allowlist_is_the_oauth_identity_pair():
+    # Auth identity in, everything else out. Both files are needed: the credential
+    # is the token; `.claude.json` is the account identity the ACP agentic loop
+    # needs to act (credential-only made the agent hang — a live-found regression).
+    assert sc.SANDBOX_CLAUDE_ALLOWLIST == (".credentials.json", ".claude.json")
 
 
 # ---- claude mounts (pure) ----
@@ -83,9 +85,10 @@ def test_docker_args_posture():
     assert "--name" in args and args[args.index("--name") + 1] == "devclaw-deadbeef"
     # workspace bound
     assert f"/host/ws:{sc.CONTAINER_WORKSPACE}" in args
-    # the ONLY config mount is the credential — no whole-dir leak
+    # the ONLY config mounts are the auth identity pair — no whole-dir leak
     assert _claude_mount_targets(args) == [
-        f"{CLAUDE_DIR}/.credentials.json:{sc.CONTAINER_CLAUDE_DIR}/.credentials.json:ro"
+        f"{CLAUDE_DIR}/.credentials.json:{sc.CONTAINER_CLAUDE_DIR}/.credentials.json:ro",
+        f"{CLAUDE_DIR}/.claude.json:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro",
     ]
     # writable scratch overlays survive the curation
     assert f"{sc.CONTAINER_CLAUDE_DIR}/session-env:rw,exec" in args
