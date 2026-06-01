@@ -113,6 +113,16 @@ async def _run_once(
                 break
             await asyncio.sleep(POLL_SECONDS)
 
+        # On timeout/stuck the server-side build is still running — its OpenHands
+        # container keeps executing (and burning Pro quota) long after we've
+        # scored the run. Tear it down via the abort tool. Events are persisted
+        # (append-only SQLite), so cancelling first doesn't starve the judge.
+        if program.get("status") == "timeout" and program_id:
+            try:
+                await _call(client, "cancel_program", program_id=program_id)
+            except Exception:
+                pass
+
         project = await _call(client, "get_project", project_id=project_id)
         events: list[dict] = []
         if judge and program_id:
