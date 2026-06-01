@@ -22,14 +22,70 @@ import os
 import re
 
 
+# conventional-commit type per task kind — so a delivered PR reads `feat: …` /
+# `fix: …` instead of a raw goal string dumped into the title.
+_KIND_TYPE = {
+    "implement_feature": "feat",
+    "fix_bug": "fix",
+    "review_repository": "chore",
+    "onboard": "docs",
+}
+
+
 def _slug(text: str, n: int = 40) -> str:
+    """Branch-safe slug, truncated on a word boundary (no mid-word cuts like
+    `…-endpoint-that-ret`)."""
     s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
-    return s[:n].strip("-") or "change"
+    if len(s) > n:
+        s = s[:n].rsplit("-", 1)[0]  # drop the partial trailing segment
+    return s.strip("-") or "change"
 
 
-def _commit_title(goal: str, limit: int = 72) -> str:
+def _clean_summary(goal: str) -> str:
+    """First line of the goal, stripped of markdown backticks and collapsed
+    whitespace — the basis for a human-readable title."""
     first = goal.strip().splitlines()[0] if goal.strip() else "devclaw change"
-    return first[:limit].rstrip()
+    return re.sub(r"\s+", " ", first.replace("`", "")).strip() or "devclaw change"
+
+
+def _truncate_words(s: str, limit: int) -> str:
+    """Truncate to `limit` chars on a word boundary, adding an ellipsis if cut."""
+    if len(s) <= limit:
+        return s
+    return s[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+
+
+def _pr_title(goal: str, kind: str | None = None, limit: int = 72) -> str:
+    """A clean, conventional-commit-style title (e.g. `feat: add a /health
+    endpoint`) — not the raw goal truncated mid-word."""
+    summary = _clean_summary(goal)
+    prefix = _KIND_TYPE.get(kind or "", "")
+    if prefix:
+        return f"{prefix}: {_truncate_words(summary, limit - len(prefix) - 2)}"
+    return _truncate_words(summary, limit)
+
+
+def _pr_body(goal: str, task_id: str, verify: dict | None, files_stat: str | None) -> str:
+    """A PR body a reviewer can actually use: the ticket, the gate verdict, the
+    diffstat, and an honest caveat that a green gate is not a quality guarantee."""
+    parts = ["## What", goal.strip(), ""]
+    if verify and verify.get("ran"):
+        cmd = verify.get("cmd", "")
+        if verify.get("passed"):
+            code = verify.get("exit_code")
+            verdict = f"Gate `{cmd}` passed" + (f" (exit {code})." if code is not None else ".")
+        else:
+            verdict = f"Gate `{cmd}` did **not** pass — see the task error."
+        parts += ["## Verification", verdict, ""]
+    if files_stat and files_stat.strip():
+        parts += ["## Files changed", "```", files_stat.strip(), "```", ""]
+    parts += [
+        "---",
+        f"🤖 Delivered by devclaw (task `{task_id}`). Verify-gated, but **review "
+        "before merging** — a green gate means the tests pass, not that the code "
+        "is right.",
+    ]
+    return "\n".join(parts)
 
 
 async def _run(prog: str, *args: str, cwd: str) -> tuple[int, str]:
@@ -50,9 +106,17 @@ def _extract_pr_url(text: str) -> str | None:
     return m.group(0) if m else None
 
 
-async def deliver_change(*, workspace_dir: str, task_id: str, goal: str) -> dict:
+async def deliver_change(
+    *,
+    workspace_dir: str,
+    task_id: str,
+    goal: str,
+    kind: str | None = None,
+    verify: dict | None = None,
+) -> dict:
     """Commit the workspace's change to a branch and (best-effort) push + open a PR.
-    Returns a verdict dict; never raises."""
+    Returns a verdict dict; never raises. ``kind`` shapes the conventional-commit
+    title (feat/fix/…); ``verify`` (the gate verdict) goes into the PR body."""
     result: dict = {"delivered": False, "branch": None, "committed": False,
                     "pushed": False, "pr_url": None, "error": None}
 
@@ -66,6 +130,7 @@ async def deliver_change(*, workspace_dir: str, task_id: str, goal: str) -> dict
         result["error"] = "no changes to deliver"
         return result
 
+    title = _pr_title(goal, kind)
     branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
     result["branch"] = branch
 
@@ -74,7 +139,7 @@ async def deliver_change(*, workspace_dir: str, task_id: str, goal: str) -> dict
         result["error"] = f"branch failed: {out}"
         return result
     await _run("git", "add", "-A", cwd=workspace_dir)
-    msg = f"{_commit_title(goal)}\n\nDelivered by devclaw (task {task_id})."
+    msg = f"{title}\n\nDelivered by devclaw (task {task_id})."
     rc, out = await _run(
         "git", "-c", "user.email=devclaw@local", "-c", "user.name=devclaw",
         "commit", "-m", msg, cwd=workspace_dir,
@@ -83,6 +148,9 @@ async def deliver_change(*, workspace_dir: str, task_id: str, goal: str) -> dict
         result["error"] = f"commit failed: {out}"
         return result
     result["committed"] = True
+
+    # Diffstat of just-committed change — for the PR body's "Files changed".
+    _, files_stat = await _run("git", "show", "--stat", "--format=", "HEAD", cwd=workspace_dir)
 
     # Push only if there's a remote. (Local-only repos — e.g. clones of a local
     # path — have no GitHub remote; we stop at the local commit, which is still
@@ -104,8 +172,8 @@ async def deliver_change(*, workspace_dir: str, task_id: str, goal: str) -> dict
     if "github.com" in remote:
         rc, out = await _run(
             "gh", "pr", "create", "--head", branch,
-            "--title", _commit_title(goal),
-            "--body", f"Delivered by devclaw (task `{task_id}`). Verified by the task's gate.",
+            "--title", title,
+            "--body", _pr_body(goal, task_id, verify, files_stat),
             cwd=workspace_dir,
         )
         url = _extract_pr_url(out)

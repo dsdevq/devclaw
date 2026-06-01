@@ -408,8 +408,17 @@ class TaskQueue:
             # task) and record the URL so the notify carries it.
             if final and final.status == "done" and final.deliver:
                 try:
+                    # Pass the kind (→ conventional-commit title) + the gate
+                    # verdict (→ PR body) so the delivered PR describes itself.
+                    verdict = None
+                    if final.result_json:
+                        try:
+                            verdict = (json.loads(final.result_json) or {}).get("verify")
+                        except (json.JSONDecodeError, TypeError):
+                            verdict = None
                     delivery = await deliver_change(
-                        workspace_dir=workspace_dir, task_id=task_id, goal=goal
+                        workspace_dir=workspace_dir, task_id=task_id, goal=goal,
+                        kind=kind, verify=verdict,
                     )
                     self._store.set_pr_url(task_id, delivery.get("pr_url"))
                     sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")

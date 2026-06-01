@@ -46,6 +46,29 @@ _CONTEXT_PREAMBLE = (
     "around what you're touching, so your change matches the project's conventions "
     "and structure."
 )
+# The code-quality bar. Without it the agent optimizes for the ONE thing it's
+# told to satisfy — a green test suite — and ships "a working version": logic
+# inlined wherever instead of where it belongs, happy-path-only tests, and even
+# dead/no-op code that passes because nothing exercises it (live-observed: a
+# `Directory.Enumerate(...).Take(0).Count()` accessibility check that enumerates
+# nothing and never throws — green, but meaningless). The gate proves "didn't
+# break + happy path works," not "good code." This brief carries the quality
+# expectation devclaw (the PM) owes the engineer; repo-specific conventions still
+# come from the repo's own AGENTS.md (read via the preamble).
+_QUALITY_BAR = (
+    "Hold yourself to a production code-quality bar — write code you would approve "
+    "in a code review, not just code that makes the tests pass. Concretely: match "
+    "the surrounding code's architecture and put new logic where similar logic "
+    "already lives (e.g. in the relevant service/module, not inlined into an "
+    "unrelated spot); follow the existing style, naming, and error-handling "
+    "patterns; write NO dead, placeholder, or no-op code — every line must do real "
+    "work; handle the real edge and error cases, not only the happy path; and make "
+    "any tests you add genuinely exercise the behaviour (including failure/edge "
+    "cases), never weakening or deleting existing tests just to go green. A passing "
+    "test suite is necessary but NOT sufficient — before you finish, re-read your "
+    "own diff critically, as a senior engineer would, and fix anything sloppy, "
+    "misleading, or that wouldn't pass review."
+)
 _VERIFY_CODA = (
     "Keep the change focused — do not refactor unrelated code. When done, VERIFY "
     "your work: run the project's existing test/build command and iterate until it "
@@ -54,11 +77,12 @@ _VERIFY_CODA = (
 
 _KIND_WRAPPERS = {
     "implement_feature": (
-        f"{_CONTEXT_PREAMBLE}\n\n{_VERIFY_CODA}\n\nFeature to implement:\n{{goal}}"
+        f"{_CONTEXT_PREAMBLE}\n\n{_QUALITY_BAR}\n\n{_VERIFY_CODA}\n\n"
+        f"Feature to implement:\n{{goal}}"
     ),
     "fix_bug": (
         f"{_CONTEXT_PREAMBLE} Make the smallest change that fixes the bug.\n\n"
-        f"{_VERIFY_CODA}\n\nBug description:\n{{goal}}"
+        f"{_QUALITY_BAR}\n\n{_VERIFY_CODA}\n\nBug description:\n{{goal}}"
     ),
     "review_repository": (
         "You are reviewing this repository — READ ONLY. Do NOT modify, create, "
