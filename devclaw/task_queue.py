@@ -50,6 +50,14 @@ MAX_CONCURRENT_PER_PROGRAM = int(os.environ.get("DEVCLAW_MAX_CONCURRENT_PER_PROG
 GLOBAL_MAX_CONCURRENT = int(os.environ.get("DEVCLAW_MAX_CONCURRENT", "4"))
 #: heartbeat interval — the tick re-derives scheduling from DB state
 TICK_SECONDS = float(os.environ.get("DEVCLAW_TICK_SECONDS", "10"))
+#: per-task wall-clock cap (seconds). A run that exceeds it is cancelled — which
+#: tears down its sandbox via run_sandcastle's finally — and the task is marked
+#: failed, so a hung agent fails CLEANLY instead of burning Pro/Max quota forever
+#: (the live smoke leaked a container on exactly this — a silent post-init hang).
+#: It's a coarse backstop: a no-progress timer would kill a silent hang faster,
+#: but this also catches busy-loops. <=0 disables. Generous default so a
+#: legitimately long feature build isn't reaped mid-flight.
+TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "1800"))
 
 PlannerFn = Callable[[str, str], Awaitable[list[PlannedTask]]]
 #: the execution engine — orchestration depends on this seam, not on OpenHands
@@ -478,16 +486,22 @@ class TaskQueue:
             except Exception as err:  # event writes must never crash the run
                 sys.stderr.write(f"task-queue: append_event failed task={task_id}: {err}\n")
 
+        request = EngineRequest(
+            kind=kind,
+            workspace_dir=workspace_dir,
+            goal=goal,
+            on_event=on_event,
+            verify_cmd=verify_cmd,
+        )
         try:
-            result = await self._runner(
-                EngineRequest(
-                    kind=kind,
-                    workspace_dir=workspace_dir,
-                    goal=goal,
-                    on_event=on_event,
-                    verify_cmd=verify_cmd,
-                )
-            )
+            # Wall-clock guard: on timeout, wait_for cancels the runner coroutine,
+            # which propagates into run_sandcastle's finally → docker rm -f, so the
+            # sandbox is torn down before we mark the task failed. Same cancellation
+            # path the explicit cancel_task uses, so teardown semantics are shared.
+            if TASK_TIMEOUT_S > 0:
+                result = await asyncio.wait_for(self._runner(request), timeout=TASK_TIMEOUT_S)
+            else:
+                result = await self._runner(request)
             if result.get("status") != "ok":
                 self._store.mark_failed(task_id, result.get("error", "unknown error"))
                 return
@@ -499,6 +513,14 @@ class TaskQueue:
                 self._store.mark_failed(task_id, _verify_failure_summary(verify))
             else:
                 self._store.mark_done(task_id, json.dumps(result))
+        except asyncio.TimeoutError:
+            # The sandbox was torn down by the cancelled runner's finally.
+            self._store.mark_failed(
+                task_id,
+                f"task exceeded the {TASK_TIMEOUT_S:.0f}s wall-clock timeout with no "
+                f"terminal result — sandbox torn down. Raise DEVCLAW_TASK_TIMEOUT_S "
+                f"if this was a legitimately long task.",
+            )
         except Exception as err:
             self._store.mark_failed(task_id, str(err))
 
