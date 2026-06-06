@@ -106,6 +106,22 @@ def _extract_pr_url(text: str) -> str | None:
     return m.group(0) if m else None
 
 
+async def _default_base_ref(workspace_dir: str) -> str | None:
+    """The remote's default branch as a local ref (e.g. 'origin/main'), or None
+    if there's no usable origin tracking ref. Used to tell whether the agent
+    committed its change to a branch (HEAD ahead of base)."""
+    rc, out = await _run(
+        "git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD", cwd=workspace_dir
+    )
+    if rc == 0 and out.strip().startswith("refs/remotes/"):
+        return out.strip()[len("refs/remotes/") :]
+    for cand in ("origin/main", "origin/master"):
+        rc, _ = await _run("git", "rev-parse", "--verify", "--quiet", cand, cwd=workspace_dir)
+        if rc == 0:
+            return cand
+    return None
+
+
 async def deliver_change(
     *,
     workspace_dir: str,
@@ -126,7 +142,21 @@ async def deliver_change(
         return result
 
     rc, status = await _run("git", "status", "--porcelain", cwd=workspace_dir)
-    if rc == 0 and not status.strip():
+    dirty = rc == 0 and bool(status.strip())
+
+    # The agent may have committed its change to its own branch, leaving a CLEAN
+    # working tree — that is still a delivery. Detect commits ahead of the
+    # remote's default branch and ship them, rather than reporting "no changes".
+    base = await _default_base_ref(workspace_dir)
+    ahead = 0
+    if base:
+        rc_a, cnt = await _run(
+            "git", "rev-list", "--count", f"{base}..HEAD", cwd=workspace_dir
+        )
+        if rc_a == 0 and cnt.strip().isdigit():
+            ahead = int(cnt.strip())
+
+    if not dirty and ahead == 0:
         result["error"] = "no changes to deliver"
         return result
 
@@ -134,23 +164,30 @@ async def deliver_change(
     branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
     result["branch"] = branch
 
+    # Put the change on devclaw's own branch (never push the agent's branch name,
+    # nor the base branch). `checkout -b` carries HEAD — including any commits the
+    # agent already made — onto the new branch.
     rc, out = await _run("git", "checkout", "-b", branch, cwd=workspace_dir)
     if rc != 0:
         result["error"] = f"branch failed: {out}"
         return result
-    await _run("git", "add", "-A", cwd=workspace_dir)
-    msg = f"{title}\n\nDelivered by devclaw (task {task_id})."
-    rc, out = await _run(
-        "git", "-c", "user.email=devclaw@local", "-c", "user.name=devclaw",
-        "commit", "-m", msg, cwd=workspace_dir,
-    )
-    if rc != 0:
-        result["error"] = f"commit failed: {out}"
-        return result
+
+    if dirty:
+        await _run("git", "add", "-A", cwd=workspace_dir)
+        msg = f"{title}\n\nDelivered by devclaw (task {task_id})."
+        rc, out = await _run(
+            "git", "-c", "user.email=devclaw@local", "-c", "user.name=devclaw",
+            "commit", "-m", msg, cwd=workspace_dir,
+        )
+        if rc != 0:
+            result["error"] = f"commit failed: {out}"
+            return result
+    # else: the agent's own commits are already on this branch (ahead > 0).
     result["committed"] = True
 
-    # Diffstat of just-committed change — for the PR body's "Files changed".
-    _, files_stat = await _run("git", "show", "--stat", "--format=", "HEAD", cwd=workspace_dir)
+    # Diffstat of the delivered change — for the PR body's "Files changed".
+    diff_range = f"{base}..HEAD" if base else "HEAD~1..HEAD"
+    _, files_stat = await _run("git", "diff", "--stat", diff_range, cwd=workspace_dir)
 
     # Push only if there's a remote. (Local-only repos — e.g. clones of a local
     # path — have no GitHub remote; we stop at the local commit, which is still

@@ -107,6 +107,42 @@ async def test_deliver_noop_when_clean(tmp_path):
     assert r["committed"] is False and "no changes to deliver" in r["error"]
 
 
+async def test_deliver_ships_agent_committed_branch(tmp_path):
+    # The agent committed its change to its own branch, leaving a CLEAN tree.
+    # Delivery must still ship it: put it on a devclaw branch and push.
+    origin = str(tmp_path / "origin.git")
+    subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+    repo = str(tmp_path / "repo")
+    subprocess.run(["git", "clone", "-q", origin, repo], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    # establish a base on the remote default branch
+    (tmp_path / "repo" / "base.txt").write_text("base\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "push", "-q", "origin", "HEAD")
+    # simulate the agent: a new branch + commit, then a clean tree
+    _git(repo, "checkout", "-q", "-b", "feat/agent-work")
+    (tmp_path / "repo" / "feature.txt").write_text("agent change\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "agent change")
+
+    r = await deliver_change(
+        workspace_dir=repo, task_id="abcd1234ef", goal="add feature", kind="implement_feature"
+    )
+
+    assert r["committed"] is True
+    assert r["pushed"] is True
+    assert r["delivered"] is True
+    assert r["branch"] == "devclaw/abcd1234-add-feature"
+    assert r["pr_url"] is None  # local (non-github) remote → no gh pr create
+    # the agent's commit reached origin on the devclaw branch
+    refs = subprocess.run(
+        ["git", "ls-remote", "--heads", origin], capture_output=True, text=True
+    ).stdout
+    assert "devclaw/abcd1234-add-feature" in refs
+
+
 # ---- TaskQueue wiring ------------------------------------------------------
 
 
