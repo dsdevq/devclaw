@@ -354,12 +354,17 @@ class StateStore:
             self._db.commit()
             return cur.rowcount == 1
 
-    def mark_done(self, task_id: str, result_json: str) -> None:
+    def mark_done(self, task_id: str, result_json: str, pr_url: Optional[str] = None) -> None:
+        """Settle a task 'done'. ``pr_url`` is written in the SAME statement as the
+        status flip so 'done' is never observable before its delivery artifact —
+        a poller (goalclaw) can't see done-without-PR and re-dispatch. COALESCE
+        keeps an already-recorded pr_url when None is passed (program/plain path)."""
         with self._lock:
             self._db.execute(
-                "UPDATE tasks SET status = 'done', result_json = ?, completed_at = ? "
+                "UPDATE tasks SET status = 'done', result_json = ?, "
+                "pr_url = COALESCE(?, pr_url), completed_at = ? "
                 "WHERE id = ? AND status IN ('pending', 'running')",
-                (result_json, _now_ms(), task_id),
+                (result_json, pr_url, _now_ms(), task_id),
             )
             self._db.commit()
 

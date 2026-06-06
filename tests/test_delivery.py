@@ -176,6 +176,36 @@ async def test_open_pr_task_triggers_delivery(store, tmp_path):
     assert t.pr_url is None                              # no remote → local branch, recorded as None
 
 
+async def test_done_is_not_observable_before_delivery(store, tmp_path, monkeypatch):
+    """The pr_url close-out invariant: a deliver task must never be observable as
+    'done' before its PR is recorded — else a poller (goalclaw) reads
+    done-without-PR and re-dispatches. So delivery runs while the task is still
+    'running', and 'done' + pr_url land in the same write."""
+    repo = str(tmp_path / "ws3")
+    os.makedirs(repo)
+    _init_repo(repo)
+
+    seen = {}
+    pr = "https://github.com/dsdevq/lifekit-dashboard/pull/99"
+
+    async def fake_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None):
+        # While delivery runs, the task must still be 'running' (not yet 'done').
+        seen["status_during_delivery"] = store.get_task(task_id).status
+        seen["pr_url_during_delivery"] = store.get_task(task_id).pr_url
+        return {"delivered": True, "pr_url": pr, "branch": "devclaw/x", "pushed": True}
+
+    monkeypatch.setattr("devclaw.task_queue.deliver_change", fake_deliver)
+
+    q = TaskQueue(store, runner=_writing_runner("feature.txt"))
+    tid = q.submit(kind="implement_feature", workspace_dir=repo, goal="add feature", deliver=True)
+    await q.drain()
+
+    assert seen["status_during_delivery"] == "running"   # not 'done' yet
+    assert seen["pr_url_during_delivery"] is None         # PR not recorded yet
+    t = store.get_task(tid)
+    assert t.status == "done" and t.pr_url == pr          # both land together
+
+
 async def test_plain_task_does_not_deliver(store, tmp_path):
     repo = str(tmp_path / "ws2")
     os.makedirs(repo)
