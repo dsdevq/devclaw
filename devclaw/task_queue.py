@@ -399,32 +399,37 @@ class TaskQueue:
         program_id: Optional[str],
     ) -> None:
         # The task is already 'running' (claim_pending set it); just run + settle.
-        await self._run_and_settle(task_id, kind, workspace_dir, goal)
+        # A standalone open_pr task must NOT be observable as 'done' until its
+        # change is delivered — otherwise a poller (goalclaw) reads done-without-PR
+        # the instant the gate passes and re-dispatches an already-shipped item.
+        # So for that path we defer the done-flip: run delivery while the task is
+        # still 'running', then settle 'done' WITH the pr_url in one write.
+        # (Program tasks and plain tasks settle 'done' inside _run_and_settle.)
+        row = self._store.get_task(task_id)
+        deliver = program_id is None and bool(row and row.deliver)
+        success = await self._run_and_settle(
+            task_id, kind, workspace_dir, goal, defer_done=deliver
+        )
         if program_id is None:
-            final = self._store.get_task(task_id)
-            # Delivery: a verified change is only useful if it comes back as
-            # something to REVIEW. For an open_pr task that settled `done`, turn
-            # the change into a branch/PR (best-effort; never un-does the done
-            # task) and record the URL so the notify carries it.
-            if final and final.status == "done" and final.deliver:
+            if deliver and success is not None:
+                # Gate passed; the task is still 'running'. Turn the change into a
+                # branch/PR, then make 'done' observable — with pr_url already on
+                # the row. Pass the kind (→ conventional-commit title) + the gate
+                # verdict (→ PR body) so the delivered PR describes itself.
+                verify = success.get("verify") if isinstance(success, dict) else None
+                pr_url = None
                 try:
-                    # Pass the kind (→ conventional-commit title) + the gate
-                    # verdict (→ PR body) so the delivered PR describes itself.
-                    verdict = None
-                    if final.result_json:
-                        try:
-                            verdict = (json.loads(final.result_json) or {}).get("verify")
-                        except (json.JSONDecodeError, TypeError):
-                            verdict = None
                     delivery = await deliver_change(
                         workspace_dir=workspace_dir, task_id=task_id, goal=goal,
-                        kind=kind, verify=verdict,
+                        kind=kind, verify=verify,
                     )
-                    self._store.set_pr_url(task_id, delivery.get("pr_url"))
+                    pr_url = delivery.get("pr_url")
                     sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")
-                except Exception as err:  # delivery must never crash a done task
+                except Exception as err:  # delivery must never strand a verified task
                     sys.stderr.write(f"task-queue: delivery failed task={task_id}: {err}\n")
-                final = self._store.get_task(task_id)  # refresh so notify sees pr_url
+                # 'done' becomes observable only now, atomically with pr_url.
+                self._store.mark_done(task_id, json.dumps(success), pr_url=pr_url)
+            final = self._store.get_task(task_id)
             if final and final.notify_url:
                 await self._notify_task(final)
         # A global slot freed; this program may now be complete or have newly-ready
@@ -498,8 +503,14 @@ class TaskQueue:
     # ---- shared runner --------------------------------------------------
 
     async def _run_and_settle(
-        self, task_id: str, kind: TaskKind, workspace_dir: str, goal: str
-    ) -> None:
+        self, task_id: str, kind: TaskKind, workspace_dir: str, goal: str,
+        *, defer_done: bool = False,
+    ) -> Optional[dict]:
+        """Run the agent (with retries) and settle the task. Returns None once the
+        task is settled (done/failed/timeout). When ``defer_done`` is set and the
+        gate passes, it does NOT mark the task done — it returns the winning result
+        dict and leaves the task 'running', so the caller can deliver then settle
+        'done' atomically (see _execute). Failures/timeouts always settle here."""
         # Resolve program_id + the verify gate once so on_event doesn't re-query.
         row = self._store.get_task(task_id)
         program_id = row.program_id if row else None
@@ -554,7 +565,7 @@ class TaskQueue:
                     f"terminal result — sandbox torn down. Raise DEVCLAW_TASK_TIMEOUT_S "
                     f"if this was a legitimately long task.",
                 )
-                return
+                return None
             except Exception as err:
                 last_failure = str(err)  # unexpected runner error — retryable
             else:
@@ -565,9 +576,12 @@ class TaskQueue:
                     verify = result.get("verify")
                     if verify and verify.get("ran") and not verify.get("passed"):
                         last_failure = _verify_failure_summary(verify)
+                    elif defer_done:
+                        # caller delivers, then settles 'done' WITH pr_url atomically
+                        return result
                     else:
                         self._store.mark_done(task_id, json.dumps(result))
-                        return
+                        return None
             if attempt < attempts - 1:
                 sys.stderr.write(
                     f"task-queue: task {task_id} attempt {attempt + 1}/{attempts} failed; "
@@ -576,6 +590,7 @@ class TaskQueue:
         # every attempt failed — escalate.
         suffix = f" (failed after {attempts} attempts)" if attempts > 1 else ""
         self._store.mark_failed(task_id, f"{last_failure}{suffix}")
+        return None
 
     # ---- notify ---------------------------------------------------------
 
