@@ -89,11 +89,17 @@ class TaskQueue:
         store: StateStore,
         planner: Optional[PlannerFn] = None,
         runner: Optional[RunnerFn] = None,
+        on_settle: Optional[Callable[[], None]] = None,
     ) -> None:
         self._store = store
         # Injectable for tests — default to the real planner / sandcastle runner.
         self._planner: PlannerFn = planner or (lambda g, w: plan_goal(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
+        # Optional in-process hook fired whenever a task/program reaches a
+        # terminal state — the goal layer wires its heartbeat-wake here so a
+        # finished engine run triggers an immediate goal tick (replacing the old
+        # cross-service HTTP /wake). Must be cheap + non-throwing.
+        self._on_settle: Optional[Callable[[], None]] = on_settle
         #: retain background task refs so they aren't garbage-collected mid-run
         self._bg: set[asyncio.Task] = set()
         #: task_id -> the live asyncio.Task running its engine, so cancel() can
@@ -104,6 +110,17 @@ class TaskQueue:
         self._planning: set[str] = set()
         #: the heartbeat tick task (started by the server, not in tests)
         self._tick_task: Optional[asyncio.Task] = None
+
+    def set_on_settle(self, hook: Optional[Callable[[], None]]) -> None:
+        """Register the terminal-state hook (the goal layer's heartbeat wake)."""
+        self._on_settle = hook
+
+    def _fire_settle(self) -> None:
+        if self._on_settle is not None:
+            try:
+                self._on_settle()
+            except Exception as err:  # noqa: BLE001 — a bad hook must never break a run
+                sys.stderr.write(f"task-queue: on_settle hook failed: {err}\n")
 
     def _spawn(self, coro: Awaitable) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
@@ -325,6 +342,7 @@ class TaskQueue:
             final = self._store.get_program(program.id)
             if final:
                 self._spawn(self._notify_program(final, tasks))
+            self._fire_settle()  # a program terminalized → wake the goal layer
             return True
         # Sticky terminal: a failed or cancelled child blocks its dependents, so
         # the program can't complete. Terminalize once no sibling is still in
@@ -348,6 +366,7 @@ class TaskQueue:
             final = self._store.get_program(program.id)
             if final:
                 self._spawn(self._notify_program(final, tasks))
+            self._fire_settle()  # program failed/cancelled → wake the goal layer
             return True
         return False
 
@@ -432,6 +451,7 @@ class TaskQueue:
             final = self._store.get_task(task_id)
             if final and final.notify_url:
                 await self._notify_task(final)
+            self._fire_settle()  # a standalone task settled → wake the goal layer
         # A global slot freed; this program may now be complete or have newly-ready
         # tasks; another program may be able to start. Re-pump.
         self._pump()

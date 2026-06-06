@@ -1,0 +1,40 @@
+# Example durable goal — drive lifekit-dashboard to done, feature by feature.
+# Register it via the create_goal MCP tool, or copy to
+# $DEVCLAW_GOALS_DIR/lifekit-dashboard/goal.yaml (default ~/memory/goals/…) and
+# let the goal heartbeat pick it up. Set workspace_dir to the repo checkout path
+# inside the devclaw-mcp container, and replace the backlog with the real list.
+
+objective: >
+  Drive the lifekit-dashboard repo forward feature-by-feature — each backlog item
+  delivered as a verify-gated PR I review — until the backlog is empty.
+
+# Heartbeat: how often to wake and consider advancing (even with no event/steering).
+# DevClaw also wakes this goal in-process the moment one of its actions settles.
+cadence: 6h
+
+engine: devclaw
+# Path to the workspace checkout the engine works in (devclaw-mcp's view).
+workspace_dir: /var/lib/devclaw/workspaces/lifekit-dashboard
+# Repo to drive. DevClaw clones it here if the workspace is empty, and resets it
+# to the default branch at latest origin before EACH action (per-action freshness).
+repo_url: https://github.com/dsdevq/lifekit-dashboard.git
+
+# The gate DevClaw runs after the agent — "the agent's done is not trusted".
+# lifekit-dashboard backend is .NET (see devclaw's 5/5 run on this repo).
+verify_cmd: "cd backend && dotnet test"
+
+# Deliver every change as a PR to review.
+open_pr: true
+
+# The prose completion test the DIRECTION EVALUATOR judges against (not a count).
+# At the done-gate DevClaw runs a read-only review of the repo against this before
+# the goal is allowed to close.
+done_when: >
+  Every backlog item below has shipped as a merged PR with a green verify gate,
+  the dashboard actually exposes the described endpoints, and no item remains.
+
+# Real, bounded, machine-verifiable backend items (replace with your actual list).
+backlog:
+  - Add a GET /api/health endpoint returning service status + version, with a test.
+  - Add structured request logging middleware (method, path, status, duration).
+  - Add a GET /api/goals endpoint that lists goal STATUS from the vault goals dir.

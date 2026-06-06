@@ -231,6 +231,70 @@ You don't babysit. DevClaw reports. You decide only when there's a real blocker.
 
 ---
 
+## The goal layer (durable goals + direction evaluation)
+
+**Folded in from the former standalone `goalclaw` service (2026-06-06).** DevClaw is
+now the software-development *project manager*: it owns durable goals, kicks off the
+work, and evaluates project direction. OpenHands stays the executor.
+
+Two altitudes, one service:
+
+- **`program`** — a bounded, one-shot DAG decomposed from a goal that runs to
+  completion in a single async session. Unchanged.
+- **`goal`** — an open-ended *standing intent* advanced across many heartbeats,
+  steerable and **direction-evaluated**, that persists until its `done_when` is
+  genuinely satisfied. Lives on disk under `DEVCLAW_GOALS_DIR`
+  (`<id>/goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md`), git-synced
+  like the rest of the vault — ephemeral body, durable mind.
+
+These are different time-scales/state-lifecycles; the goal layer sits *above* the
+task/program engine and dispatches into it **in-process** (`goal_engine.py`). When
+goalclaw was a separate service it dispatched over HTTP MCP and re-derived "delivered"
+from a camelCase blob + a separate `/wake` callback — that whole transport, its
+bearer token, and the "polled `done` before `pr_url` was written" race are gone by
+construction now that it's one process: dispatch is a function call, poll is a SQLite
+read, and a task settling fires an in-process hook (`TaskQueue.set_on_settle`) that
+wakes the goal heartbeat immediately.
+
+### How a goal is driven (the heartbeat), and the quota guard
+
+`goal_tick.tick_goal` runs the same mechanism/cognition split as everything else,
+ordered so **idle ticks cost ~0 `claude` calls** (the load-bearing quota guard —
+burned this way 2026-05-18):
+
+1. **Progress check** (Python, every tick, 0 tokens) — poll the in-flight ref via a
+   local SQLite read. Running → return. Idle + cadence-not-due → return.
+2. **Per-delivery evidence** (in-proc, 0 tokens) — on a finished action, read the
+   *full* task `result_json` (the agent's own output + the verify-gate output) and
+   append a grounded record to `deliveries.md`. This is richer than the wire ever
+   exposed, and it's the substrate the evaluator reads.
+3. **Next-action plan** (`goal_planner`, 1 LLM call, only past the gate) — choose the
+   single next action from backlog/steering and dispatch it. JSON-validated.
+4. **Direction evaluation** (`goal_evaluator`, periodic LLM call) — every
+   `DEVCLAW_GOAL_EVAL_EVERY` deliveries (or on direction-steering), judge whether the
+   *delivered work* is achieving the objective, grounded in `deliveries.md` — not by
+   counting backlog items. `off_track` → corrections written to `inbox.md` as
+   steering (the evaluator steers the goal the way Denys would); `stalled`/
+   `needs_human` → block + notify; `on_track` → record and continue.
+
+### The done-gate (why "done" is trustworthy now)
+
+The old "done = shipped-PRs ≥ backlog" check was shallow: a PR can be gate-green but
+wrong, the backlog can drift from the real intent, and *done ≠ good*. The planner's
+`done` is therefore only a **proposal**. It dispatches a read-only
+`review_repository(focus=done_when)` and enters a `verifying` phase; when that review
+returns, the evaluator judges the *actual repo* against `done_when` and the goal
+closes **only on `achieved`**. Otherwise the corrections are steered back in and the
+goal keeps going. Done is gated on grounded evaluation, not on counting. (Disable the
+review run with `DEVCLAW_GOAL_VERIFY_DONE=0` for an artifact-only done eval.)
+
+### Steer / observe surface
+
+MCP tools `create_goal` / `get_goal` / `list_goals` / `steer_goal` / `evaluate_goal`
+let an operator register a goal, ask what's going on / what direction, correct it, or
+force a direction evaluation on demand — so there is always one thing to talk to for
+a piece of software: *"DevClaw, take care of this project."*
+
 ## What this is NOT
 
 - **Not a chatbot.** OpenClaw is the chatbot. DevClaw is what runs behind it.
