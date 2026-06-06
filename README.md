@@ -1,17 +1,25 @@
 # devclaw
 
-> **DevClaw turns a coding goal into a verified PR — autonomously, with no API key.**
+> **DevClaw is the software-development project manager: it owns durable goals, drives them to verified PRs, and evaluates whether the work is going the right direction — autonomously, with no API key.**
 
-DevClaw is a thin orchestration layer in front of [OpenHands](https://github.com/All-Hands-AI/OpenHands). You hand it a goal over MCP (`implement_feature`, `fix_bug`, `review_repository`); it plans the work, runs OpenHands inside a per-task ephemeral Docker sandbox, streams every event, and reports back when the task is done or blocked. Cognition is always `claude` over a Pro/Max OAuth session — **no `ANTHROPIC_API_KEY`, no metered billing** for autonomous overnight runs.
+DevClaw sits in front of [OpenHands](https://github.com/All-Hands-AI/OpenHands) (the engineer) as the PM. Two altitudes:
 
-It is **not** a chatbot and **not** a rebuild of OpenHands. OpenHands owns the hard part (the agent loop, tool use, code edits, git). DevClaw owns everything *around* it: the interface, goal decomposition, task state, isolation, and observability.
+- **Task / program** (one-shot): hand it a bounded goal over MCP (`implement_feature`, `fix_bug`, `review_repository`) or a larger one to decompose (`start_program`); it plans, runs OpenHands inside a per-task ephemeral Docker sandbox, gate-verifies, and delivers a reviewable PR.
+- **Goal** (durable): hand it a standing objective (`create_goal`); it persists, and across a heartbeat it plans the single next action, dispatches it into the task layer, records what actually shipped, and **evaluates direction** — only closing the goal when a grounded review confirms `done_when` is met. You steer it any time (`steer_goal`) and ask what's going on (`get_goal` / `evaluate_goal`). *(This is the folded-in goalclaw — one service to talk to for software.)*
+
+Cognition is always `claude` over a Pro/Max OAuth session — **no `ANTHROPIC_API_KEY`, no metered billing** for autonomous runs.
+
+It is **not** a chatbot and **not** a rebuild of OpenHands. OpenHands owns the hard part (the agent loop, tool use, code edits, git). DevClaw owns everything *around* it: the interface, durable goals + direction evaluation, goal/task decomposition, state, isolation, and observability.
 
 ```
 MCP client (OpenClaw / Claude Code / any MCP host)
-  │   implement_feature / fix_bug / review_repository / start_program …
+  │   create_goal · steer_goal · get_goal       (durable goal layer)
+  │   implement_feature / fix_bug / start_program …  (one-shot task layer)
   ▼
 DevClaw  (Python)
-  ├── MCP server     FastMCP — stdio + streamable-HTTP, 17 tools, dashboard + SSE
+  ├── goal layer     durable goals → heartbeat tick → next-action plan +
+  │                  direction evaluation → dispatch (in-process) → done-gate review
+  ├── MCP server     FastMCP — stdio + streamable-HTTP, dashboard + SSE
   ├── planner        Goal → task DAG (single-task passthrough for small goals)
   ├── state store    SQLite — programs, tasks, append-only events
   └── sandcastle     `docker run --rm` per task — RO ~/.claude mount, destroyed on exit
@@ -37,11 +45,20 @@ The full rationale — including why OpenHands and sandbox isolation are **ortho
 
 ```
 devclaw/
-├── server.py            # FastMCP server — 17 tools, dashboard + SSE, bearer-auth middleware
+├── server.py            # FastMCP server — task + goal tools, dashboard + SSE, bearer-auth middleware
 ├── planner.py           # Goal → task DAG (shells out to `claude --print`)
 ├── state_store.py       # SQLite: programs, tasks, append-only events
-├── task_queue.py        # async task lifecycle (asyncio) + concurrency
-└── sandcastle_runner.py # `docker run --rm` per task; streams events from the runner
+├── task_queue.py        # async task lifecycle (asyncio) + concurrency + on-settle hook
+├── sandcastle_runner.py # `docker run --rm` per task; streams events from the runner
+│   # --- the goal layer (folded-in goalclaw) ---
+├── goal_service.py      # wires the layer: heartbeat loop, in-proc wake, the create/get/steer/eval surface
+├── goal_tick.py         # one heartbeat: cheap check → plan → evaluate → dispatch → done-gate
+├── goal_planner.py      # next-action cognition (goal+state → one action), JSON-validated
+├── goal_evaluator.py    # direction evaluation (is this achieving the objective?), grounded in deliveries
+├── goal_engine.py       # in-process dispatch into the task queue (replaces goalclaw's HTTP MCP client)
+├── goal_store.py        # durable mind on disk: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
+├── goal_models.py       # Goal / GoalStatus / Action / PlanResult / EvalResult
+└── workspace.py         # per-action pristine git checkout (devclaw owns the checkout)
 openhands-runner/
 ├── runner.py            # OpenHands SDK invocation; emits event/result lines on stdout
 └── requirements.txt     # openhands-sdk
@@ -68,6 +85,27 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 | `cancel_task(task_id)` / `cancel_program(program_id)` | Abort in-flight work — tears down the sandbox, marks it `cancelled` (terminal; not retried or recovered) |
 
 Async by default: a tool call returns a `task_id` immediately and the work runs in the background. Pass a `notify_url` to get a callback on completion/block instead of polling.
+
+### Durable goals (the goal layer)
+
+A `program` runs once to completion; a **goal** is a standing intent DevClaw advances across many heartbeats — and judges for *direction*, not just shipped PRs.
+
+| Tool | Does |
+|---|---|
+| `create_goal(goal_id, objective, workspace_dir, done_when, backlog, …)` | Register a durable goal DevClaw drives over time |
+| `get_goal(goal_id)` | Objective, phase, what's in flight, the latest direction verdict, recent log |
+| `list_goals()` | All goals + phase + direction |
+| `steer_goal(goal_id, message)` | Correct/redirect — recorded as steering, honored on the next tick (poked immediately); unblocks a blocked goal |
+| `evaluate_goal(goal_id)` | Force a direction evaluation now — "is this going the right way?" — judged against `done_when`, grounded in what shipped |
+
+**How a goal is driven (per heartbeat):**
+1. **Cheap check** (0 tokens) — poll the in-flight action via a local SQLite read.
+2. **Per-delivery evidence** (0 tokens) — on a finished action, read the *full* task result (agent output + gate verdict) and append a grounded note to `deliveries.md`.
+3. **Next-action plan** (1 LLM call, only past the gate) — pick the single next action from the backlog/steering and dispatch it in-process.
+4. **Direction evaluation** (periodic LLM call) — every `DEVCLAW_GOAL_EVAL_EVERY` deliveries, judge whether the *delivered work* is achieving the objective; corrections are fed back as steering, a hard verdict blocks.
+5. **Done-gate** — the planner's `done` is only a *proposal*; it triggers a read-only `review_repository` against `done_when`, and the goal closes **only if the evaluator confirms `achieved`** from that review. "Done" is gated on grounded evaluation, not on counting PRs.
+
+The zero-token idle guard is load-bearing: an idle goal and an in-flight-still-running goal cost **0 `claude` calls** (the heartbeat is mechanism; cognition runs only when there's real work).
 
 ### Build a project from scratch
 
@@ -124,7 +162,12 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_MAX_GRILL_QUESTIONS` | `20` | cap on grill questions before the spec is force-finalized |
 | `DEVCLAW_MAX_CONCURRENT` | `4` | global cap on concurrently-running tasks (backpressure) |
 | `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | per-program concurrency cap |
-| `DEVCLAW_TICK_SECONDS` | `10` | heartbeat interval — advances DAGs and resumes recovered work from DB state |
+| `DEVCLAW_TICK_SECONDS` | `10` | task-queue heartbeat interval — advances DAGs and resumes recovered work from DB state |
+| `DEVCLAW_GOALS_DIR` | `~/memory/goals` | root holding one folder per durable goal (`<id>/goal.yaml` …) |
+| `DEVCLAW_GOAL_TICK_SECONDS` | `900` | goal heartbeat interval — also woken in-process the moment a task settles |
+| `DEVCLAW_GOAL_EVAL_EVERY` | `3` | deliveries between periodic direction evaluations (`0` → evaluate only at the done-gate) |
+| `DEVCLAW_GOAL_VERIFY_DONE` | `1` | when set, a planner `done` proposal dispatches a read-only review of the repo vs `done_when` and the evaluator must confirm `achieved` before the goal closes (`0` → trust an artifact-only done eval) |
+| `DEVCLAW_GOAL_NOTIFY_URL` | — | notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough) |
 | `DEVCLAW_TASK_TIMEOUT_S` | `1800` | per-task wall-clock cap — a run exceeding it is cancelled (its sandbox torn down) and the task marked `failed`, so a hung agent fails cleanly instead of burning quota. `<=0` disables. |
 | `DEVCLAW_MAX_RETRIES` | `1` | re-runs of a task that fails its verify gate (or errors), each with the failure fed back into the goal, before escalating. `0` disables. Timeouts are never retried. |
 | `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery (or use a logged-in `gh`). Separate from the Claude OAuth pillar — this is git access, not cognition billing. |
@@ -144,6 +187,8 @@ Cognition is tiered per role so an autonomous run doesn't burn the Pro/Max quota
 | `DEVCLAW_GRILL_MODEL` | `sonnet` | the build-from-scratch elicitation grill |
 | `DEVCLAW_JUDGE_MODEL` | `haiku` | the eval failure-analysis judge |
 | `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **the OpenHands coding agent — the token/quota bulk.** Set `claude-opus-4-8` to opt a run up to Opus. |
+| `DEVCLAW_GOAL_PLANNER_MODEL` | `sonnet` | the goal layer's next-action planner (light, bounded JSON) |
+| `DEVCLAW_GOAL_EVAL_MODEL` | `sonnet` | the direction evaluator (judging delivered work vs intent — bump to `opus` per goal for hard direction calls) |
 
 ## Tests
 

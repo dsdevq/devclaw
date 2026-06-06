@@ -34,6 +34,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__
+from .goal_service import GoalService
 from .project_service import ProjectService
 from .project_store import ProjectStore
 from .state_store import StateStore
@@ -78,6 +79,10 @@ elif _engine == "host":
 else:
     queue = TaskQueue(store)
     projects = ProjectService(ProjectStore(), queue)
+# The goal layer (folded-in goalclaw): durable, steerable, evaluated goals driven
+# across heartbeats, dispatching into the SAME queue in-process. Owns goals under
+# DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.
+goals = GoalService(queue, store)
 mcp: FastMCP = FastMCP(SERVER_NAME, version=__version__)
 
 LimitField = Field(ge=1, le=1000)
@@ -315,6 +320,99 @@ async def cancel_program(program_id: str) -> str:
         {"program_id": program_id, "cancelled": cancelled, "status": "cancelled" if cancelled else None},
         indent=2,
     )
+
+
+# ===== goal layer (durable, steerable, evaluated goals) ======================
+# The folded-in goalclaw. A `program` is a bounded, one-shot DAG; a `goal` is an
+# open-ended standing intent that DevClaw drives across many heartbeats —
+# planning the next action, dispatching it into the queue, and EVALUATING whether
+# the work is actually moving toward the objective (not just shipping PRs). These
+# tools are the steer/observe surface: ask what's going on, correct it, force an
+# evaluation.
+
+
+@mcp.tool
+async def create_goal(
+    goal_id: str,
+    objective: str,
+    workspace_dir: str,
+    done_when: str = "",
+    backlog: Optional[list[str]] = None,
+    cadence: str = "1d",
+    repo_url: Optional[str] = None,
+    verify_cmd: Optional[str] = None,
+    open_pr: bool = True,
+) -> str:
+    """Register a DURABLE goal that DevClaw drives over time. Unlike start_program
+    (a one-shot DAG that runs to completion), a goal persists: on each heartbeat
+    DevClaw plans the single next action, dispatches it to the engine, records what
+    shipped, and periodically EVALUATES whether the work is actually achieving the
+    objective — only closing the goal when a grounded review confirms done_when is
+    met. Steer it any time with steer_goal; inspect it with get_goal.
+
+    goal_id: a short stable slug (the on-disk folder name). objective: the durable
+    aim. done_when: the prose completion test the evaluator judges against. backlog:
+    a starting work-list. workspace_dir: the repo checkout DevClaw keeps fresh per
+    action; repo_url clones it if absent. verify_cmd: the gate (e.g. 'dotnet test')."""
+    if not goal_id or not objective or not workspace_dir:
+        raise ToolError("create_goal requires goal_id, objective, workspace_dir")
+    try:
+        return json.dumps(
+            goals.create_goal(
+                goal_id, objective=objective, workspace_dir=workspace_dir,
+                done_when=done_when, backlog=backlog, cadence=cadence,
+                repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
+            ),
+            indent=2,
+        )
+    except FileExistsError:
+        raise ToolError(f"goal {goal_id!r} already exists")
+
+
+@mcp.tool
+async def get_goal(goal_id: str) -> str:
+    """Inspect a durable goal: its objective + done_when, current phase, what's
+    in flight, the last direction-evaluation verdict, and the recent log. This is
+    the 'what's going on / what direction' surface."""
+    try:
+        return json.dumps(goals.get_goal(goal_id), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
+async def list_goals() -> str:
+    """List all durable goals with their phase + latest direction verdict."""
+    return json.dumps(goals.list_goals(), indent=2)
+
+
+@mcp.tool
+async def steer_goal(goal_id: str, message: str) -> str:
+    """Correct or redirect a durable goal. The message is recorded as steering and
+    the next-action planner honors it over the backlog on the next tick (which is
+    poked immediately). Unblocks a blocked goal. Use to change direction, add work,
+    or answer what a goal is blocked on — e.g. 'use Postgres, not SQLite' or
+    'skip the admin UI, focus on the API'."""
+    if not goal_id or not message:
+        raise ToolError("steer_goal requires goal_id and message")
+    try:
+        return json.dumps(goals.steer_goal(goal_id, message), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
+async def evaluate_goal(goal_id: str) -> str:
+    """Force a direction evaluation NOW and return the verdict + rationale. The
+    evaluator judges the goal's actual delivered work against done_when (grounded
+    in what shipped), not by counting backlog items. Any corrections it produces
+    are fed back as steering. Use to ask 'is this going the right way?' on demand."""
+    if not goal_id:
+        raise ToolError("evaluate_goal requires goal_id")
+    try:
+        return json.dumps(await goals.evaluate_goal(goal_id), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
 
 
 # ===== build a project from scratch ==========================================
@@ -566,8 +664,17 @@ class AuthMiddleware:
 # ===== entrypoint ============================================================
 
 
+def _start_loops() -> None:
+    """Start the two heartbeats: the task queue (resumes work + advances DAGs) and
+    the goal layer (drives durable goals). Wire the queue's on-settle hook to the
+    goal heartbeat so a finished task triggers an immediate goal tick in-process."""
+    queue.start_ticking()
+    queue.set_on_settle(goals.poke)
+    goals.start()
+
+
 async def _serve_stdio() -> None:
-    queue.start_ticking()  # heartbeat: resumes recovered work + advances DAGs
+    _start_loops()
     await mcp.run_stdio_async()
 
 
@@ -576,7 +683,7 @@ async def _serve_http() -> None:
     from starlette.middleware import Middleware
 
     app = mcp.http_app(path="/mcp", middleware=[Middleware(AuthMiddleware)])
-    queue.start_ticking()
+    _start_loops()
     config = uvicorn.Config(app, host=HTTP_HOST, port=HTTP_PORT, log_level="warning")
     await uvicorn.Server(config).serve()
 
