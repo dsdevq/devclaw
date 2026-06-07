@@ -125,9 +125,11 @@ class GoalStore:
                 engine=f["engine"], tool=f["tool"], id=f["id"],
                 ref_kind=f["ref_kind"], goal=f.get("goal", ""),
                 is_done_check=bool(f.get("is_done_check", False)),
+                is_discovery=bool(f.get("is_discovery", False)),
             )
         return GoalStatus(
             phase=fm.get("phase", "idle"),
+            lifecycle=fm.get("lifecycle") or None,
             in_flight=inflight,
             blocked_on=fm.get("blocked_on") or None,
             next=fm.get("next", "") or "",
@@ -144,6 +146,7 @@ class GoalStore:
     def save_status(self, goal_id: str, status: GoalStatus) -> None:
         fm: dict = {
             "phase": status.phase,
+            "lifecycle": status.lifecycle,
             "in_flight": (
                 {
                     "engine": status.in_flight.engine,
@@ -152,6 +155,7 @@ class GoalStore:
                     "ref_kind": status.in_flight.ref_kind,
                     "goal": status.in_flight.goal,
                     "is_done_check": status.in_flight.is_done_check,
+                    "is_discovery": status.in_flight.is_discovery,
                 }
                 if status.in_flight
                 else None
@@ -206,6 +210,22 @@ class GoalStore:
         ts = self._now().isoformat(timespec="seconds")
         with path.open("a") as fh:
             fh.write(f"## [{ts}] {instruction}\n\n{body.strip()}\n\n")
+
+    def write_discovery(self, goal_id: str, brief: str) -> None:
+        """Persist the ``investigating`` phase's discovery brief (current state ·
+        gap-to-good · best-practice checklist) as a durable artifact the grill and
+        the planner draw on. Overwritten if investigation re-runs."""
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        ts = self._now().isoformat(timespec="seconds")
+        (d / "discovery.md").write_text(
+            f"# {goal_id} — discovery brief\n\n_generated {ts}_\n\n{brief.strip()}\n"
+        )
+
+    def read_discovery(self, goal_id: str) -> str:
+        """The discovery brief, or '' if the investigating phase hasn't run."""
+        path = self._dir(goal_id) / "discovery.md"
+        return path.read_text() if path.exists() else ""
 
     def recent_deliveries(self, goal_id: str, chars: int = 8000) -> str:
         """The tail of deliveries.md (bounded — the evaluator's grounding context)."""

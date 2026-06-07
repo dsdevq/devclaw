@@ -426,6 +426,115 @@ async def test_idle_tick_never_invokes_summarizer(tmp_path, monkeypatch):
     assert planner.calls == 0 and evaluator.calls == 0
 
 
+# ---- outcome lifecycle: investigate before executing -----------------------
+
+
+@pytest.mark.asyncio
+async def test_new_goal_opens_investigation(tmp_path):
+    """A new outcome goal's first tick dispatches a read-only repo analysis and
+    enters 'investigating' — it does NOT plan/act yet (research before acting)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(lifecycle="new"))
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED
+    assert planner.calls == 0 and evaluator.calls == 0       # no cognition yet
+    assert len(engine.dispatched) == 1
+    action, _, _ = engine.dispatched[0]
+    assert action.tool == "review_repository" and action.open_pr is False
+    saved = store.load_status("g")
+    assert saved.lifecycle == "investigating"
+    assert saved.in_flight is not None and saved.in_flight.is_discovery is True
+    assert any("look" in m.lower() for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_investigation_running_is_zero_tokens(tmp_path):
+    """While the discovery analysis runs, the tick costs zero tokens."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="investigating",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "analyze", is_discovery=True),
+    ))
+    planner, evaluator = FakeClaude(ACT), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(terminal=False, status="running"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.IN_FLIGHT
+    assert planner.calls == 0 and evaluator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_discovery_resolves_writes_brief_and_advances_to_executing(tmp_path):
+    """When the analysis returns, the brief is synthesized + persisted, the owner
+    is told, and the goal advances to 'executing'."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="investigating",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "analyze", is_discovery=True),
+    ))
+    planner = FakeClaude(ACT)  # must NOT run this tick
+    # the research caller in tick_goal is the evaluator-tier caller:
+    researcher = FakeClaude("## Current state\nbare API\n## Gap to good\nno UI\n## What good looks like\n- pages")
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="repo has 3 endpoints, no frontend"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, researcher, engine, notifier)
+
+    assert out is Outcome.SLEPT
+    assert researcher.calls == 1                              # the brief was synthesized
+    assert "3 endpoints" in researcher.last_prompt           # repo analysis fed to synthesis
+    assert planner.calls == 0
+    assert store.load_status("g").lifecycle == "executing"   # advanced
+    assert "Current state" in store.read_discovery("g")      # brief persisted
+    assert any("look" in m.lower() for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_discovery_synthesis_failure_still_advances(tmp_path):
+    """A synthesis failure must never wedge a goal in investigation — it proceeds
+    to executing anyway."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="investigating",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "analyze", is_discovery=True),
+    ))
+    planner = FakeClaude(ACT)
+    researcher = FakeClaude("")   # empty → GoalResearchError inside synthesis
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="analysis"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, researcher, engine, notifier)
+
+    assert out is Outcome.SLEPT
+    assert store.load_status("g").lifecycle == "executing"   # not stuck
+    assert notifier.sent                                     # owner still told
+
+
+@pytest.mark.asyncio
+async def test_legacy_goal_skips_investigation_and_plans(tmp_path):
+    """A goal with no lifecycle (created before the front-end existed) behaves as
+    'executing' — it plans + dispatches immediately, no discovery review."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")  # default status → lifecycle None
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED
+    assert planner.calls == 1                                 # planned (executing path)
+    action, _, _ = engine.dispatched[0]
+    assert action.tool == "start_program"                    # the planned action, NOT a discovery review
+
+
 # ---- notification altitude (owner hears only owner-level by default) --------
 
 

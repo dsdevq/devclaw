@@ -28,6 +28,7 @@ from typing import Awaitable, Callable
 
 from . import goal_evaluator as _evaluator
 from . import goal_planner as _planner
+from . import goal_research as _research
 from . import goal_summary as _goal_summary
 from .goal_engine import GoalEngine
 from .goal_models import Action, EvalResult, Goal, GoalStatus
@@ -117,10 +118,14 @@ async def tick_goal(
     status = store.load_status(goal_id)
     if status.phase == "done":
         return Outcome.SKIP_DONE
+    #: None on a legacy goal → it behaves as "executing" (flat backlog), never
+    #: entering the planning front-end. New outcome goals start at "new".
+    lifecycle = status.lifecycle or "executing"
 
     # ---- cheap check (zero tokens): poll any in-flight action ---------------
     finished_detail = ""
     done_check_detail: str | None = None
+    discovery_detail: str | None = None
     if status.in_flight is not None:
         ref = status.in_flight
         poll = await engine.poll(ref)
@@ -134,7 +139,11 @@ async def tick_goal(
         if poll.gate_passed is not None:
             evidence.append("gate=passed" if poll.gate_passed else "gate=FAILED")
         ev_str = (" — " + ", ".join(evidence)) if evidence else ""
-        if ref.is_done_check:
+        if ref.is_discovery:
+            store.append_log(goal_id, f"discovery review {ref.id} → {poll.status}")
+            discovery_detail = poll.detail or f"review {poll.status} (no analysis captured)"
+            status = replace(status, in_flight=None, phase="idle")
+        elif ref.is_done_check:
             store.append_log(goal_id, f"done-check review {ref.id} → {poll.status}")
             done_check_detail = poll.detail or f"review {poll.status} (no report captured)"
             status = replace(status, in_flight=None, phase="idle")
@@ -151,11 +160,30 @@ async def tick_goal(
                 deliveries_since_eval=status.deliveries_since_eval + delivered,
             )
 
+    # ---- DISCOVERY resolution: the investigating review just finished -------
+    if discovery_detail is not None:
+        return await _resolve_discovery(
+            goal_id, goal, status, discovery_detail,
+            store=store, research_caller=evaluator_caller, notifier=notifier,
+            summarize=summary_caller,
+        )
+
     # ---- DONE-GATE resolution: a verifying review just finished -------------
     if done_check_detail is not None:
         return await _resolve_done_gate(
             goal_id, goal, status, done_check_detail,
             store=store, evaluator_caller=evaluator_caller, notifier=notifier,
+            summarize=summary_caller,
+        )
+
+    # ---- LIFECYCLE: a new outcome goal investigates before it executes ------
+    # (grilling / plan_review are filled in by later build steps; today the
+    #  investigating phase flows straight to executing once the brief is written.)
+    if lifecycle == "new":
+        return await _open_investigation(
+            goal_id, goal, status,
+            store=store, engine=engine, notifier=notifier,
+            notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
         )
 
     # ---- should we spend cognition at all? (preserve the zero-token guard) --
@@ -187,7 +215,7 @@ async def tick_goal(
     try:
         result = await _planner.plan(
             goal, status, store.recent_log(goal_id), steering, finished_detail,
-            claude_caller=planner_caller,
+            claude_caller=planner_caller, discovery=store.read_discovery(goal_id),
         )
     except _planner.GoalPlannerError as exc:
         store.append_log(goal_id, f"plan error: {exc}")
@@ -354,6 +382,75 @@ async def _open_done_gate(
         store=store, evaluator_caller=evaluator_caller, notifier=notifier,
         summarize=summarize,
     )
+
+
+async def _open_investigation(
+    goal_id: str, goal: Goal, status: GoalStatus,
+    *, store: GoalStore, engine: GoalEngine, notifier: Notifier,
+    notify_url: str, prepare_ws: WorkspacePrep, summarize: "ClaudeCaller | None" = None,
+) -> Outcome:
+    """A new outcome goal investigates before it executes: dispatch a read-only
+    analysis of the repo as it is today. Its terminal result feeds the discovery
+    synthesis (``_resolve_discovery``), not the planner. Research, then act — the
+    senior-dev move. On any prep/dispatch failure, skip straight to executing
+    rather than wedge the goal (investigation is an enhancement, not a gate)."""
+    try:
+        await prepare_ws(goal.workspace_dir, goal.repo_url)
+    except WorkspaceError as exc:
+        store.append_log(goal_id, f"investigation prep failed ({exc}) — skipping to executing")
+        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
+        return Outcome.SLEPT
+    review = Action(
+        engine="devclaw", tool="review_repository",
+        goal=(
+            f"Read-only analysis: what does this repository actually do today?\n"
+            f"The owner's desired outcome is: {goal.objective}\n"
+            f"Describe the current functionality, structure, and how close it is to that outcome."
+        ),
+        open_pr=False,
+    )
+    try:
+        ref = await engine.dispatch(review, goal, notify_url)
+    except Exception as exc:  # noqa: BLE001
+        store.append_log(goal_id, f"investigation dispatch failed ({exc}) — skipping to executing")
+        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
+        return Outcome.SLEPT
+    ref = replace(ref, is_discovery=True)
+    store.save_status(goal_id, replace(status, lifecycle="investigating", phase="in_flight", in_flight=ref))
+    store.append_log(goal_id, f"investigating → repo analysis {ref.id}")
+    await _notify(
+        notifier, NotifyLevel.OWNER,
+        f"🔍 [{goal_id}] taking a look at what's there today — I'll come back with what it does and what 'better' could mean",
+        summarize=summarize,
+    )
+    return Outcome.DISPATCHED
+
+
+async def _resolve_discovery(
+    goal_id: str, goal: Goal, status: GoalStatus, repo_analysis: str,
+    *, store: GoalStore, research_caller: ClaudeCaller, notifier: Notifier,
+    summarize: "ClaudeCaller | None" = None,
+) -> Outcome:
+    """The investigating analysis finished — synthesize the discovery brief
+    (current state · gap-to-good · best-practice checklist), persist it, tell the
+    owner plainly, and advance to executing. A synthesis failure is non-fatal:
+    log it and proceed (a goal must never get stuck in investigation)."""
+    try:
+        brief = await _research.discovery_brief(goal, repo_analysis, caller=research_caller)
+        store.write_discovery(goal_id, brief)
+        store.append_log(goal_id, "discovery brief written")
+        msg = (
+            f"🔍 [{goal_id}] I looked at what's there for \"{goal.objective}\" — "
+            f"I've written up what it does today and what 'better' looks like. Starting work now."
+        )
+    except Exception as exc:  # noqa: BLE001 — investigation must not wedge the goal
+        store.append_log(goal_id, f"discovery synthesis failed ({exc}) — proceeding to executing")
+        msg = f"🔍 [{goal_id}] starting work on \"{goal.objective}\""
+    store.save_status(
+        goal_id, replace(status, lifecycle="executing", phase="idle", next="discovery done → executing"),
+    )
+    await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summarize)
+    return Outcome.SLEPT
 
 
 async def _dispatch_action(

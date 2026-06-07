@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from . import goal_evaluator, goal_planner, goal_summary
+from . import goal_evaluator, goal_planner, goal_research, goal_summary
 from .goal_engine import InProcessEngine
 from .goal_evaluator import ClaudeCaller
 from .goal_models import GoalStatus
@@ -173,6 +173,10 @@ class GoalService:
             repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
             done_when=done_when, backlog=backlog,
         )
+        # Outcome goals investigate (research → discovery brief) before executing;
+        # stamp the starting lifecycle so the first tick opens that front-end.
+        if goal_research.INVESTIGATE_ENABLED:
+            self._goal_store.save_status(goal_id, GoalStatus(lifecycle="new"))
         self._goal_store.append_log(goal_id, "goal created")
         self.poke()  # advance it on the next loop turn without waiting a full interval
         return self.get_goal(goal_id)
@@ -190,6 +194,7 @@ class GoalService:
             "workspace_dir": g.workspace_dir,
             "backlog": g.backlog,
             "phase": s.phase,
+            "lifecycle": s.lifecycle or "executing",
             "next": s.next,
             "blocked_on": s.blocked_on,
             "in_flight": (

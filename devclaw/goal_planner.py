@@ -89,6 +89,7 @@ def build_prompt(
     recent_log: str,
     steering: str,
     finished_detail: str,
+    discovery: str = "",
 ) -> str:
     backlog = "\n".join(f"  - {b}" for b in goal.backlog) or "  (none listed)"
     parts = [
@@ -111,6 +112,12 @@ def build_prompt(
         "\n## Recent history (log)",
         recent_log or "(no events yet)",
     ]
+    if discovery:
+        parts += [
+            "\n## Discovery brief (from investigating the repo — current state · "
+            "gap-to-good · what good looks like; draw the next action from this)",
+            discovery,
+        ]
     if finished_detail:
         parts += ["\n## The action that just finished (engine result)", finished_detail]
     if steering:
@@ -180,10 +187,11 @@ async def plan(
     finished_detail: str,
     *,
     claude_caller: ClaudeCaller,
+    discovery: str = "",
 ) -> PlanResult:
     """Run the next-action plan step. ``claude_caller`` is injected so tests stub
-    the LLM."""
-    prompt = build_prompt(goal, status, recent_log, steering, finished_detail)
+    the LLM. ``discovery`` is the investigating-phase brief, when present."""
+    prompt = build_prompt(goal, status, recent_log, steering, finished_detail, discovery)
     raw = await claude_caller(prompt)
     try:
         parsed = json.loads(extract_json(raw))
