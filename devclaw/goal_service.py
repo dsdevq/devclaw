@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from . import goal_evaluator, goal_planner
+from . import goal_evaluator, goal_planner, goal_summary
 from .goal_engine import InProcessEngine
 from .goal_evaluator import ClaudeCaller
 from .goal_models import GoalStatus
@@ -60,6 +60,7 @@ class GoalService:
         *,
         planner_caller: Optional[ClaudeCaller] = None,
         evaluator_caller: Optional[ClaudeCaller] = None,
+        summary_caller: Optional[ClaudeCaller] = None,
         notifier: Optional[Notifier] = None,
     ) -> None:
         self._cfg = config or GoalConfig.from_env()
@@ -67,6 +68,7 @@ class GoalService:
         self._engine = InProcessEngine(queue, store)
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
+        self._summary_caller = summary_caller
         self._notifier: Notifier = notifier or (
             HttpNotifier(self._cfg.notify_url) if self._cfg.notify_url else NullNotifier()
         )
@@ -85,6 +87,15 @@ class GoalService:
         if self._evaluator_caller is None:
             self._evaluator_caller = goal_evaluator.default_caller()
         return self._evaluator_caller
+
+    def _summary(self) -> "Optional[ClaudeCaller]":
+        """Cheap plain-language summarizer for owner-facing notifications. Off if
+        DEVCLAW_GOAL_PLAIN_SUMMARY=0 (then owner messages send raw). Bound lazily."""
+        if not goal_summary.PLAIN_SUMMARY_ENABLED:
+            return None
+        if self._summary_caller is None:
+            self._summary_caller = goal_summary.default_caller()
+        return self._summary_caller
 
     # ---- the heartbeat -----------------------------------------------------
 
@@ -135,6 +146,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+            summary_caller=self._summary(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
@@ -144,6 +156,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+            summary_caller=self._summary(),
         )
         return outcome.value
 

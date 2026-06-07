@@ -28,6 +28,7 @@ from typing import Awaitable, Callable
 
 from . import goal_evaluator as _evaluator
 from . import goal_planner as _planner
+from . import goal_summary as _goal_summary
 from .goal_engine import GoalEngine
 from .goal_models import Action, EvalResult, Goal, GoalStatus
 from .goal_notify import Notifier
@@ -81,11 +82,21 @@ def _notify_floor() -> NotifyLevel:
     )
 
 
-async def _notify(notifier: Notifier, level: NotifyLevel, text: str) -> None:
+async def _notify(
+    notifier: Notifier, level: NotifyLevel, text: str,
+    *, summarize: "ClaudeCaller | None" = None,
+) -> None:
     """Send a notification only if it's at/above the configured altitude floor.
-    Best-effort (the notifier itself never raises); mechanism — zero tokens."""
-    if level >= _notify_floor():
-        await notifier.send(text)
+    When a ``summarize`` caller is supplied, OWNER-level messages are first
+    rewritten into plain language for a non-technical owner (best-effort — the
+    summarizer never loses or blocks a notification). The altitude gate itself
+    is mechanism (zero tokens); cognition runs only for owner-facing sends that
+    actually clear the gate, never on the idle path."""
+    if level < _notify_floor():
+        return
+    if summarize is not None and level >= NotifyLevel.OWNER:
+        text = await _goal_summary.plain_summary(text, caller=summarize)
+    await notifier.send(text)
 
 
 async def tick_goal(
@@ -100,6 +111,7 @@ async def tick_goal(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    summary_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     goal = store.load_goal(goal_id)
     status = store.load_status(goal_id)
@@ -164,6 +176,7 @@ async def tick_goal(
         blocked = await _run_mid_flight_eval(
             goal_id, goal, status,
             store=store, evaluator_caller=evaluator_caller, notifier=notifier,
+            summarize=summary_caller,
         )
         status = store.load_status(goal_id)  # eval may have written status + steering
         if blocked is not None:
@@ -196,7 +209,7 @@ async def tick_goal(
     if result.decision == "blocked":
         store.save_status(goal_id, replace(base, phase="blocked", blocked_on=result.question, next=""))
         store.append_log(goal_id, f"blocked: {result.question}")
-        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] needs you — {result.question}")
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] needs you — {result.question}", summarize=summary_caller)
         return Outcome.BLOCKED
 
     if result.decision == "done":
@@ -204,14 +217,14 @@ async def tick_goal(
             goal_id, goal, base,
             store=store, engine=engine, evaluator_caller=evaluator_caller,
             notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-            verify_done=verify_done, note=result.note,
+            verify_done=verify_done, note=result.note, summarize=summary_caller,
         )
 
     # decision == "act"
     return await _dispatch_action(
         goal_id, goal, base, result.actions[0],
         store=store, engine=engine, notifier=notifier,
-        notify_url=notify_url, prepare_ws=prepare_ws,
+        notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
     )
 
 
@@ -226,6 +239,7 @@ def _apply_corrections(store: GoalStore, goal_id: str, ev: EvalResult) -> None:
 async def _run_mid_flight_eval(
     goal_id: str, goal: Goal, status: GoalStatus,
     *, store: GoalStore, evaluator_caller: ClaudeCaller, notifier: Notifier,
+    summarize: "ClaudeCaller | None" = None,
 ) -> "Outcome | None":
     """Periodic, artifact-grounded direction check. Returns an Outcome to return
     early (blocked) or None to keep going. Resets the delivery counter."""
@@ -246,7 +260,7 @@ async def _run_mid_flight_eval(
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "direction evaluation flagged a problem"
         store.save_status(goal_id, replace(base, phase="blocked", blocked_on=q, next=""))
-        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] direction check ({ev.verdict}) — {q}")
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] direction check ({ev.verdict}) — {q}", summarize=summarize)
         return Outcome.BLOCKED
     store.save_status(goal_id, base)
     _apply_corrections(store, goal_id, ev)
@@ -258,6 +272,7 @@ async def _run_mid_flight_eval(
 async def _resolve_done_gate(
     goal_id: str, goal: Goal, status: GoalStatus, review_report: str,
     *, store: GoalStore, evaluator_caller: ClaudeCaller, notifier: Notifier,
+    summarize: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """A done-gate review just finished — judge the repo against done_when. Only
     'achieved' closes the goal; otherwise corrections are steered back in and the
@@ -280,12 +295,12 @@ async def _resolve_done_gate(
     store.append_log(goal_id, f"done-gate: {ev.verdict} — {ev.rationale[:200]}")
     if ev.verdict == "achieved":
         store.save_status(goal_id, replace(base, phase="done", next=ev.rationale[:200]))
-        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}")
+        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}", summarize=summarize)
         return Outcome.DONE
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"
         store.save_status(goal_id, replace(base, phase="blocked", blocked_on=q, next=""))
-        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] not done — {q}")
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] not done — {q}", summarize=summarize)
         return Outcome.BLOCKED
     # on_track / off_track → not done yet. Steer corrections back in and continue.
     store.save_status(goal_id, replace(base, phase="idle", next="done-gate said keep going"))
@@ -298,7 +313,7 @@ async def _open_done_gate(
     goal_id: str, goal: Goal, base: GoalStatus,
     *, store: GoalStore, engine: GoalEngine, evaluator_caller: ClaudeCaller,
     notifier: Notifier, notify_url: str, prepare_ws: WorkspacePrep, verify_done: bool,
-    note: str,
+    note: str, summarize: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """The planner proposed done. Don't trust it: either dispatch a read-only
     review of the repo against done_when (the grounded path) and let the next
@@ -337,6 +352,7 @@ async def _open_done_gate(
     return await _resolve_done_gate(
         goal_id, goal, base, review_report="",  # no review run; artifact-only
         store=store, evaluator_caller=evaluator_caller, notifier=notifier,
+        summarize=summarize,
     )
 
 
@@ -344,6 +360,7 @@ async def _dispatch_action(
     goal_id: str, goal: Goal, base: GoalStatus, action: Action,
     *, store: GoalStore, engine: GoalEngine, notifier: Notifier,
     notify_url: str, prepare_ws: WorkspacePrep,
+    summarize: "ClaudeCaller | None" = None,
 ) -> Outcome:
     # Runaway backstop (mechanism, not cognition): never spawn more than
     # backlog-size + a small margin of engine actions for one goal without a
@@ -355,7 +372,7 @@ async def _dispatch_action(
             goal_id,
             replace(base, phase="blocked", blocked_on=f"dispatch cap {cap} reached — review the open PRs"),
         )
-        await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review")
+        await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review", summarize=summarize)
         return Outcome.BLOCKED
     # Give the engine a pristine checkout at latest origin/default — so this
     # action doesn't pile onto a previous action's branch (per-action freshness).
@@ -396,6 +413,7 @@ async def tick_all(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    summary_caller: "ClaudeCaller | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others."""
     outcomes: dict[str, Outcome] = {}
@@ -406,6 +424,7 @@ async def tick_all(
                 planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                 notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
                 eval_every=eval_every, verify_done=verify_done,
+                summary_caller=summary_caller,
             )
         except Exception:  # noqa: BLE001 — isolate per-goal blast radius
             store.append_log(goal_id, "tick crashed (uncaught)")
