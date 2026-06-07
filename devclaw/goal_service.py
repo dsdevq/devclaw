@@ -236,6 +236,7 @@ class GoalService:
                 "id": gid,
                 "objective": g.objective[:140],
                 "phase": s.phase,
+                "lifecycle": s.lifecycle or "executing",
                 "direction": s.last_eval_verdict,
                 "actions_dispatched": s.actions_dispatched,
             })
