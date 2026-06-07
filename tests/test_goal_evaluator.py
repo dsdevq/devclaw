@@ -68,3 +68,17 @@ async def test_evaluate_roundtrip_with_injected_caller():
     ev = await evaluate(_goal(), GoalStatus(), "log", "deliveries", claude_caller=caller)
     assert ev.verdict == "achieved"
     assert calls["n"] == 1
+
+
+def test_done_gate_prompt_includes_spec_when_present():
+    prompt = build_prompt(
+        _goal(), GoalStatus(), "log", "deliveries",
+        review_report="repo has /health", at_done_gate=True,
+        spec="MUST expose /health AND /ready; auth required.",
+    )
+    assert "Agreed spec" in prompt and "/ready" in prompt
+
+
+def test_eval_prompt_omits_spec_section_when_absent():
+    prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries")
+    assert "Agreed spec" not in prompt

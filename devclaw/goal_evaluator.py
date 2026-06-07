@@ -98,6 +98,7 @@ def build_prompt(
     *,
     review_report: Optional[str] = None,
     at_done_gate: bool = False,
+    spec: str = "",
 ) -> str:
     backlog = "\n".join(f"  - {b}" for b in goal.backlog) or "  (none listed)"
     parts = [
@@ -108,6 +109,11 @@ def build_prompt(
         "backlog (the starting work-list — NOT the definition of done):",
         backlog,
     ]
+    if spec:
+        parts += [
+            "\n## Agreed spec (the contract aligned with the owner — judge done against THIS)",
+            spec[:4000],
+        ]
     if at_done_gate:
         parts.append(
             "\n## CONTEXT: this is the DONE-GATE.\n"
@@ -173,12 +179,14 @@ async def evaluate(
     claude_caller: ClaudeCaller,
     review_report: Optional[str] = None,
     at_done_gate: bool = False,
+    spec: str = "",
 ) -> EvalResult:
     """Run the direction evaluation. ``claude_caller`` is injected so tests stub
-    the LLM. Pass ``review_report`` + ``at_done_gate`` when judging a done proposal."""
+    the LLM. Pass ``review_report`` + ``at_done_gate`` when judging a done proposal;
+    ``spec`` (the grilled contract) when one exists, so done is judged against it."""
     prompt = build_prompt(
         goal, status, recent_log, deliveries,
-        review_report=review_report, at_done_gate=at_done_gate,
+        review_report=review_report, at_done_gate=at_done_gate, spec=spec,
     )
     raw = await claude_caller(prompt)
     try:
