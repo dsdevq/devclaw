@@ -141,9 +141,13 @@ def _task_detail(
     if pr_url:
         lines.append(f"PR: {pr_url}")
     if isinstance(data, dict):
-        summary = data.get("message") or data.get("agent_output") or ""
+        # Prefer the agent's actual output (the substantive analysis / work
+        # summary) over ``message``, which is a generic envelope ("OpenHands
+        # completed."). Feeding ``message`` to cognition starved the discovery
+        # synthesis, the direction evaluator, and deliveries.md of real signal.
+        summary = data.get("agent_output") or data.get("message") or ""
         if isinstance(summary, str) and summary.strip():
-            lines.append("Agent summary:\n" + summary.strip()[:2500])
+            lines.append("Agent summary:\n" + summary.strip()[:6000])
         verify = data.get("verify")
         if isinstance(verify, dict) and verify.get("ran"):
             verdict = "PASSED" if verify.get("passed") else "FAILED"
