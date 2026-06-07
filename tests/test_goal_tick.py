@@ -354,3 +354,54 @@ async def test_midflight_eval_stalled_blocks(tmp_path):
     assert out is Outcome.BLOCKED
     assert planner.calls == 0
     assert store.load_status("g").phase == "blocked"
+
+
+# ---- notification altitude (owner hears only owner-level by default) --------
+
+
+@pytest.mark.asyncio
+async def test_per_task_dispatch_is_suppressed_by_default(tmp_path, monkeypatch):
+    """At the default 'owner' altitude the 🚀 per-task dispatch line — the spam a
+    non-technical owner should never see — must NOT reach the notifier, even
+    though the action is genuinely dispatched."""
+    monkeypatch.delenv("DEVCLAW_NOTIFY_ALTITUDE", raising=False)  # default = owner
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED          # the action still ran
+    assert len(engine.dispatched) == 1
+    assert notifier.sent == []                # …but the owner heard nothing about it
+
+
+@pytest.mark.asyncio
+async def test_owner_level_blocker_always_sends(tmp_path, monkeypatch):
+    """A real blocker (needs-you) is owner-altitude — it reaches the owner even at
+    the default 'owner' floor."""
+    monkeypatch.delenv("DEVCLAW_NOTIFY_ALTITUDE", raising=False)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    planner = FakeClaude(json.dumps({"decision": "blocked", "question": "which auth provider?"}))
+    evaluator, engine, notifier = FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    assert any("auth provider" in m for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_task_altitude_restores_the_firehose(tmp_path, monkeypatch):
+    """DEVCLAW_NOTIFY_ALTITUDE=task is the debug firehose: the 🚀 per-task dispatch
+    line is sent again."""
+    monkeypatch.setenv("DEVCLAW_NOTIFY_ALTITUDE", "task")
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED
+    assert any("🚀" in m for m in notifier.sent)

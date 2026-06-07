@@ -57,6 +57,37 @@ class Outcome(str, Enum):
     ERROR = "error"
 
 
+class NotifyLevel(int, Enum):
+    """How loud a goal-layer notification is. The owner is a non-technical
+    product owner who should hear only OWNER-level events (a real blocker, a
+    direction question, a paused-for-review, a verified completion). TASK-level
+    is mechanical/internal chatter — per-action dispatch, course-corrections the
+    layer handles itself, technical hiccups it retries — surfaced only when
+    DEVCLAW_NOTIFY_ALTITUDE=task (debugging). Mechanism, zero tokens."""
+
+    TASK = 0
+    OWNER = 1
+
+
+_ALTITUDES = {"task": NotifyLevel.TASK, "owner": NotifyLevel.OWNER}
+
+
+def _notify_floor() -> NotifyLevel:
+    """The lowest level that still reaches the owner. Default OWNER — only
+    owner-altitude events go out; set DEVCLAW_NOTIFY_ALTITUDE=task for the full
+    firehose. Read from env each call so it's overridable per process / in tests."""
+    return _ALTITUDES.get(
+        os.environ.get("DEVCLAW_NOTIFY_ALTITUDE", "owner").strip().lower(), NotifyLevel.OWNER
+    )
+
+
+async def _notify(notifier: Notifier, level: NotifyLevel, text: str) -> None:
+    """Send a notification only if it's at/above the configured altitude floor.
+    Best-effort (the notifier itself never raises); mechanism — zero tokens."""
+    if level >= _notify_floor():
+        await notifier.send(text)
+
+
 async def tick_goal(
     goal_id: str,
     *,
@@ -148,7 +179,7 @@ async def tick_goal(
     except _planner.GoalPlannerError as exc:
         store.append_log(goal_id, f"plan error: {exc}")
         store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-        await notifier.send(f"⚠️ [{goal_id}] plan step failed: {exc}")
+        await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] plan step failed: {exc}")
         return Outcome.ERROR
 
     now = store.now_iso()
@@ -165,7 +196,7 @@ async def tick_goal(
     if result.decision == "blocked":
         store.save_status(goal_id, replace(base, phase="blocked", blocked_on=result.question, next=""))
         store.append_log(goal_id, f"blocked: {result.question}")
-        await notifier.send(f"🟡 [{goal_id}] needs you — {result.question}")
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] needs you — {result.question}")
         return Outcome.BLOCKED
 
     if result.decision == "done":
@@ -215,12 +246,12 @@ async def _run_mid_flight_eval(
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "direction evaluation flagged a problem"
         store.save_status(goal_id, replace(base, phase="blocked", blocked_on=q, next=""))
-        await notifier.send(f"🟡 [{goal_id}] direction check ({ev.verdict}) — {q}")
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] direction check ({ev.verdict}) — {q}")
         return Outcome.BLOCKED
     store.save_status(goal_id, base)
     _apply_corrections(store, goal_id, ev)
     if ev.verdict == "off_track" and ev.corrections:
-        await notifier.send(f"🧭 [{goal_id}] course-correcting — {ev.rationale[:200]}")
+        await _notify(notifier, NotifyLevel.TASK, f"🧭 [{goal_id}] course-correcting — {ev.rationale[:200]}")
     return None
 
 
@@ -239,7 +270,7 @@ async def _resolve_done_gate(
     except _evaluator.GoalEvalError as exc:
         store.append_log(goal_id, f"done-gate eval error: {exc}")
         store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-        await notifier.send(f"⚠️ [{goal_id}] done-gate eval failed: {exc}")
+        await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate eval failed: {exc}")
         return Outcome.ERROR
     now = store.now_iso()
     base = replace(
@@ -249,17 +280,17 @@ async def _resolve_done_gate(
     store.append_log(goal_id, f"done-gate: {ev.verdict} — {ev.rationale[:200]}")
     if ev.verdict == "achieved":
         store.save_status(goal_id, replace(base, phase="done", next=ev.rationale[:200]))
-        await notifier.send(f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}")
+        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}")
         return Outcome.DONE
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"
         store.save_status(goal_id, replace(base, phase="blocked", blocked_on=q, next=""))
-        await notifier.send(f"🟡 [{goal_id}] not done — {q}")
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] not done — {q}")
         return Outcome.BLOCKED
     # on_track / off_track → not done yet. Steer corrections back in and continue.
     store.save_status(goal_id, replace(base, phase="idle", next="done-gate said keep going"))
     _apply_corrections(store, goal_id, ev)
-    await notifier.send(f"↩️ [{goal_id}] done-gate: not complete — {ev.rationale[:200]}")
+    await _notify(notifier, NotifyLevel.TASK, f"↩️ [{goal_id}] done-gate: not complete — {ev.rationale[:200]}")
     return Outcome.SLEPT
 
 
@@ -279,7 +310,7 @@ async def _open_done_gate(
         except WorkspaceError as exc:
             store.append_log(goal_id, f"done-gate workspace prep failed: {exc}")
             store.save_status(goal_id, replace(base, phase="idle", next="retry done-gate"))
-            await notifier.send(f"⚠️ [{goal_id}] done-gate workspace prep failed: {exc}")
+            await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate workspace prep failed: {exc}")
             return Outcome.ERROR
         review = Action(
             engine="devclaw", tool="review_repository",
@@ -295,12 +326,12 @@ async def _open_done_gate(
         except Exception as exc:  # noqa: BLE001
             store.append_log(goal_id, f"done-gate dispatch failed: {exc}")
             store.save_status(goal_id, replace(base, phase="idle", next="retry done-gate"))
-            await notifier.send(f"⚠️ [{goal_id}] done-gate dispatch failed: {exc}")
+            await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate dispatch failed: {exc}")
             return Outcome.ERROR
         ref = replace(ref, is_done_check=True)
         store.save_status(goal_id, replace(base, phase="verifying", in_flight=ref, next="verifying done"))
         store.append_log(goal_id, f"done proposed ({note}) → verifying via review {ref.id}")
-        await notifier.send(f"🔎 [{goal_id}] looks complete — verifying against done_when")
+        await _notify(notifier, NotifyLevel.TASK, f"🔎 [{goal_id}] looks complete — verifying against done_when")
         return Outcome.VERIFYING
     # verify disabled → artifact-only done evaluation now.
     return await _resolve_done_gate(
@@ -324,7 +355,7 @@ async def _dispatch_action(
             goal_id,
             replace(base, phase="blocked", blocked_on=f"dispatch cap {cap} reached — review the open PRs"),
         )
-        await notifier.send(f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review")
+        await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review")
         return Outcome.BLOCKED
     # Give the engine a pristine checkout at latest origin/default — so this
     # action doesn't pile onto a previous action's branch (per-action freshness).
@@ -333,14 +364,14 @@ async def _dispatch_action(
     except WorkspaceError as exc:
         store.append_log(goal_id, f"workspace prep failed: {exc}")
         store.save_status(goal_id, replace(base, phase="idle", next=action.goal))
-        await notifier.send(f"⚠️ [{goal_id}] workspace prep failed: {exc}")
+        await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] workspace prep failed: {exc}")
         return Outcome.ERROR
     try:
         ref = await engine.dispatch(action, goal, notify_url)
     except Exception as exc:  # noqa: BLE001 — record + notify, retry next cadence
         store.append_log(goal_id, f"dispatch error ({action.tool}): {exc}")
         store.save_status(goal_id, replace(base, phase="idle", next=action.goal))
-        await notifier.send(f"⚠️ [{goal_id}] dispatch failed: {exc}")
+        await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] dispatch failed: {exc}")
         return Outcome.ERROR
     store.save_status(
         goal_id,
@@ -350,7 +381,7 @@ async def _dispatch_action(
         ),
     )
     store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}")
-    await notifier.send(f"🚀 [{goal_id}] {action.tool}: {action.goal}  ({ref.id})")
+    await _notify(notifier, NotifyLevel.TASK, f"🚀 [{goal_id}] {action.tool}: {action.goal}  ({ref.id})")
     return Outcome.DISPATCHED
 
 
