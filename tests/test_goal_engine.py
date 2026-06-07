@@ -90,3 +90,16 @@ def test_gate_passed_and_detail_helpers():
     assert "PR: http://pr/1" in detail
     assert "FAILED" in detail
     assert "1 failed" in detail
+
+
+def test_task_detail_prefers_agent_output_over_envelope():
+    """Regression: the discovery brief / evaluator must see the agent's real
+    analysis (agent_output), not the generic 'OpenHands completed.' envelope.
+    Surfaced by the 2026-06-07 live test, where the wrong field starved cognition."""
+    result = json.dumps({
+        "status": "ok", "message": "OpenHands completed.",
+        "agent_output": "The repo is a bare scaffold: two functions, no persistence, no tests.",
+    })
+    detail = _task_detail("review_repository", result, None, None)
+    assert "bare scaffold" in detail
+    assert "OpenHands completed." not in detail
