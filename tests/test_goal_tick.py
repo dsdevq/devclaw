@@ -31,13 +31,26 @@ def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
 
-async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True):
+async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None):
     return await tick_goal(
         goal_id, store=store, engine=engine,
         planner_caller=planner, evaluator_caller=evaluator, notifier=notifier,
         notify_url="http://relay", prepare_ws=fake_prepare,
-        eval_every=eval_every, verify_done=verify_done,
+        eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller,
     )
+
+
+class RecordingSummarizer:
+    """A fake plain-language summarizer caller: records prompts and returns a
+    fixed plain rewrite, so tests can assert WHICH notifications get summarized."""
+
+    def __init__(self, rewrite="PLAIN: here is what is happening"):
+        self.prompts: list[str] = []
+        self._rewrite = rewrite
+
+    async def __call__(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        return self._rewrite
 
 
 # ---- the guardrail ---------------------------------------------------------
@@ -354,6 +367,63 @@ async def test_midflight_eval_stalled_blocks(tmp_path):
     assert out is Outcome.BLOCKED
     assert planner.calls == 0
     assert store.load_status("g").phase == "blocked"
+
+
+# ---- plain-language summarizer (owner messages rewritten; best-effort) ------
+
+
+@pytest.mark.asyncio
+async def test_owner_notification_is_plain_summarized(tmp_path, monkeypatch):
+    """An OWNER-level message (a blocker) is rewritten by the summarizer before
+    it reaches the notifier; the owner sees the plain text, not the raw line."""
+    monkeypatch.delenv("DEVCLAW_NOTIFY_ALTITUDE", raising=False)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    planner = FakeClaude(json.dumps({"decision": "blocked", "question": "which auth provider?"}))
+    evaluator, engine, notifier = FakeClaude(), FakeEngine(), RecordingNotifier()
+    summarizer = RecordingSummarizer("🟡 I need you to pick how people sign in.")
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, summary_caller=summarizer)
+
+    assert out is Outcome.BLOCKED
+    assert len(summarizer.prompts) == 1                       # summarizer ran once
+    assert "auth provider" in summarizer.prompts[0]           # raw line fed in
+    assert notifier.sent == ["🟡 I need you to pick how people sign in."]  # plain text sent
+
+
+@pytest.mark.asyncio
+async def test_summarizer_not_invoked_for_suppressed_task_dispatch(tmp_path, monkeypatch):
+    """A per-task dispatch is suppressed at the default floor — the summarizer
+    must not be called for it (no wasted tokens on a message nobody sees)."""
+    monkeypatch.delenv("DEVCLAW_NOTIFY_ALTITUDE", raising=False)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+    summarizer = RecordingSummarizer()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, summary_caller=summarizer)
+
+    assert out is Outcome.DISPATCHED
+    assert summarizer.prompts == []          # never summarized a suppressed message
+    assert notifier.sent == []
+
+
+@pytest.mark.asyncio
+async def test_idle_tick_never_invokes_summarizer(tmp_path, monkeypatch):
+    """The zero-token guardrail extends to the summarizer: an idle tick must not
+    call it."""
+    monkeypatch.delenv("DEVCLAW_NOTIFY_ALTITUDE", raising=False)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", cadence="1d")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+    summarizer = RecordingSummarizer()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, summary_caller=summarizer)
+
+    assert out is Outcome.IDLE
+    assert summarizer.prompts == []
+    assert planner.calls == 0 and evaluator.calls == 0
 
 
 # ---- notification altitude (owner hears only owner-level by default) --------
