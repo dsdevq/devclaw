@@ -313,7 +313,7 @@ async def _run_mid_flight_eval(
     try:
         ev = await _evaluator.evaluate(
             goal, status, store.recent_log(goal_id), store.recent_deliveries(goal_id),
-            claude_caller=evaluator_caller,
+            claude_caller=evaluator_caller, spec=store.read_spec(goal_id),
         )
     except _evaluator.GoalEvalError as exc:
         store.append_log(goal_id, f"eval error: {exc}")
@@ -348,6 +348,7 @@ async def _resolve_done_gate(
         ev = await _evaluator.evaluate(
             goal, status, store.recent_log(goal_id), store.recent_deliveries(goal_id),
             claude_caller=evaluator_caller, review_report=review_report, at_done_gate=True,
+            spec=store.read_spec(goal_id),
         )
     except _evaluator.GoalEvalError as exc:
         store.append_log(goal_id, f"done-gate eval error: {exc}")
