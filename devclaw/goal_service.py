@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from . import goal_evaluator, goal_planner, goal_research, goal_summary
+from . import goal_evaluator, goal_merge, goal_planner, goal_research, goal_summary
 from .goal_engine import InProcessEngine
 from .goal_evaluator import ClaudeCaller
 from .goal_models import GoalStatus
@@ -97,6 +97,13 @@ class GoalService:
             self._summary_caller = goal_summary.default_caller()
         return self._summary_caller
 
+    def _merger(self) -> "Optional[goal_merge.Merger]":
+        """The auto-merger for hands-off delivery (decision 2). None unless
+        DEVCLAW_GOAL_AUTOMERGE=1 — merging to the default branch is opt-in."""
+        if not goal_merge.AUTOMERGE_ENABLED:
+            return None
+        return goal_merge.default_merger()
+
     # ---- the heartbeat -----------------------------------------------------
 
     def start(self) -> None:
@@ -146,7 +153,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(),
+            summary_caller=self._summary(), merger=self._merger(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
@@ -156,7 +163,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(),
+            summary_caller=self._summary(), merger=self._merger(),
         )
         return outcome.value
 
