@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Awaitable, Callable
 
 from . import goal_evaluator as _evaluator
+from . import goal_merge as _merge
 from . import goal_planner as _planner
 from . import goal_research as _research
 from . import goal_summary as _goal_summary
@@ -113,6 +114,7 @@ async def tick_goal(
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
     summary_caller: "ClaudeCaller | None" = None,
+    merger: "_merge.Merger | None" = None,
 ) -> Outcome:
     goal = store.load_goal(goal_id)
     status = store.load_status(goal_id)
@@ -159,6 +161,22 @@ async def tick_goal(
                 status, in_flight=None, phase="idle",
                 deliveries_since_eval=status.deliveries_since_eval + delivered,
             )
+            # Hands-off auto-merge (decision 2): a delivered change whose verify
+            # gate passed is merged by devclaw itself, with a plain owner ping.
+            # Best-effort + gated — a failed merge just leaves the PR for review.
+            if (
+                _merge.AUTOMERGE_ENABLED and merger is not None
+                and poll.status == "done" and poll.gate_passed and poll.pr_url
+            ):
+                if await merger(poll.pr_url):
+                    store.append_log(goal_id, f"auto-merged {poll.pr_url}")
+                    await _notify(
+                        notifier, NotifyLevel.OWNER,
+                        f"✅ [{goal_id}] shipped + merged — {ref.goal or ref.tool} ({poll.pr_url})",
+                        summarize=summary_caller,
+                    )
+                else:
+                    store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
 
     # ---- DISCOVERY resolution: the investigating review just finished -------
     if discovery_detail is not None:
@@ -511,6 +529,7 @@ async def tick_all(
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
     summary_caller: "ClaudeCaller | None" = None,
+    merger: "_merge.Merger | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others."""
     outcomes: dict[str, Outcome] = {}
@@ -521,7 +540,7 @@ async def tick_all(
                 planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                 notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
                 eval_every=eval_every, verify_done=verify_done,
-                summary_caller=summary_caller,
+                summary_caller=summary_caller, merger=merger,
             )
         except Exception:  # noqa: BLE001 — isolate per-goal blast radius
             store.append_log(goal_id, "tick crashed (uncaught)")

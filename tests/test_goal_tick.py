@@ -31,13 +31,25 @@ def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
 
-async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None):
+async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None):
     return await tick_goal(
         goal_id, store=store, engine=engine,
         planner_caller=planner, evaluator_caller=evaluator, notifier=notifier,
         notify_url="http://relay", prepare_ws=fake_prepare,
-        eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller,
+        eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller, merger=merger,
     )
+
+
+class RecordingMerger:
+    """A fake auto-merger: records the PR urls it was asked to merge."""
+
+    def __init__(self, ok: bool = True):
+        self.merged: list[str] = []
+        self._ok = ok
+
+    async def __call__(self, pr_url: str) -> bool:
+        self.merged.append(pr_url)
+        return self._ok
 
 
 class RecordingSummarizer:
@@ -424,6 +436,74 @@ async def test_idle_tick_never_invokes_summarizer(tmp_path, monkeypatch):
     assert out is Outcome.IDLE
     assert summarizer.prompts == []
     assert planner.calls == 0 and evaluator.calls == 0
+
+
+# ---- auto-merge on gate-green (hands-off; gated + best-effort) --------------
+
+
+def _delivery_status():
+    return GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
+    """A delivered change whose verify gate passed is merged by devclaw, with a
+    plain owner ping — when DEVCLAW_GOAL_AUTOMERGE is on."""
+    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _delivery_status())
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger()
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    assert merger.merged == ["https://github.com/o/r/pull/9"]
+    assert any("merged" in m.lower() for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_failed_gate_is_not_auto_merged(tmp_path, monkeypatch):
+    """A PR whose gate did NOT pass must never be auto-merged."""
+    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _delivery_status())
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="broke a test",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=False,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger()
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    assert merger.merged == []
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_off_by_default(tmp_path):
+    """With AUTOMERGE unset (default), even a green PR is left for manual review."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _delivery_status())
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger()
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    assert merger.merged == []          # gated off → never merged
 
 
 # ---- outcome lifecycle: investigate before executing -----------------------
