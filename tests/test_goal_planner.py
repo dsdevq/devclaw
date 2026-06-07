@@ -4,7 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_planner import GoalPlannerError, extract_json, validate
+from devclaw.goal_models import Goal, GoalStatus
+from devclaw.goal_planner import GoalPlannerError, build_prompt, extract_json, validate
+
+
+def _goal():
+    return Goal(id="g", objective="make it good", cadence="1d", engine="devclaw", workspace_dir="/repo")
+
+
+def test_build_prompt_includes_discovery_when_present():
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", discovery="## Current state\nbare API")
+    assert "Discovery brief" in p and "bare API" in p
+
+
+def test_build_prompt_omits_discovery_section_when_absent():
+    p = build_prompt(_goal(), GoalStatus(), "", "", "")
+    assert "Discovery brief" not in p
 
 
 def test_extract_json_plain():

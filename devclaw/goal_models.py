@@ -26,6 +26,15 @@ Engine = Literal["devclaw"]
 #: kinds plus the program decomposer.
 GoalTool = Literal["start_program", "implement_feature", "fix_bug", "review_repository"]
 Phase = Literal["idle", "in_flight", "verifying", "blocked", "done"]
+#: The OUTCOME lifecycle — a goal stated as an outcome grows a planning front-end
+#: (research → align → plan) before it executes, so devclaw behaves like a senior
+#: dev handed an outcome by a non-technical owner. Distinct from ``Phase`` (the
+#: per-tick execution state): ``Lifecycle`` is the coarse stage of the whole goal.
+#: ``None`` on a stored status means a legacy goal created before the lifecycle
+#: existed — treated as ``executing`` so it keeps running the flat backlog.
+Lifecycle = Literal[
+    "new", "investigating", "grilling", "plan_review", "executing", "verifying", "done"
+]
 Decision = Literal["act", "sleep", "blocked", "done"]
 EvalVerdict = Literal["on_track", "off_track", "achieved", "stalled", "needs_human"]
 
@@ -67,6 +76,10 @@ class InFlight:
     #: True when this is the read-only review dispatched by the done-gate (its
     #: terminal result feeds the evaluator, not the next-action planner).
     is_done_check: bool = False
+    #: True when this is the read-only repo analysis dispatched by the
+    #: ``investigating`` lifecycle phase (its terminal result feeds the discovery
+    #: synthesis, not the planner or the done-gate evaluator).
+    is_discovery: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,6 +87,8 @@ class GoalStatus:
     """Mutable per-tick state — STATUS.md frontmatter. Overwritten, never appended."""
 
     phase: Phase = "idle"
+    #: the outcome lifecycle stage (None = legacy goal → behaves as "executing")
+    lifecycle: Optional[Lifecycle] = None
     in_flight: Optional[InFlight] = None
     blocked_on: Optional[str] = None
     #: human note of the intended next step
