@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Awaitable, Callable
 
 from . import goal_evaluator as _evaluator
+from . import goal_grill as _grill
 from . import goal_merge as _merge
 from . import goal_planner as _planner
 from . import goal_research as _research
@@ -58,6 +59,7 @@ class Outcome(str, Enum):
     DONE = "done"
     SKIP_DONE = "skip_done"
     ERROR = "error"
+    ASKED = "asked"          # emitted a grill question / plan for approval — awaiting the owner
 
 
 class NotifyLevel(int, Enum):
@@ -115,6 +117,7 @@ async def tick_goal(
     verify_done: bool = VERIFY_DONE,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
+    grill_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     goal = store.load_goal(goal_id)
     status = store.load_status(goal_id)
@@ -183,7 +186,7 @@ async def tick_goal(
         return await _resolve_discovery(
             goal_id, goal, status, discovery_detail,
             store=store, research_caller=evaluator_caller, notifier=notifier,
-            summarize=summary_caller,
+            summarize=summary_caller, grill_caller=grill_caller,
         )
 
     # ---- DONE-GATE resolution: a verifying review just finished -------------
@@ -203,6 +206,24 @@ async def tick_goal(
             store=store, engine=engine, notifier=notifier,
             notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
         )
+
+    # ---- GRILLING: align on scope, one question at a time over Telegram -----
+    if lifecycle == "grilling":
+        return await _run_grill(
+            goal_id, goal, status,
+            store=store, grill_caller=grill_caller, notifier=notifier, summarize=summary_caller,
+        )
+
+    # ---- PLAN_REVIEW: the spec is agreed; wait for the owner's approval -----
+    if lifecycle == "plan_review":
+        if store.plan_approved(goal_id):
+            store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle", next="plan approved → executing"))
+            store.append_log(goal_id, "plan approved → executing")
+            await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] plan approved — starting work now", summarize=summary_caller)
+            return Outcome.SLEPT
+        # waiting for approval → zero tokens
+        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
+        return Outcome.IDLE
 
     # ---- should we spend cognition at all? (preserve the zero-token guard) --
     steering = store.unread_steering(goal_id, status)
@@ -447,28 +468,89 @@ async def _open_investigation(
 async def _resolve_discovery(
     goal_id: str, goal: Goal, status: GoalStatus, repo_analysis: str,
     *, store: GoalStore, research_caller: ClaudeCaller, notifier: Notifier,
-    summarize: "ClaudeCaller | None" = None,
+    summarize: "ClaudeCaller | None" = None, grill_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """The investigating analysis finished — synthesize the discovery brief
-    (current state · gap-to-good · best-practice checklist), persist it, tell the
-    owner plainly, and advance to executing. A synthesis failure is non-fatal:
-    log it and proceed (a goal must never get stuck in investigation)."""
+    (current state · gap-to-good · best-practice checklist) and persist it. Then,
+    if the grill is on, move into grilling (align on scope) primed with the brief;
+    otherwise tell the owner plainly and execute. Synthesis failure is non-fatal."""
     try:
         brief = await _research.discovery_brief(goal, repo_analysis, caller=research_caller)
         store.write_discovery(goal_id, brief)
         store.append_log(goal_id, "discovery brief written")
-        msg = (
-            f"🔍 [{goal_id}] I looked at what's there for \"{goal.objective}\" — "
-            f"I've written up what it does today and what 'better' looks like. Starting work now."
-        )
+        synth_ok = True
     except Exception as exc:  # noqa: BLE001 — investigation must not wedge the goal
-        store.append_log(goal_id, f"discovery synthesis failed ({exc}) — proceeding to executing")
-        msg = f"🔍 [{goal_id}] starting work on \"{goal.objective}\""
+        store.append_log(goal_id, f"discovery synthesis failed ({exc}) — proceeding")
+        synth_ok = False
+
+    # Grill on → align on scope (primed with the brief) before executing.
+    if _grill.GRILL_ENABLED and grill_caller is not None:
+        store.save_status(goal_id, replace(status, lifecycle="grilling", phase="idle"))
+        store.append_log(goal_id, "discovery done → grilling")
+        return await _run_grill(
+            goal_id, goal, store.load_status(goal_id),
+            store=store, grill_caller=grill_caller, notifier=notifier, summarize=summarize,
+        )
+
+    # Grill off → straight to executing (the brief still informs the planner).
     store.save_status(
         goal_id, replace(status, lifecycle="executing", phase="idle", next="discovery done → executing"),
     )
+    msg = (
+        f"🔍 [{goal_id}] I looked at what's there for \"{goal.objective}\" — "
+        f"I've written up what it does today and what 'better' looks like. Starting work now."
+        if synth_ok else f"🔍 [{goal_id}] starting work on \"{goal.objective}\""
+    )
     await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summarize)
     return Outcome.SLEPT
+
+
+async def _run_grill(
+    goal_id: str, goal: Goal, status: GoalStatus,
+    *, store: GoalStore, grill_caller: "ClaudeCaller | None", notifier: Notifier,
+    summarize: "ClaudeCaller | None" = None,
+) -> Outcome:
+    """One grill turn over the durable transcript. Quota-safe: if the last question
+    is still awaiting the owner's reply, do nothing (zero tokens). Otherwise run the
+    elicitation cognition — ask the next question, or finalize the spec and move to
+    plan_review. A grill failure degrades to executing rather than wedging."""
+    transcript = store.read_grill(goal_id)
+    if transcript and "answer" not in transcript[-1]:
+        # a question is out; waiting for the owner — zero tokens
+        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
+        return Outcome.IDLE
+    if grill_caller is None:  # defensive — shouldn't reach here with grill on
+        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
+        return Outcome.SLEPT
+    try:
+        step = await _grill.next_step(_grill.grill_idea(goal, store.read_discovery(goal_id)), transcript, grill_caller)
+    except Exception as exc:  # noqa: BLE001 — never wedge a goal on a grill hiccup
+        store.append_log(goal_id, f"grill failed ({exc}) — proceeding to executing")
+        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
+        await _notify(notifier, NotifyLevel.OWNER, f"🟢 [{goal_id}] starting work on \"{goal.objective}\"", summarize=summarize)
+        return Outcome.SLEPT
+
+    if step["action"] == "ask":
+        transcript.append({"question": step["question"], "recommended": step.get("recommended", "")})
+        store.write_grill(goal_id, transcript)
+        store.append_log(goal_id, f"grill Q{len(transcript)}: {step['question']}")
+        rec = f"\n(suggested: {step['recommended']})" if step.get("recommended") else ""
+        await _notify(
+            notifier, NotifyLevel.OWNER,
+            f"❓ [{goal_id}] {step['question']}{rec}", summarize=summarize,
+        )
+        return Outcome.ASKED
+
+    # action == "done" → spec agreed; present the plan for approval.
+    store.write_spec(goal_id, step["spec"])
+    store.save_status(goal_id, replace(status, lifecycle="plan_review", phase="idle", next="awaiting plan approval"))
+    store.append_log(goal_id, "grill done → spec written → plan_review")
+    await _notify(
+        notifier, NotifyLevel.OWNER,
+        f"📋 [{goal_id}] Here's the plan for \"{goal.objective}\":\n\n{step['spec']}\n\nReply to approve and I'll start.",
+        summarize=summarize,
+    )
+    return Outcome.ASKED
 
 
 async def _dispatch_action(
@@ -530,6 +612,7 @@ async def tick_all(
     verify_done: bool = VERIFY_DONE,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
+    grill_caller: "ClaudeCaller | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others."""
     outcomes: dict[str, Outcome] = {}
@@ -540,7 +623,7 @@ async def tick_all(
                 planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                 notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
                 eval_every=eval_every, verify_done=verify_done,
-                summary_caller=summary_caller, merger=merger,
+                summary_caller=summary_caller, merger=merger, grill_caller=grill_caller,
             )
         except Exception:  # noqa: BLE001 — isolate per-goal blast radius
             store.append_log(goal_id, "tick crashed (uncaught)")

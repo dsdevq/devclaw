@@ -402,6 +402,23 @@ async def steer_goal(goal_id: str, message: str) -> str:
 
 
 @mcp.tool
+async def answer_goal(goal_id: str, answer: str) -> str:
+    """Deliver an owner's reply to a goal that is waiting on them. This is the
+    Telegram answer channel: when a goal is in its 'grilling' phase it asks scope
+    questions one at a time; route the owner's reply here to answer the open
+    question (the goal then asks the next one or finalizes the spec). When a goal
+    is in 'plan_review', any reply here approves the plan and execution begins.
+    The goal is poked to advance immediately. No-op (with an explanatory result)
+    if the goal isn't currently awaiting input."""
+    if not goal_id or not answer:
+        raise ToolError("answer_goal requires goal_id and answer")
+    try:
+        return json.dumps(goals.answer_goal(goal_id, answer), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
 async def evaluate_goal(goal_id: str) -> str:
     """Force a direction evaluation NOW and return the verdict + rationale. The
     evaluator judges the goal's actual delivered work against done_when (grounded

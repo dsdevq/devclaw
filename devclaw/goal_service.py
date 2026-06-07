@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from . import goal_evaluator, goal_merge, goal_planner, goal_research, goal_summary
+from . import goal_evaluator, goal_grill, goal_merge, goal_planner, goal_research, goal_summary
 from .goal_engine import InProcessEngine
 from .goal_evaluator import ClaudeCaller
 from .goal_models import GoalStatus
@@ -69,6 +69,7 @@ class GoalService:
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
         self._summary_caller = summary_caller
+        self._grill_caller: Optional[ClaudeCaller] = None
         self._notifier: Notifier = notifier or (
             HttpNotifier(self._cfg.notify_url) if self._cfg.notify_url else NullNotifier()
         )
@@ -103,6 +104,15 @@ class GoalService:
         if not goal_merge.AUTOMERGE_ENABLED:
             return None
         return goal_merge.default_merger()
+
+    def _grill(self) -> "Optional[ClaudeCaller]":
+        """The grill cognition for the grilling phase. None unless
+        DEVCLAW_GOAL_GRILL=1 (the Telegram answer channel must be wired first)."""
+        if not goal_grill.GRILL_ENABLED:
+            return None
+        if self._grill_caller is None:
+            self._grill_caller = goal_grill.default_caller()
+        return self._grill_caller
 
     # ---- the heartbeat -----------------------------------------------------
 
@@ -153,7 +163,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(),
+            summary_caller=self._summary(), merger=self._merger(), grill_caller=self._grill(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
@@ -163,7 +173,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(),
+            summary_caller=self._summary(), merger=self._merger(), grill_caller=self._grill(),
         )
         return outcome.value
 
@@ -242,6 +252,27 @@ class GoalService:
             self._goal_store.save_status(goal_id, replace(s, phase="idle"))
         self.poke()
         return {"goal_id": goal_id, "steered": True, "message": message}
+
+    def answer_goal(self, goal_id: str, answer: str) -> dict:
+        """Route an owner's reply (from Telegram) back to a goal awaiting input.
+        In ``grilling`` it answers the open grill question; in ``plan_review`` it
+        approves the plan. The next tick (woken via poke) advances the goal."""
+        if not self._goal_store.exists(goal_id):
+            raise KeyError(goal_id)
+        s = self._goal_store.load_status(goal_id)
+        lifecycle = s.lifecycle or "executing"
+        if lifecycle == "grilling":
+            recorded = self._goal_store.answer_pending(goal_id, answer)
+            self._goal_store.append_log(goal_id, f"grill answer: {answer[:160]}")
+            self.poke()
+            return {"goal_id": goal_id, "routed_to": "grill", "recorded": recorded}
+        if lifecycle == "plan_review":
+            self._goal_store.mark_plan_approved(goal_id)
+            self._goal_store.append_log(goal_id, f"plan approved: {answer[:160]}")
+            self.poke()
+            return {"goal_id": goal_id, "routed_to": "plan_approval", "approved": True}
+        return {"goal_id": goal_id, "routed_to": None,
+                "error": f"goal is not awaiting input (lifecycle={lifecycle})"}
 
     async def evaluate_goal(self, goal_id: str) -> dict:
         """Force a direction evaluation NOW (artifact-grounded) and return the

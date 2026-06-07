@@ -14,6 +14,7 @@ A clock is injected (``now``) so ticks are deterministic under test.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,6 +227,55 @@ class GoalStore:
         """The discovery brief, or '' if the investigating phase hasn't run."""
         path = self._dir(goal_id) / "discovery.md"
         return path.read_text() if path.exists() else ""
+
+    # ---- grilling phase: durable Q&A transcript + the resulting spec --------
+
+    def read_grill(self, goal_id: str) -> list[dict]:
+        """The grill transcript — a list of turns {question, recommended, answer?}.
+        The last turn may lack 'answer' (a question awaiting the owner's reply)."""
+        path = self._dir(goal_id) / "grill.json"
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text())
+            return data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    def write_grill(self, goal_id: str, transcript: list[dict]) -> None:
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "grill.json").write_text(json.dumps(transcript, indent=2))
+
+    def answer_pending(self, goal_id: str, answer: str) -> bool:
+        """Record the owner's reply to the last (pending) grill question. Returns
+        True if there was a pending question to answer, False otherwise."""
+        transcript = self.read_grill(goal_id)
+        if not transcript or "answer" in transcript[-1]:
+            return False
+        transcript[-1]["answer"] = answer
+        self.write_grill(goal_id, transcript)
+        return True
+
+    def write_spec(self, goal_id: str, spec: str) -> None:
+        """Persist the agreed spec (the grill's output) — what to build, what's
+        out, constraints — the durable contract the planner decomposes."""
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        ts = self._now().isoformat(timespec="seconds")
+        (d / "spec.md").write_text(f"# {goal_id} — spec\n\n_agreed {ts}_\n\n{spec.strip()}\n")
+
+    def read_spec(self, goal_id: str) -> str:
+        path = self._dir(goal_id) / "spec.md"
+        return path.read_text() if path.exists() else ""
+
+    def mark_plan_approved(self, goal_id: str) -> None:
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ".plan_approved").write_text(self._now().isoformat(timespec="seconds"))
+
+    def plan_approved(self, goal_id: str) -> bool:
+        return (self._dir(goal_id) / ".plan_approved").exists()
 
     def recent_deliveries(self, goal_id: str, chars: int = 8000) -> str:
         """The tail of deliveries.md (bounded — the evaluator's grounding context)."""
