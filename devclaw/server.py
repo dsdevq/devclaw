@@ -508,6 +508,35 @@ async def health(_request: Request) -> Response:
     return JSONResponse({"ok": True, "name": SERVER_NAME, "version": __version__})
 
 
+@mcp.custom_route("/goals/answer", methods=["POST"])
+async def goals_answer(request: Request) -> Response:
+    """Deterministic reply→goal routing for the dedicated devclaw Telegram channel.
+    The notify-relay bridge POSTs the owner's reply here; we route it to the single
+    goal awaiting input (grilling answers the open question, plan_review approves).
+    No agent, no inference — just the one waiting goal. Auth-guarded by the same
+    bearer middleware as every other route (except /health)."""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "missing text"}, status_code=400)
+    waiting = [g for g in goals.list_goals() if g.get("lifecycle") in ("grilling", "plan_review")]
+    if not waiting:
+        return JSONResponse({"routed_to": None, "reason": "no goal awaiting input"}, status_code=409)
+    if len(waiting) > 1:
+        return JSONResponse(
+            {"routed_to": None, "reason": "multiple goals awaiting", "goals": [g["id"] for g in waiting]},
+            status_code=409,
+        )
+    try:
+        result = goals.answer_goal(waiting[0]["id"], text)
+    except KeyError:
+        return JSONResponse({"error": "goal vanished"}, status_code=409)
+    return JSONResponse(result)
+
+
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard_index(_request: Request) -> Response:
     programs = store.list_programs(limit=50)
