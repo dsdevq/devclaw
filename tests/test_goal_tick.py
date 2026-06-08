@@ -771,3 +771,81 @@ async def test_task_altitude_restores_the_firehose(tmp_path, monkeypatch):
 
     assert out is Outcome.DISPATCHED
     assert any("🚀" in m for m in notifier.sent)
+
+
+# ---- workspace-prep failure: block legibly, never silently loop -------------
+
+
+async def _failing_prepare(workspace_dir: str, repo_url: str | None = None) -> str:
+    """A prep that always fails the way a bad/missing/private repo_url does."""
+    from devclaw.workspace import WorkspaceError
+
+    raise WorkspaceError("clone failed: remote: Repository not found.")
+
+
+async def _tick_prep(store, goal_id, planner, engine, notifier, *, prepare_ws):
+    return await tick_goal(
+        goal_id, store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(), notifier=notifier,
+        notify_url="http://relay", prepare_ws=prepare_ws, eval_every=99,
+    )
+
+
+@pytest.mark.asyncio
+async def test_executing_prep_failure_blocks_with_real_error(tmp_path):
+    """A clone failure on the executing path must BLOCK with the git error as
+    blocked_on (not drop to phase=idle and re-clone forever), and notify the
+    owner — the regression that made a 1-char repo_url typo look like a dead goal."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle"))
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+
+    out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)
+
+    assert out is Outcome.BLOCKED
+    st = store.load_status("g")
+    assert st.phase == "blocked"
+    assert "Repository not found" in (st.blocked_on or "")
+    assert engine.dispatched == []                       # never ran the agent
+    assert any("Repository not found" in m for m in notifier.sent)  # owner heard it
+
+
+@pytest.mark.asyncio
+async def test_investigation_prep_failure_blocks_without_cognition(tmp_path):
+    """On a brand-new outcome goal the investigation prep is the SAME workspace
+    executing needs — a prep failure there blocks immediately (lifecycle pinned to
+    executing so future ticks route through the blocked-guard), spending zero
+    planner tokens."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="new"))
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+
+    out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)
+
+    assert out is Outcome.BLOCKED
+    st = store.load_status("g")
+    assert st.phase == "blocked" and st.lifecycle == "executing"
+    assert "Repository not found" in (st.blocked_on or "")
+    assert planner.calls == 0 and engine.dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_blocked_on_prep_failure_does_not_respam(tmp_path):
+    """After a prep-failure block, a cadence-only tick (no steering) stays idle
+    and silent — one notification, not one per tick. Zero cognition."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle"))
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+
+    await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)
+    sent_after_block = len(notifier.sent)
+
+    planner2 = FakeClaude(ACT)
+    out = await _tick_prep(store, "g", planner2, engine, notifier, prepare_ws=_failing_prepare)
+
+    assert out is Outcome.IDLE
+    assert planner2.calls == 0
+    assert len(notifier.sent) == sent_after_block        # no second ping
