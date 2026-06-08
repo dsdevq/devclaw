@@ -7,25 +7,64 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint:
-    name: Lint (markdown + secrets)
-    runs-on: ubuntu-latest
+  # NB: every job is runs-on: self-hosted. GitHub-hosted runners are blocked by
+  # the account billing-lock ("job was not started because your account is
+  # locked") — anything on ubuntu-latest never starts. The lifekit-vps runner is
+  # the only working compute, same as lifekit-stack's CI.
+  test:
+    name: Tests (pytest)
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # gitleaks needs history
+      # setup-python@v5 can't provision Python on this arm64 Debian runner; use
+      # the system python3 (+ python3-venv from bootstrap) in a throwaway venv.
+      - name: pytest
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet -e '.[dev]'
+          "$RUNNER_TEMP/venv/bin/python" -m pytest -q
 
+  lint:
+    name: Lint (markdown + secrets)
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      # gitleaks via pinned binary (arm64) — exit code is the gate; scans the
+      # working tree for secrets. Avoids the gitleaks-action's license + the
+      # account-lock's artifact-quota SARIF-upload failure.
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # GH Actions Artifact storage is quota-blocked by the account-lock;
-          # the SARIF upload fails and reds the job even with zero leaks.
-          # gitleaks's own exit code is the gate, so disable the upload.
-          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+        run: |
+          VERSION=8.21.2
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_arm64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks dir . --no-banner --redact --exit-code 1
 
       - name: yamllint
         run: |
-          pipx install yamllint
-          yamllint -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' \
+          python3 -m venv "$RUNNER_TEMP/yamllint-venv"
+          "$RUNNER_TEMP/yamllint-venv/bin/pip" install --quiet yamllint
+          "$RUNNER_TEMP/yamllint-venv/bin/yamllint" \
+            -d '{extends: default, rules: {line-length: disable, document-start: disable, truthy: disable}}' \
             .github/workflows/ 2>&1 || true
+
+  deploy:
+    name: Deploy to lifekit-vps
+    needs: test
+    # Only ship a green main. workflow_dispatch gives a manual "redeploy main"
+    # button. PRs never reach the self-hosted runner (test/lint run hosted).
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      || github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    concurrency:
+      group: deploy-lifekit-vps
+      cancel-in-progress: false
+    steps:
+      # No checkout: the runner (user `lifekit`) drives the existing on-box
+      # deploy surface, which git-clones devclaw@main itself at image-build time.
+      - name: deploy.sh (rebuild devclaw@main --no-cache, recreate, verify)
+        run: |
+          cd /srv/lifekit-stack
+          DEVCLAW_REF=main bash scripts/deploy.sh
