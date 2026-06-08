@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,6 +30,22 @@ from .goal_tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
 from .state_store import StateStore
 from .task_queue import TaskQueue
 from .workspace import prepare_workspace
+
+
+_BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")
+
+
+def _bare_verify_cmd_warning(cmd: str) -> Optional[str]:
+    """Return a warning if cmd is a bare tool name (single token, no path separators).
+    A name like 'pytest' or 'python' may not be on PATH inside the sandbox."""
+    stripped = cmd.strip()
+    if stripped and _BARE_TOOL_RE.match(stripped):
+        return (
+            f"verify_cmd {stripped!r} looks like a bare tool name — it may fail if "
+            f"'{stripped}' is not on PATH inside the sandbox. "
+            f"Consider 'python -m {stripped}' or a full path instead."
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -196,7 +213,12 @@ class GoalService:
             self._goal_store.save_status(goal_id, GoalStatus(lifecycle="new"))
         self._goal_store.append_log(goal_id, "goal created")
         self.poke()  # advance it on the next loop turn without waiting a full interval
-        return self.get_goal(goal_id)
+        result = self.get_goal(goal_id)
+        if verify_cmd:
+            warning = _bare_verify_cmd_warning(verify_cmd)
+            if warning:
+                result["warnings"] = [warning]
+        return result
 
     def get_goal(self, goal_id: str) -> dict:
         if not self._goal_store.exists(goal_id):
