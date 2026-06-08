@@ -230,6 +230,32 @@ async def test_planner_blocked_notifies(tmp_path):
     assert any("auth provider" in m for m in notifier.sent)
 
 
+def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
+    """steer_goal must zero actions_dispatched when unblocking so the dispatch
+    cap doesn't re-fire on the very next tick after the human resolves the block."""
+    from devclaw.goal_service import GoalConfig, GoalService
+    from devclaw.state_store import StateStore
+    from devclaw.task_queue import TaskQueue
+
+    goals_dir = tmp_path / "goals"
+    seed_goal(goals_dir, "g")
+    goal_store = _store(goals_dir, Clock())
+    goal_store.save_status("g", GoalStatus(phase="blocked", blocked_on="cap hit", actions_dispatched=5))
+
+    db = StateStore(str(tmp_path / "state.db"))
+    try:
+        cfg = GoalConfig(goals_dir=goals_dir, notify_url="", tick_seconds=900, eval_every=99, verify_done=False)
+        svc = GoalService(TaskQueue(db), db, config=cfg)
+
+        svc.steer_goal("g", "resume with new approach")
+
+        saved = goal_store.load_status("g")
+        assert saved.phase == "idle"
+        assert saved.actions_dispatched == 0
+    finally:
+        db.close()
+
+
 @pytest.mark.asyncio
 async def test_done_goal_is_skipped(tmp_path):
     store = _store(tmp_path, Clock())

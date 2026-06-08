@@ -247,10 +247,11 @@ class GoalService:
             raise KeyError(goal_id)
         self._goal_store.append_steering(goal_id, [message], source="denys")
         self._goal_store.append_log(goal_id, f"steered: {message[:160]}")
-        # Steering unblocks a blocked goal — flip it so the next tick re-plans.
+        # Steering unblocks a blocked goal — flip it to idle and clear the
+        # dispatch counter so the cap doesn't re-trigger on the very next tick.
         s = self._goal_store.load_status(goal_id)
         if s.phase == "blocked":
-            self._goal_store.save_status(goal_id, replace(s, phase="idle"))
+            self._goal_store.save_status(goal_id, replace(s, phase="idle", actions_dispatched=0))
         self.poke()
         return {"goal_id": goal_id, "steered": True, "message": message}
 
