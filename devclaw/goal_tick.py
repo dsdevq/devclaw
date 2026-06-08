@@ -58,6 +58,7 @@ class Outcome(str, Enum):
     BLOCKED = "blocked"
     DONE = "done"
     SKIP_DONE = "skip_done"
+    SKIP_CANCELLED = "skip_cancelled"
     ERROR = "error"
     ASKED = "asked"          # emitted a grill question / plan for approval — awaiting the owner
 
@@ -123,6 +124,8 @@ async def tick_goal(
     status = store.load_status(goal_id)
     if status.phase == "done":
         return Outcome.SKIP_DONE
+    if status.phase == "cancelled":
+        return Outcome.SKIP_CANCELLED
     #: None on a legacy goal → it behaves as "executing" (flat backlog), never
     #: entering the planning front-end. New outcome goals start at "new".
     lifecycle = status.lifecycle or "executing"

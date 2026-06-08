@@ -432,6 +432,21 @@ async def evaluate_goal(goal_id: str) -> str:
         raise ToolError(f"unknown goal_id: {goal_id}")
 
 
+@mcp.tool
+async def cancel_goal(goal_id: str) -> str:
+    """Permanently stop a durable goal. Sets its phase to 'cancelled' (a terminal
+    state — DevClaw will skip it on every future heartbeat) and tears down any
+    in-flight task or program associated with it. Returns a graceful no-op response
+    if the goal is already in a terminal phase (done or cancelled) — safe to call
+    more than once. Use when you no longer want DevClaw to drive a goal."""
+    if not goal_id:
+        raise ToolError("cancel_goal requires goal_id")
+    try:
+        return json.dumps(goals.cancel_goal(goal_id), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
 # ===== build a project from scratch ==========================================
 
 
