@@ -25,7 +25,7 @@ Engine = Literal["devclaw"]
 #: the engine verbs the goal layer can dispatch — a subset of devclaw's task
 #: kinds plus the program decomposer.
 GoalTool = Literal["start_program", "implement_feature", "fix_bug", "review_repository"]
-Phase = Literal["idle", "in_flight", "verifying", "blocked", "done"]
+Phase = Literal["idle", "in_flight", "verifying", "blocked", "done", "cancelled"]
 #: The OUTCOME lifecycle — a goal stated as an outcome grows a planning front-end
 #: (research → align → plan) before it executes, so devclaw behaves like a senior
 #: dev handed an outcome by a non-technical owner. Distinct from ``Phase`` (the

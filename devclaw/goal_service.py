@@ -82,6 +82,7 @@ class GoalService:
     ) -> None:
         self._cfg = config or GoalConfig.from_env()
         self._goal_store = GoalStore(self._cfg.goals_dir)
+        self._queue = queue
         self._engine = InProcessEngine(queue, store)
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
@@ -323,3 +324,27 @@ class GoalService:
             "rationale": ev.rationale, "corrections": ev.corrections,
             "question": ev.question,
         }
+
+    def cancel_goal(self, goal_id: str) -> dict:
+        """Abort a durable goal. Sets phase to 'cancelled' (terminal — skipped on
+        every future tick) and tears down any in-flight task or program. Returns
+        a graceful no-op response if the goal is already in a terminal phase."""
+        if not self._goal_store.exists(goal_id):
+            raise KeyError(goal_id)
+        s = self._goal_store.load_status(goal_id)
+        if s.phase in ("cancelled", "done"):
+            return {
+                "goal_id": goal_id,
+                "cancelled": False,
+                "phase": s.phase,
+                "reason": f"goal is already in terminal phase '{s.phase}'",
+            }
+        if s.in_flight is not None:
+            ref = s.in_flight
+            if ref.ref_kind == "task":
+                self._queue.cancel_task(ref.id)
+            else:
+                self._queue.cancel_program(ref.id)
+        self._goal_store.save_status(goal_id, replace(s, phase="cancelled", in_flight=None))
+        self._goal_store.append_log(goal_id, "goal cancelled")
+        return {"goal_id": goal_id, "cancelled": True, "phase": "cancelled"}
