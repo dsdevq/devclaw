@@ -57,7 +57,10 @@ async def prepare_workspace(workspace_dir: str, repo_url: str | None = None) -> 
     if not (Path(workspace_dir) / ".git").exists():
         if not repo_url:
             raise WorkspaceError(
-                f"{workspace_dir} is not a git repo and the goal has no repo_url to clone"
+                "no repo to work in — this goal has no repo_url and its workspace "
+                f"({workspace_dir}) isn't a git checkout. Set the goal's repo_url to "
+                "the GitHub repo I should clone, or tell me to start a fresh empty "
+                "repo here (I won't `git init` on my own — that's yours to confirm)."
             )
         Path(workspace_dir).parent.mkdir(parents=True, exist_ok=True)
         rc, out = await _run("git", "clone", repo_url, workspace_dir)

@@ -103,6 +103,38 @@ async def _notify(
     await notifier.send(text)
 
 
+async def _block_on_prep_failure(
+    goal_id: str, status: GoalStatus, exc: "WorkspaceError",
+    *, store: GoalStore, notifier: Notifier, summarize: "ClaudeCaller | None",
+) -> Outcome:
+    """A workspace couldn't be prepared — a bad/missing ``repo_url``, a clone
+    that 404s (the repo doesn't exist *or* is private and unreadable — GitHub
+    returns the same "not found" for both), an auth or fetch failure. None of
+    these self-heal on the next tick, so the old behaviour (log it, drop to
+    ``phase=idle``, notify at TASK altitude) made the goal look merely idle while
+    it silently re-tried the same doomed clone every cadence — invisible to the
+    owner, who then can't tell a wedged goal from one with nothing to do.
+
+    Instead: block with the *real* git error as ``blocked_on`` and tell the owner
+    at OWNER altitude. ``lifecycle`` is pinned to ``executing`` so subsequent
+    ticks route through the blocked-guard in :func:`tick_goal` (cadence does not
+    re-poke a blocked goal — only steering does), making this a single, legible
+    notification rather than a per-tick loop. When the owner answers/steers (e.g.
+    fixes the repo_url), the goal unblocks and prep is retried with the fix."""
+    msg = str(exc)
+    store.append_log(goal_id, f"workspace prep failed — blocking for the owner: {msg}")
+    store.save_status(
+        goal_id,
+        replace(status, lifecycle="executing", phase="blocked", blocked_on=msg, in_flight=None, next=""),
+    )
+    await _notify(
+        notifier, NotifyLevel.OWNER,
+        f"🟡 [{goal_id}] I couldn't set up the workspace, so I've paused — {msg}",
+        summarize=summarize,
+    )
+    return Outcome.BLOCKED
+
+
 async def tick_goal(
     goal_id: str,
     *,
@@ -432,14 +464,16 @@ async def _open_investigation(
     """A new outcome goal investigates before it executes: dispatch a read-only
     analysis of the repo as it is today. Its terminal result feeds the discovery
     synthesis (``_resolve_discovery``), not the planner. Research, then act — the
-    senior-dev move. On any prep/dispatch failure, skip straight to executing
-    rather than wedge the goal (investigation is an enhancement, not a gate)."""
+    senior-dev move. A *dispatch* failure skips straight to executing — the
+    investigation is an enhancement, not a gate. A *prep* failure does NOT skip:
+    the workspace it couldn't build is the same one executing needs, so deferring
+    just hides the error one tick longer. Block on it instead (legibly)."""
     try:
         await prepare_ws(goal.workspace_dir, goal.repo_url)
     except WorkspaceError as exc:
-        store.append_log(goal_id, f"investigation prep failed ({exc}) — skipping to executing")
-        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
-        return Outcome.SLEPT
+        return await _block_on_prep_failure(
+            goal_id, status, exc, store=store, notifier=notifier, summarize=summarize,
+        )
     review = Action(
         engine="devclaw", tool="review_repository",
         goal=(
@@ -577,10 +611,9 @@ async def _dispatch_action(
     try:
         await prepare_ws(goal.workspace_dir, goal.repo_url)
     except WorkspaceError as exc:
-        store.append_log(goal_id, f"workspace prep failed: {exc}")
-        store.save_status(goal_id, replace(base, phase="idle", next=action.goal))
-        await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] workspace prep failed: {exc}")
-        return Outcome.ERROR
+        return await _block_on_prep_failure(
+            goal_id, base, exc, store=store, notifier=notifier, summarize=summarize,
+        )
     try:
         ref = await engine.dispatch(action, goal, notify_url)
     except Exception as exc:  # noqa: BLE001 — record + notify, retry next cadence
