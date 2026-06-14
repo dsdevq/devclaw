@@ -3,6 +3,7 @@
 Tools (every task/program submission is async — returns an id immediately and
 runs in the background):
   - implement_feature / fix_bug / review_repository / onboard -> {task_id}
+  - setup_cicd(workspace_dir)                                 -> {status, detail}  (sync)
   - start_program(workspace_dir, goal)              -> {program_id}  (planner decomposes into a task DAG)
   - get_status(task_id)            / list_tasks(status?, kind?, limit?)
   - get_program(program_id)        / list_programs(limit?)
@@ -22,9 +23,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
+import textwrap
 import urllib.parse
 from html import escape as _html_escape
+from pathlib import Path
 from typing import Annotated, Literal, Optional
 
 from fastmcp import FastMCP
@@ -175,6 +179,178 @@ async def review_repository(
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
+def _detect_stack(workspace: Path) -> str:
+    """Return a coarse stack label used to pick a CI template."""
+    if any(workspace.glob("**/*.csproj")):
+        return "dotnet"
+    if (workspace / "pyproject.toml").exists() or (workspace / "setup.py").exists():
+        return "python"
+    if (workspace / "package.json").exists():
+        return "node"
+    if (workspace / "go.mod").exists():
+        return "go"
+    return "generic"
+
+
+_CI_TEMPLATES: dict[str, str] = {
+    "dotnet": textwrap.dedent("""\
+        name: CI
+        on:
+          push:
+            branches: [main]
+          pull_request:
+          workflow_dispatch:
+        jobs:
+          build:
+            runs-on: self-hosted
+            concurrency:
+              group: ci-${{ github.ref }}
+              cancel-in-progress: true
+            steps:
+              - uses: actions/checkout@v4
+              - name: Build
+                run: dotnet build --configuration Release
+              - name: Test
+                run: dotnet test --configuration Release --no-build
+        """),
+    "python": textwrap.dedent("""\
+        name: CI
+        on:
+          push:
+            branches: [main]
+          pull_request:
+          workflow_dispatch:
+        jobs:
+          build:
+            runs-on: self-hosted
+            concurrency:
+              group: ci-${{ github.ref }}
+              cancel-in-progress: true
+            steps:
+              - uses: actions/checkout@v4
+              - name: Install
+                run: pip install -e ".[dev]" --quiet
+              - name: Test
+                run: pytest
+        """),
+    "node": textwrap.dedent("""\
+        name: CI
+        on:
+          push:
+            branches: [main]
+          pull_request:
+          workflow_dispatch:
+        jobs:
+          build:
+            runs-on: self-hosted
+            concurrency:
+              group: ci-${{ github.ref }}
+              cancel-in-progress: true
+            steps:
+              - uses: actions/checkout@v4
+              - name: Install
+                run: npm ci
+              - name: Build
+                run: npm run build --if-present
+              - name: Test
+                run: npm test --if-present
+        """),
+    "generic": textwrap.dedent("""\
+        name: CI
+        on:
+          push:
+            branches: [main]
+          pull_request:
+          workflow_dispatch:
+        jobs:
+          build:
+            runs-on: self-hosted
+            concurrency:
+              group: ci-${{ github.ref }}
+              cancel-in-progress: true
+            steps:
+              - uses: actions/checkout@v4
+              - name: Smoke check
+                run: echo "CI placeholder — replace with real build/test steps"
+        """),
+}
+# go uses the generic template for now
+_CI_TEMPLATES["go"] = _CI_TEMPLATES["generic"].replace(
+    "CI placeholder — replace with real build/test steps",
+    "go build ./... && go test ./...",
+)
+
+
+def _run(cmd: list[str], cwd: str) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def _cicd_setup_sync(workspace_dir: str) -> dict:
+    """Pure-mechanism CI/CD bootstrap. No cognition, no OpenHands.
+
+    Returns a dict with keys: status (present|created|error), detail (str).
+    """
+    ws = Path(workspace_dir)
+    workflows_dir = ws / ".github" / "workflows"
+
+    if workflows_dir.exists() and any(workflows_dir.glob("*.yml")):
+        existing = [p.name for p in workflows_dir.glob("*.yml")]
+        return {"status": "present", "detail": f"CI already configured: {existing}"}
+
+    # Detect stack and pick template
+    stack = _detect_stack(ws)
+    template = _CI_TEMPLATES[stack]
+
+    # Write the workflow
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    ci_path = workflows_dir / "ci.yml"
+    ci_path.write_text(template)
+
+    # Commit and push
+    r = _run(["git", "add", ".github/workflows/ci.yml"], workspace_dir)
+    if r.returncode != 0:
+        return {"status": "error", "detail": f"git add failed: {r.stderr.strip()}"}
+
+    r = _run(
+        ["git", "commit", "-m", f"ci: add self-hosted {stack} CI workflow\n\nGenerated by devclaw setup_cicd."],
+        workspace_dir,
+    )
+    if r.returncode != 0:
+        return {"status": "error", "detail": f"git commit failed: {r.stderr.strip()}"}
+
+    r = _run(["git", "push"], workspace_dir)
+    if r.returncode != 0:
+        return {"status": "error", "detail": f"git push failed: {r.stderr.strip()}"}
+
+    return {
+        "status": "created",
+        "detail": f"Created .github/workflows/ci.yml ({stack} template) and pushed.",
+        "stack": stack,
+        "note": (
+            "Workflow uses 'runs-on: self-hosted'. Register a GitHub Actions runner "
+            "for this repo on the VPS to activate it."
+        ),
+    }
+
+
+@mcp.tool
+async def setup_cicd(workspace_dir: str) -> str:
+    """Check whether a repository has GitHub Actions CI configured. If not,
+    detect the tech stack (dotnet / python / node / go / generic), commit a
+    standard self-hosted-runner workflow to .github/workflows/ci.yml, and push
+    it. Safe to call multiple times — exits early if CI already exists.
+
+    Note: the workflow targets 'runs-on: self-hosted'. A GitHub Actions runner
+    must be registered for the repo on the VPS to pick up jobs. This tool only
+    creates the workflow file; runner registration is a separate VPS-side step."""
+    if not workspace_dir:
+        raise ToolError("setup_cicd requires workspace_dir")
+    result = await asyncio.get_event_loop().run_in_executor(
+        None, _cicd_setup_sync, workspace_dir
+    )
+    return json.dumps(result, indent=2)
+
+
 @mcp.tool
 async def onboard(
     workspace_dir: str, focus: str = "", notify_url: Optional[str] = None
@@ -192,16 +368,24 @@ async def onboard(
     already has an AGENTS.md, the agent validates it against the real repo and
     keeps what's still accurate — only correcting what's wrong or missing —
     rather than clobbering hand-written project memory. Returns task_id
-    immediately; same optional notify_url as implement_feature."""
+    immediately; same optional notify_url as implement_feature.
+
+    Also automatically runs setup_cicd: if the repo has no GitHub Actions
+    workflows, a standard self-hosted-runner CI file is committed and pushed
+    before the analysis task starts. The cicd_setup field in the response
+    reports what happened (present | created | error)."""
     if not workspace_dir:
         raise ToolError("onboard requires workspace_dir")
+    cicd = await asyncio.get_event_loop().run_in_executor(
+        None, _cicd_setup_sync, workspace_dir
+    )
     task_id = queue.submit(
         kind="onboard",
         workspace_dir=workspace_dir,
         goal=focus or "general onboarding",
         notify_url=notify_url,
     )
-    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
+    return json.dumps({"task_id": task_id, "status": "pending", "cicd_setup": cicd}, indent=2)
 
 
 @mcp.tool
