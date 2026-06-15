@@ -542,7 +542,7 @@ async def test_plan_review_waits_then_approval_starts_executing(tmp_path):
 
     store.mark_plan_approved("g")
     out = await _tick(store, "g", planner, evaluator, engine, notifier)
-    assert out is Outcome.SLEPT
+    assert out is Outcome.ADVANCED
     assert store.load_status("g").lifecycle == "executing"
     assert any("approved" in m.lower() for m in notifier.sent)
 
@@ -701,7 +701,7 @@ async def test_discovery_resolves_writes_brief_and_advances_to_executing(tmp_pat
 
     out = await _tick(store, "g", planner, researcher, engine, notifier)
 
-    assert out is Outcome.SLEPT
+    assert out is Outcome.ADVANCED
     assert researcher.calls == 1                              # the brief was synthesized
     assert "3 endpoints" in researcher.last_prompt           # repo analysis fed to synthesis
     assert planner.calls == 0
@@ -727,7 +727,7 @@ async def test_discovery_synthesis_failure_still_advances(tmp_path):
 
     out = await _tick(store, "g", planner, researcher, engine, notifier)
 
-    assert out is Outcome.SLEPT
+    assert out is Outcome.ADVANCED
     assert store.load_status("g").lifecycle == "executing"   # not stuck
     assert notifier.sent                                     # owner still told
 
