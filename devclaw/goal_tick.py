@@ -55,6 +55,7 @@ class Outcome(str, Enum):
     DISPATCHED = "dispatched"
     VERIFYING = "verifying"  # done-gate review dispatched
     SLEPT = "slept"
+    ADVANCED = "advanced"    # lifecycle transitioned without dispatching a task; re-tick immediately
     BLOCKED = "blocked"
     DONE = "done"
     SKIP_DONE = "skip_done"
@@ -255,7 +256,7 @@ async def tick_goal(
             store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle", next="plan approved → executing"))
             store.append_log(goal_id, "plan approved → executing")
             await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] plan approved — starting work now", summarize=summary_caller)
-            return Outcome.SLEPT
+            return Outcome.ADVANCED
         # waiting for approval → zero tokens
         store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
         return Outcome.IDLE
@@ -540,7 +541,7 @@ async def _resolve_discovery(
         if synth_ok else f"🔍 [{goal_id}] starting work on \"{goal.objective}\""
     )
     await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summarize)
-    return Outcome.SLEPT
+    return Outcome.ADVANCED
 
 
 async def _run_grill(

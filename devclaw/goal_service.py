@@ -171,7 +171,13 @@ class GoalService:
                 pass
             self._wake.clear()
             try:
-                await self.tick_all()
+                outcomes = await self.tick_all()
+                # A lifecycle transition (discovery→executing, plan_review→executing)
+                # returns ADVANCED to signal "something changed but no task was
+                # dispatched yet." Re-poke immediately so the next planning tick
+                # starts without waiting the full 900s heartbeat interval.
+                if any(v == "advanced" for v in outcomes.values()):
+                    self.poke()
             except Exception as exc:  # noqa: BLE001 — a tick crash must not kill the loop
                 sys.stderr.write(f"goal-layer: tick crashed: {exc}\n")
 
