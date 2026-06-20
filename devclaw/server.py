@@ -565,6 +565,36 @@ async def get_goal(goal_id: str) -> str:
 
 
 @mcp.tool
+async def tail_goal(
+    goal_id: str,
+    log_lines: int = 40,
+    deliveries_chars: int = 6000,
+    event_limit: int = 30,
+) -> str:
+    """Watch a goal run — the deep, read-only observability surface. Beyond
+    get_goal's phase/direction it returns the grounded deliveries tail (what each
+    action actually shipped: agent summary + gate verdict + PR), the
+    investigating/grilling artifacts (discovery brief + agreed spec), and the tail
+    of the LIVE event stream from whatever task is in flight — so you can see the
+    engineer acting in near real time without SSHing to the box. Everything is
+    bounded; call repeatedly to follow progress."""
+    if not goal_id:
+        raise ToolError("tail_goal requires goal_id")
+    try:
+        return json.dumps(
+            goals.tail_goal(
+                goal_id,
+                log_lines=log_lines,
+                deliveries_chars=deliveries_chars,
+                event_limit=event_limit,
+            ),
+            indent=2,
+        )
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
 async def list_goals() -> str:
     """List all durable goals with their phase + latest direction verdict."""
     return json.dumps(goals.list_goals(), indent=2)

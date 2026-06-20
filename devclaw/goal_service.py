@@ -83,6 +83,7 @@ class GoalService:
         self._cfg = config or GoalConfig.from_env()
         self._goal_store = GoalStore(self._cfg.goals_dir)
         self._queue = queue
+        self._store = store  # task/event store — read by tail_goal for live events
         self._engine = InProcessEngine(queue, store)
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
@@ -254,6 +255,67 @@ class GoalService:
                 if s.last_eval_verdict else None
             ),
             "recent_log": self._goal_store.recent_log(goal_id, n=15),
+        }
+
+    def tail_goal(
+        self,
+        goal_id: str,
+        *,
+        log_lines: int = 40,
+        deliveries_chars: int = 6000,
+        event_limit: int = 30,
+    ) -> dict:
+        """The 'watch it run' surface — richer than get_goal, no SSH needed. On top
+        of get_goal's phase/direction/log it returns the grounded deliveries tail
+        (what each action actually shipped), the investigating/grilling artifacts
+        (discovery brief + agreed spec), and the tail of the LIVE event stream from
+        whatever task/program is in flight (so you can see the agent acting in near
+        real time). Everything is bounded — read-only, never mutates the goal."""
+        if not self._goal_store.exists(goal_id):
+            raise KeyError(goal_id)
+        g = self._goal_store.load_goal(goal_id)
+        s = self._goal_store.load_status(goal_id)
+
+        live_events: list[dict] = []
+        if s.in_flight is not None:
+            ref = s.in_flight
+            kwargs = (
+                {"task_id": ref.id} if ref.ref_kind == "task" else {"program_id": ref.id}
+            )
+            # list_events is ASC + LIMIT (first N); pull a wide window and tail it
+            # in Python so we get the MOST RECENT events of a long-running task.
+            evs = self._store.list_events(limit=10000, **kwargs)
+            for e in evs[-event_limit:]:
+                preview = (e.payload_json or "")[:200]
+                live_events.append(
+                    {"type": e.type, "source": e.source, "ts": e.ts, "preview": preview}
+                )
+
+        return {
+            "id": g.id,
+            "objective": g.objective,
+            "done_when": g.done_when,
+            "phase": s.phase,
+            "lifecycle": s.lifecycle or "executing",
+            "next": s.next,
+            "blocked_on": s.blocked_on,
+            "actions_dispatched": s.actions_dispatched,
+            "in_flight": (
+                {"tool": s.in_flight.tool, "id": s.in_flight.id,
+                 "ref_kind": s.in_flight.ref_kind,
+                 "is_done_check": s.in_flight.is_done_check}
+                if s.in_flight else None
+            ),
+            "direction": (
+                {"verdict": s.last_eval_verdict, "at": s.last_eval_at,
+                 "note": s.last_eval_note}
+                if s.last_eval_verdict else None
+            ),
+            "recent_log": self._goal_store.recent_log(goal_id, n=log_lines),
+            "deliveries": self._goal_store.recent_deliveries(goal_id, chars=deliveries_chars),
+            "discovery": self._goal_store.read_discovery(goal_id),
+            "spec": self._goal_store.read_spec(goal_id),
+            "live_events": live_events,
         }
 
     def list_goals(self) -> list[dict]:
