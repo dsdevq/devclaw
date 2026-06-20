@@ -73,6 +73,19 @@ class InProcessEngine:
             return self._poll_program(ref.id)
         return self._poll_task(ref.id)
 
+    # ---- shared quota pause (same flag the task queue honours) --------------
+    # The OAuth quota is account-wide, so the goal heartbeat and the task queue
+    # pause as one. These delegate to the single StateStore flag.
+
+    def global_pause(self) -> tuple[int, str]:
+        return self._store.global_pause()
+
+    def set_global_pause(self, until_ms: int, reason: str) -> None:
+        self._store.set_global_pause(until_ms, reason)
+
+    def clear_global_pause(self) -> None:
+        self._store.clear_global_pause()
+
     # ---- internals ---------------------------------------------------------
 
     def _poll_task(self, task_id: str) -> PollResult:

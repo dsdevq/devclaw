@@ -41,6 +41,7 @@ import httpx
 
 from .delivery import deliver_change
 from .engine import Engine, EngineEvent, EngineRequest
+from .limits import classify_failure, pause_seconds
 from .planner import PlannedTask, PlannerError, plan_goal
 from .sandcastle_runner import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
@@ -65,6 +66,10 @@ TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "1800"))
 #: self-correct (a fix that didn't fully land, a transient error). 0 disables.
 #: NOT applied to timeouts — a stuck run would likely just hang again.
 TASK_MAX_RETRIES = int(os.environ.get("DEVCLAW_MAX_RETRIES", "1"))
+
+#: _run_and_settle returns this when a task was paused for a quota limit (not
+#: settled): the task is back to 'pending' and the global pause holds dispatch.
+_PAUSED = object()
 
 PlannerFn = Callable[[str, str], Awaitable[list[PlannedTask]]]
 #: the execution engine — orchestration depends on this seam, not on OpenHands
@@ -305,6 +310,15 @@ class TaskQueue:
         and atomic (no awaits between reading counts and claiming), so concurrent
         callers can't over-launch; ``claim_pending`` is the final guard. Returns
         fast when there's no work (cheap-idle guard)."""
+        # Global quota pause: a usage/rate limit is account-wide, so hold ALL
+        # dispatch until it lifts. The tick loop calls _pump every TICK_SECONDS,
+        # so dispatch auto-resumes within one tick of the pause expiring.
+        until, reason = self._store.global_pause()
+        if until:
+            if _now_ms() < until:
+                return
+            self._store.clear_global_pause()
+            sys.stderr.write(f"task-queue: quota pause expired ({reason[:80]}) — resuming\n")
         if not self._store.has_active_work():
             return
         running = self._store.count_running()
@@ -429,6 +443,12 @@ class TaskQueue:
         success = await self._run_and_settle(
             task_id, kind, workspace_dir, goal, defer_done=deliver
         )
+        if success is _PAUSED:
+            # Paused for a quota limit — task is back to 'pending', global pause
+            # holds dispatch. Don't deliver/notify/settle; the gated _pump will
+            # redispatch it (fresh attempts) once the pause expires.
+            self._pump()
+            return
         if program_id is None:
             if deliver and success is not None:
                 # Gate passed; the task is still 'running'. Turn the change into a
@@ -591,6 +611,9 @@ class TaskQueue:
             else:
                 if result.get("status") != "ok":
                     last_failure = result.get("error", "unknown error")
+                    if result.get("status") == "rate_limited" and result.get("retry_after"):
+                        # the engineer parsed an explicit reset hint — prefer it
+                        last_failure = f"rate limit; retry-after: {result['retry_after']}s"
                 else:
                     # "done" means the verify gate passed, not that the agent said so.
                     verify = result.get("verify")
@@ -602,6 +625,21 @@ class TaskQueue:
                     else:
                         self._store.mark_done(task_id, json.dumps(result))
                         return None
+            # Quota guard: a usage/rate limit must NOT be retried-now (that burns
+            # the remaining quota on the same doomed call). Pause ALL dispatch and
+            # requeue this task; the tick loop auto-resumes when the pause expires.
+            cls = classify_failure(last_failure)
+            if cls.is_pausing:
+                backoff = pause_seconds(cls.retry_after_s)
+                self._store.set_global_pause(
+                    _now_ms() + backoff * 1000, f"{cls.kind.value}: {last_failure[:160]}"
+                )
+                self._store.requeue_task(task_id)
+                sys.stderr.write(
+                    f"task-queue: task {task_id} hit {cls.kind.value} — pausing dispatch "
+                    f"~{backoff}s, requeued (not failed)\n"
+                )
+                return _PAUSED
             if attempt < attempts - 1:
                 sys.stderr.write(
                     f"task-queue: task {task_id} attempt {attempt + 1}/{attempts} failed; "
