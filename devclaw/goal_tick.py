@@ -37,6 +37,8 @@ from .goal_models import Action, EvalResult, Goal, GoalStatus
 from .goal_notify import Notifier
 from .goal_planner import ClaudeCaller
 from .goal_store import GoalStore
+from .limits import classify_failure, pause_seconds
+from .state_store import _now_ms
 from .workspace import WorkspaceError, prepare_workspace
 
 #: (workspace_dir, repo_url) -> default branch. Injected so tests pass a no-op.
@@ -61,6 +63,7 @@ class Outcome(str, Enum):
     SKIP_DONE = "skip_done"
     SKIP_CANCELLED = "skip_cancelled"
     ERROR = "error"
+    RATE_LIMITED = "rate_limited"  # paused on a usage/quota limit — 0 tokens, auto-resumes
     ASKED = "asked"          # emitted a grill question / plan for approval — awaiting the owner
 
 
@@ -293,6 +296,12 @@ async def tick_goal(
             claude_caller=planner_caller, discovery=store.read_discovery(goal_id),
         )
     except _planner.GoalPlannerError as exc:
+        # A usage/rate limit reaching the PLANNER must pause the layer, not be
+        # logged as a plan error and retried next tick (which re-burns the quota).
+        paused = _maybe_pause(engine, store, goal_id, str(exc))
+        if paused is not None:
+            store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
+            return paused
         store.append_log(goal_id, f"plan error: {exc}")
         store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] plan step failed: {exc}")
@@ -652,8 +661,19 @@ async def tick_all(
     merger: "_merge.Merger | None" = None,
     grill_caller: "ClaudeCaller | None" = None,
 ) -> dict[str, Outcome]:
-    """Tick every goal. One goal's failure never stops the others."""
+    """Tick every goal. One goal's failure never stops the others, and a usage
+    limit pauses the whole layer (0 tokens) rather than crashing per-goal."""
     outcomes: dict[str, Outcome] = {}
+
+    # Unified quota pause: the OAuth quota is account-wide, so if anything (a task
+    # or earlier goal cognition) paused dispatch, skip ALL goal cognition until it
+    # lifts — zero tokens while paused. Auto-clear + resume once it expires.
+    until, reason = _engine_pause(engine)
+    if until:
+        if _now_ms() < until:
+            return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
+        _engine_clear_pause(engine)
+
     for goal_id in store.list_goal_ids():
         try:
             outcomes[goal_id] = await tick_goal(
@@ -663,7 +683,40 @@ async def tick_all(
                 eval_every=eval_every, verify_done=verify_done,
                 summary_caller=summary_caller, merger=merger, grill_caller=grill_caller,
             )
-        except Exception:  # noqa: BLE001 — isolate per-goal blast radius
-            store.append_log(goal_id, "tick crashed (uncaught)")
-            outcomes[goal_id] = Outcome.ERROR
+        except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
+            # the goal's OWN cognition (claude --print) hitting a limit pauses the
+            # whole layer instead of crash-looping + burning quota; anything else is
+            # logged with its real cause (never a blind 'crashed') and isolated.
+            paused = _maybe_pause(engine, store, goal_id, str(exc))
+            if paused is not None:
+                outcomes[goal_id] = paused
+            else:
+                store.append_log(goal_id, f"tick error (isolated): {str(exc)[:160]}")
+                outcomes[goal_id] = Outcome.ERROR
     return outcomes
+
+
+def _engine_pause(engine: GoalEngine) -> tuple[int, str]:
+    """Read the shared quota pause via the engine, if it exposes one (the
+    in-process engine does; test doubles may not → treated as no pause)."""
+    fn = getattr(engine, "global_pause", None)
+    return fn() if callable(fn) else (0, "")
+
+
+def _engine_clear_pause(engine: GoalEngine) -> None:
+    fn = getattr(engine, "clear_global_pause", None)
+    if callable(fn):
+        fn()
+
+
+def _maybe_pause(engine: GoalEngine, store: GoalStore, goal_id: str, err: str) -> "Outcome | None":
+    """If ``err`` is a usage/rate-limit, set the shared quota pause and return
+    Outcome.RATE_LIMITED; otherwise None (the caller handles it as a real error).
+    Centralizes the goal-side quota guard so every cognition call can use it."""
+    cls = classify_failure(err)
+    if not (cls.is_pausing and hasattr(engine, "set_global_pause")):
+        return None
+    backoff = pause_seconds(cls.retry_after_s)
+    engine.set_global_pause(_now_ms() + backoff * 1000, f"{cls.kind.value} (goal cognition)")
+    store.append_log(goal_id, f"paused — {cls.kind.value}; resuming in ~{backoff}s")
+    return Outcome.RATE_LIMITED

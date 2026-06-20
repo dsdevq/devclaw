@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw import task_queue
+from devclaw import limits, task_queue
 from devclaw.engine import EngineRequest
 from devclaw.state_store import StateStore, _now_ms
 from devclaw.task_queue import TaskQueue
@@ -94,7 +94,7 @@ async def test_resumes_after_pause_expires(store, monkeypatch):
 
 async def test_retry_after_hint_caps_to_max(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
-    monkeypatch.setattr(task_queue, "RATE_LIMIT_MAX_PAUSE_S", 60)
+    monkeypatch.setattr(limits, "RATE_LIMIT_MAX_PAUSE_S", 60)
 
     async def rl(req: EngineRequest):
         return {"status": "error", "error": "usage limit — try again in 10 hours"}

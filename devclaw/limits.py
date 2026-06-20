@@ -23,9 +23,23 @@ reset hint; otherwise None and the caller applies a default backoff.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from enum import Enum
+
+# Quota-pause policy (shared by the task queue and the goal heartbeat so both
+# layers pause as one). When a usage/rate limit gives no reset hint, pause this
+# long before re-probing; cap any stated hint to MAX so a weekly cap re-probes
+# hourly rather than sleeping for days.
+RATE_LIMIT_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_PAUSE_S", "1800"))
+RATE_LIMIT_MAX_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_MAX_PAUSE_S", "3600"))
+
+
+def pause_seconds(retry_after_s: int | None) -> int:
+    """The backoff to use for a pausing failure: the stated hint (capped) or the
+    default. Centralizes the policy so task + goal layers agree."""
+    return min(retry_after_s or RATE_LIMIT_PAUSE_S, RATE_LIMIT_MAX_PAUSE_S)
 
 
 class FailureKind(str, Enum):

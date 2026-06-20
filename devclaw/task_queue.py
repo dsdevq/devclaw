@@ -41,7 +41,7 @@ import httpx
 
 from .delivery import deliver_change
 from .engine import Engine, EngineEvent, EngineRequest
-from .limits import classify_failure
+from .limits import classify_failure, pause_seconds
 from .planner import PlannedTask, PlannerError, plan_goal
 from .sandcastle_runner import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
@@ -66,12 +66,6 @@ TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "1800"))
 #: self-correct (a fix that didn't fully land, a transient error). 0 disables.
 #: NOT applied to timeouts — a stuck run would likely just hang again.
 TASK_MAX_RETRIES = int(os.environ.get("DEVCLAW_MAX_RETRIES", "1"))
-# Quota-pause backoff: when a usage/rate limit is hit and the provider gives no
-# reset hint, pause this long before probing again; cap any stated hint to MAX so
-# we re-probe at least this often (a weekly cap reports days, but one cheap probe
-# per hour is fine and resumes promptly once it actually resets).
-RATE_LIMIT_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_PAUSE_S", "1800"))
-RATE_LIMIT_MAX_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_MAX_PAUSE_S", "3600"))
 
 #: _run_and_settle returns this when a task was paused for a quota limit (not
 #: settled): the task is back to 'pending' and the global pause holds dispatch.
@@ -636,7 +630,7 @@ class TaskQueue:
             # requeue this task; the tick loop auto-resumes when the pause expires.
             cls = classify_failure(last_failure)
             if cls.is_pausing:
-                backoff = min(cls.retry_after_s or RATE_LIMIT_PAUSE_S, RATE_LIMIT_MAX_PAUSE_S)
+                backoff = pause_seconds(cls.retry_after_s)
                 self._store.set_global_pause(
                     _now_ms() + backoff * 1000, f"{cls.kind.value}: {last_failure[:160]}"
                 )
