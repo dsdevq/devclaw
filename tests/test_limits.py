@@ -15,6 +15,9 @@ from devclaw.limits import FailureKind, classify_failure, _parse_retry_after
     ("You've reached your usage limit for this week.", FailureKind.QUOTA),
     ("rate_limit_error: This request would exceed your plan limit", FailureKind.QUOTA),
     ("insufficient_quota", FailureKind.QUOTA),
+    # the REAL Claude Code usage-cap wording observed in the dogfood:
+    ("Internal error: You're out of extra usage · resets 10pm (UTC)", FailureKind.QUOTA),
+    ("Conversation run failed: Internal error: You're out of extra usage · resets 10pm (UTC)", FailureKind.QUOTA),
     # --- RATE_LIMIT (short cap / 429) ---
     ("API Error: 429 Too Many Requests", FailureKind.RATE_LIMIT),
     ("rate limit exceeded, slow down", FailureKind.RATE_LIMIT),

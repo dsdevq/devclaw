@@ -74,8 +74,11 @@ _AUTH = re.compile(
     re.IGNORECASE,
 )
 # QUOTA: the longer "you're out for a while" caps (Claude Pro/Max usage limits).
+# NOTE: "out of (extra )?usage" is the REAL Claude Code wording observed live —
+# "Internal error: You're out of extra usage · resets 10pm (UTC)" — which the
+# "usage limit"/"quota" patterns alone missed (dogfood finding 2026-06-20).
 _QUOTA = re.compile(
-    r"usage limit|weekly limit|quota|"
+    r"usage limit|weekly limit|quota|out of (extra )?usage|ran out of \w*\s*usage|"
     r"limit reached|reached your (usage|plan) limit|you'?ve reached|"
     r"plan limit|insufficient_quota|credit balance",
     re.IGNORECASE,
