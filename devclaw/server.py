@@ -38,6 +38,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__
+from . import repo as _repo
 from .goal_service import GoalService
 from .project_service import ProjectService
 from .project_store import ProjectStore
@@ -662,6 +663,29 @@ async def cancel_goal(goal_id: str) -> str:
 
 
 # ===== build a project from scratch ==========================================
+
+
+@mcp.tool
+async def create_repo(
+    name: str,
+    private: bool = True,
+    description: str = "",
+) -> str:
+    """Create a fresh GitHub repo under the configured account so a from-scratch
+    goal has somewhere to live. Returns {created, existed, repo, clone_url}. The
+    repo is seeded with a README (initial commit + a 'main' default branch) so it
+    can be cloned and PR'd against immediately. Idempotent: if the name already
+    exists it returns that repo instead of failing. Feed the returned clone_url
+    into create_goal(repo_url=...). Auth is gh's own login (repo write access)."""
+    if not name:
+        raise ToolError("create_repo requires a name")
+    try:
+        return json.dumps(
+            await _repo.create_repo(name, private=private, description=description),
+            indent=2,
+        )
+    except _repo.RepoError as err:
+        raise ToolError(str(err))
 
 
 @mcp.tool
