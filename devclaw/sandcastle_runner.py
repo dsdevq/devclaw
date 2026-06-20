@@ -42,6 +42,13 @@ DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
 # `acp_model` (Claude ACP selects it via session _meta). Must be a full model id,
 # not an alias. Empty → the ACP server's default.
 EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
+# Per-sandbox resource caps. The task queue bounds the NUMBER of concurrent
+# builds (DEVCLAW_MAX_CONCURRENT), but without a per-container memory ceiling N
+# parallel builds can still OOM a small VPS. --memory-swap == --memory disables
+# swap growth (a hard ceiling). Generous by default (builds run pip/compilers +
+# claude); tighten per host via env.
+SANDBOX_MEMORY = os.environ.get("DEVCLAW_SANDBOX_MEMORY", "2g")
+SANDBOX_CPUS = os.environ.get("DEVCLAW_SANDBOX_CPUS", "2.0")
 # Container-side mount targets. Match the Dockerfile's expectations.
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
@@ -160,6 +167,9 @@ def _build_docker_args(
         container_name,
         "--network",
         "host",  # claude OAuth refresh needs egress; tighten later via allowlist.
+        # Per-build resource ceiling so N concurrent sandboxes can't OOM the VPS.
+        "--memory", SANDBOX_MEMORY, "--memory-swap", SANDBOX_MEMORY,
+        "--cpus", SANDBOX_CPUS,
         "-v",
         f"{host_bind_path}:{CONTAINER_WORKSPACE}",
         # Curated claude config: only the allowlisted auth, read-only (NOT the whole
