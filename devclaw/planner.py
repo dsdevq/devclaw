@@ -239,7 +239,14 @@ async def call_claude(prompt: str, model: str | None = None) -> str:
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace")
     if proc.returncode != 0:
-        raise PlannerError(f"claude --print exited {proc.returncode}. stderr:\n{stderr}", stdout)
+        # Include a stdout tail in the message: a Claude usage-limit ("You're out
+        # of extra usage …") comes back on STDOUT with an EMPTY stderr, so a
+        # stderr-only error is unclassifiable and the quota guard can't pause on it.
+        raise PlannerError(
+            f"claude --print exited {proc.returncode}. stderr:\n{stderr}\n"
+            f"stdout:\n{stdout[-500:]}",
+            stdout,
+        )
     return stdout
 
 
