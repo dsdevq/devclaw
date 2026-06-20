@@ -814,6 +814,7 @@ async def dashboard_index(_request: Request) -> Response:
  th,td{{padding:.4rem .6rem;border-bottom:1px solid #30363d;text-align:left}}
  th{{background:#161b22}}
 </style></head><body>
+<p style="color:#8b949e"><b>programs</b> · <a href="/dashboard/goals{TOKEN_QS}" style="color:#7ab8ff">goals</a></p>
 <h1>devclaw programs <small>v{_esc(__version__)}</small></h1>
 <p>{len(programs)} program(s). Click a row to open the live event stream.</p>
 <table><thead><tr><th>id</th><th>status</th><th>created</th><th>goal</th></tr></thead>
@@ -916,6 +917,121 @@ async def program_events(request: Request) -> Response:
             await asyncio.sleep(0.75)
 
     return EventSourceResponse(gen())
+
+
+_DASH_CSS = """
+ body{font:14px/1.5 -apple-system,system-ui,sans-serif;margin:2rem;color:#eee;background:#0d1117}
+ a{color:#7ab8ff;text-decoration:none} a:hover{text-decoration:underline}
+ h1{font-size:1.3rem} h2{font-size:1rem;color:#8b949e;margin:1.4rem 0 .4rem;text-transform:uppercase;letter-spacing:.04em}
+ table{border-collapse:collapse;width:100%;margin-top:1rem}
+ th,td{padding:.45rem .6rem;border-bottom:1px solid #30363d;text-align:left;vertical-align:top}
+ th{background:#161b22}
+ .pill{display:inline-block;padding:.1rem .5rem;border-radius:1rem;font-size:12px;background:#21262d}
+ .ok{color:#3fb950} .warn{color:#d29922} .bad{color:#f85149} .run{color:#79c0ff}
+ pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.8rem;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,monospace;max-height:32vh;overflow:auto}
+ .nav{color:#8b949e} .muted{color:#8b949e}
+ .now{background:#161b22;border:1px solid #30363d;border-left:3px solid #79c0ff;border-radius:6px;padding:.7rem 1rem;margin-top:.6rem}
+"""
+
+
+def _phase_class(phase: str) -> str:
+    return {
+        "done": "ok", "blocked": "bad", "cancelled": "muted", "error": "bad",
+        "in_flight": "run", "verifying": "run",
+    }.get(phase, "warn")
+
+
+@mcp.custom_route("/dashboard/goals", methods=["GET"])
+async def dashboard_goals(_request: Request) -> Response:
+    """Live overview of every durable goal — the 'what's devclaw doing' pane."""
+    items = goals.list_goals()
+    rows = "".join(
+        (
+            "<tr>"
+            f'<td><a href="/dashboard/goal/{_esc(g["id"])}{TOKEN_QS}">{_esc(g["id"])}</a></td>'
+            f'<td><span class="pill {_phase_class(g.get("phase",""))}">{_esc(g.get("phase",""))}</span></td>'
+            f'<td>{_esc(g.get("lifecycle") or "")}</td>'
+            f'<td>{_esc(str(g.get("direction") or "—"))}</td>'
+            f'<td>{g.get("actions_dispatched",0)}</td>'
+            f'<td>{_esc(g.get("objective",""))}</td>'
+            "</tr>"
+        )
+        for g in items
+    )
+    html = f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta http-equiv="refresh" content="10">
+<title>devclaw — goals</title><style>{_DASH_CSS}</style></head><body>
+<p class="nav"><a href="/dashboard{TOKEN_QS}">programs</a> · <b>goals</b></p>
+<h1>devclaw goals <small class="muted">v{_esc(__version__)}</small></h1>
+<p class="muted">{len(items)} goal(s) · auto-refresh 10s · click a goal for the live view</p>
+<table><thead><tr><th>goal</th><th>phase</th><th>lifecycle</th><th>direction</th><th>acts</th><th>objective</th></tr></thead>
+<tbody>{rows or '<tr><td colspan=6 class=muted>no goals yet</td></tr>'}</tbody></table>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+@mcp.custom_route("/dashboard/goal/{goal_id}", methods=["GET"])
+async def dashboard_goal(request: Request) -> Response:
+    """Live detail for one goal: what it's working on NOW, what shipped, the log,
+    and the live event tail. Reuses the same data as the tail_goal MCP tool."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        d = goals.tail_goal(goal_id, log_lines=40, deliveries_chars=8000, event_limit=40)
+    except KeyError:
+        return HTMLResponse(f"<p>unknown goal: {_esc(goal_id)}</p>", status_code=404)
+
+    inf = d.get("in_flight") or {}
+    direction = d.get("direction") or {}
+    now_bits = []
+    if d.get("next"):
+        now_bits.append(f"<b>next:</b> {_esc(d['next'])}")
+    if inf:
+        prog_link = ""
+        if inf.get("ref_kind") == "program":
+            prog_link = f' · <a href="/dashboard/{_esc(inf["id"])}{TOKEN_QS}">live event stream &rarr;</a>'
+        now_bits.append(
+            f'<b>in flight:</b> <span class="run">{_esc(inf.get("tool",""))}</span> '
+            f'<span class=muted>({_esc((inf.get("id") or "")[:8])})</span>{prog_link}'
+        )
+    if d.get("blocked_on"):
+        now_bits.append(f'<b class="bad">blocked on:</b> {_esc(d["blocked_on"])}')
+    now_html = "<br>".join(now_bits) or '<span class="muted">idle — nothing in flight</span>'
+
+    dir_html = ""
+    if direction.get("verdict"):
+        dir_html = (
+            f'<p><b>direction:</b> <span class="pill">{_esc(direction.get("verdict",""))}</span> '
+            f'{_esc(direction.get("note",""))} <span class=muted>{_esc(direction.get("at") or "")}</span></p>'
+        )
+
+    events = "".join(
+        f'<div><span class="run">{_esc(e.get("type",""))}</span> '
+        f'<span class=muted>({_esc(e.get("source",""))})</span></div>'
+        for e in (d.get("live_events") or [])
+    ) or '<span class="muted">no live events</span>'
+
+    html = f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta http-equiv="refresh" content="8">
+<title>devclaw goal — {_esc(goal_id)}</title><style>{_DASH_CSS}</style></head><body>
+<p class="nav"><a href="/dashboard/goals{TOKEN_QS}">&larr; all goals</a></p>
+<h1>{_esc(goal_id)} <span class="pill {_phase_class(d.get("phase",""))}">{_esc(d.get("phase",""))}</span>
+ <small class="muted">{_esc(d.get("lifecycle") or "")} · {d.get("actions_dispatched",0)} action(s) · auto-refresh 8s</small></h1>
+<p>{_esc(d.get("objective",""))}</p>
+{dir_html}
+<h2>working on now</h2>
+<div class="now">{now_html}</div>
+<h2>done when</h2>
+<p class="muted">{_esc(d.get("done_when","") or "—")}</p>
+<h2>deliveries (what shipped)</h2>
+<pre>{_esc(d.get("deliveries","") or "nothing shipped yet")}</pre>
+<h2>recent activity</h2>
+<pre>{_esc(d.get("recent_log","") or "—")}</pre>
+<h2>live events (last {len(d.get("live_events") or [])})</h2>
+<div>{events}</div>
+</body></html>"""
+    return HTMLResponse(html)
 
 
 def _iso(ms: int) -> str:
