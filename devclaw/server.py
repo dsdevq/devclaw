@@ -38,6 +38,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__
+from . import preview as _preview
 from . import repo as _repo
 from .goal_service import GoalService
 from .project_service import ProjectService
@@ -686,6 +687,51 @@ async def create_repo(
         )
     except _repo.RepoError as err:
         raise ToolError(str(err))
+
+
+# ===== live preview hosting ==================================================
+# Run a built app on the VPS and hand back clickable links (Swagger /docs +
+# frontend). Long-lived, resource-capped containers; see devclaw/preview.py.
+
+
+@mcp.tool
+async def start_preview(workspace_dir: str, slug: str, port: int = 8000) -> str:
+    """Run a project's BUILT app as a live preview on the VPS and return clickable
+    URLs — the frontend and the API's Swagger /docs — so the owner can OPEN the
+    thing, not just read the diff. Serves frontend + API on one origin/port (so a
+    hard-coded localhost API base works behind a single SSH tunnel). Long-lived +
+    resource-capped; replaces an existing preview for the same slug and evicts the
+    oldest preview if at the VPS concurrency cap. workspace_dir = the goal's
+    checkout (the built app); slug = a short stable name for the preview."""
+    if not workspace_dir or not slug:
+        raise ToolError("start_preview requires workspace_dir and slug")
+    try:
+        return json.dumps(await _preview.start_preview(workspace_dir, slug, port=port), indent=2)
+    except _preview.PreviewError as err:
+        raise ToolError(str(err))
+
+
+@mcp.tool
+async def preview_status(slug: str) -> str:
+    """Status of a live preview: whether it exists, is running, is answering
+    (ready), and its URLs. Use to check a preview started with start_preview."""
+    if not slug:
+        raise ToolError("preview_status requires slug")
+    return json.dumps(await _preview.preview_status(slug), indent=2)
+
+
+@mcp.tool
+async def stop_preview(slug: str) -> str:
+    """Stop and remove a live preview, freeing its VPS resources."""
+    if not slug:
+        raise ToolError("stop_preview requires slug")
+    return json.dumps(await _preview.stop_preview(slug), indent=2)
+
+
+@mcp.tool
+async def list_previews() -> str:
+    """List all live previews (running + stopped) with their status."""
+    return json.dumps(await _preview.list_previews(), indent=2)
 
 
 @mcp.tool
