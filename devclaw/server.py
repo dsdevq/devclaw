@@ -860,7 +860,7 @@ async def dashboard_index(_request: Request) -> Response:
  th,td{{padding:.4rem .6rem;border-bottom:1px solid #30363d;text-align:left}}
  th{{background:#161b22}}
 </style></head><body>
-<p style="color:#8b949e"><b>programs</b> · <a href="/dashboard/goals{TOKEN_QS}" style="color:#7ab8ff">goals</a></p>
+<p style="color:#8b949e"><b>programs</b> · <a href="/goals{TOKEN_QS}" style="color:#7ab8ff">goals</a></p>
 <h1>devclaw programs <small>v{_esc(__version__)}</small></h1>
 <p>{len(programs)} program(s). Click a row to open the live event stream.</p>
 <table><thead><tr><th>id</th><th>status</th><th>created</th><th>goal</th></tr></thead>
@@ -987,14 +987,14 @@ def _phase_class(phase: str) -> str:
     }.get(phase, "warn")
 
 
-@mcp.custom_route("/dashboard/goals", methods=["GET"])
+@mcp.custom_route("/goals", methods=["GET"])
 async def dashboard_goals(_request: Request) -> Response:
     """Live overview of every durable goal — the 'what's devclaw doing' pane."""
     items = goals.list_goals()
     rows = "".join(
         (
             "<tr>"
-            f'<td><a href="/dashboard/goal/{_esc(g["id"])}{TOKEN_QS}">{_esc(g["id"])}</a></td>'
+            f'<td><a href="/goals/{_esc(g["id"])}{TOKEN_QS}">{_esc(g["id"])}</a></td>'
             f'<td><span class="pill {_phase_class(g.get("phase",""))}">{_esc(g.get("phase",""))}</span></td>'
             f'<td>{_esc(g.get("lifecycle") or "")}</td>'
             f'<td>{_esc(str(g.get("direction") or "—"))}</td>'
@@ -1017,7 +1017,7 @@ async def dashboard_goals(_request: Request) -> Response:
     return HTMLResponse(html)
 
 
-@mcp.custom_route("/dashboard/goal/{goal_id}", methods=["GET"])
+@mcp.custom_route("/goals/{goal_id}", methods=["GET"])
 async def dashboard_goal(request: Request) -> Response:
     """Live detail for one goal: what it's working on NOW, what shipped, the log,
     and the live event tail. Reuses the same data as the tail_goal MCP tool."""
@@ -1061,7 +1061,7 @@ async def dashboard_goal(request: Request) -> Response:
 <html lang="en"><head>
 <meta charset="utf-8"><meta http-equiv="refresh" content="8">
 <title>devclaw goal — {_esc(goal_id)}</title><style>{_DASH_CSS}</style></head><body>
-<p class="nav"><a href="/dashboard/goals{TOKEN_QS}">&larr; all goals</a></p>
+<p class="nav"><a href="/goals{TOKEN_QS}">&larr; all goals</a></p>
 <h1>{_esc(goal_id)} <span class="pill {_phase_class(d.get("phase",""))}">{_esc(d.get("phase",""))}</span>
  <small class="muted">{_esc(d.get("lifecycle") or "")} · {d.get("actions_dispatched",0)} action(s) · auto-refresh 8s</small></h1>
 <p>{_esc(d.get("objective",""))}</p>
