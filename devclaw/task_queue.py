@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import uuid
 from typing import Awaitable, Callable, Optional
@@ -43,7 +44,8 @@ from .delivery import deliver_change
 from .engine import Engine, EngineEvent, EngineRequest
 from .limits import classify_failure, pause_seconds
 from .planner import PlannedTask, PlannerError, plan_goal
-from .sandcastle_runner import run_sandcastle
+from .sandcastle_runner import _translate_workspace_path, run_sandcastle
+from .test_integrity import scan_diff
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
@@ -86,6 +88,48 @@ def _verify_failure_summary(verify: dict) -> str:
         head = f"verify gate failed (exit {verify.get('exit_code')}): `{cmd}`"
     out = (verify.get("output") or "").strip()
     return f"{head}\n{out[-1500:]}" if out else head
+
+
+def _git_diff_sync(host_dir: str) -> str:
+    """The agent's still-uncommitted change (working tree + staged) as a unified
+    diff. Blocking subprocess.run (with a timeout) — NOT asyncio.create_subprocess_exec,
+    which hangs under pytest's per-test event loops (child-watcher pitfall) and is
+    overkill for a sub-second git call. Best-effort: '' on any failure (not a repo,
+    git missing, timeout) so a hiccup never blocks a legitimately-good task."""
+    out = ""
+    for args in (["diff"], ["diff", "--cached"]):
+        try:
+            p = subprocess.run(
+                ["git", "-C", host_dir, *args],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if p.returncode == 0:
+            out += p.stdout
+    return out
+
+
+async def _git_diff(host_dir: str) -> str:
+    """Async wrapper — runs the blocking git diff in a thread so it never blocks
+    the event loop or trips the asyncio-subprocess child-watcher hang."""
+    return await asyncio.to_thread(_git_diff_sync, host_dir)
+
+
+async def _test_integrity_failure(workspace_dir: str) -> Optional[str]:
+    """Return a failure summary if the change weakened the tests (deleted/skipped),
+    else None. Enforces what the prompt only asks for. Best-effort — never raises."""
+    try:
+        report = scan_diff(await _git_diff(_translate_workspace_path(workspace_dir)))
+    except Exception:  # noqa: BLE001 — a guard must never break a real task
+        return None
+    if report.ok:
+        return None
+    return (
+        f"{report.summary()}. The gate passed, but the change weakened the test "
+        "suite — restore the tests and make the code genuinely pass them; do not "
+        "delete, skip, or gut tests to go green."
+    )
 
 
 class TaskQueue:
@@ -619,6 +663,10 @@ class TaskQueue:
                     verify = result.get("verify")
                     if verify and verify.get("ran") and not verify.get("passed"):
                         last_failure = _verify_failure_summary(verify)
+                    elif (integrity := await _test_integrity_failure(workspace_dir)) is not None:
+                        # gate passed but the change weakened the tests — treat as a
+                        # gate failure so it retries with the tampering fed back.
+                        last_failure = integrity
                     elif defer_done:
                         # caller delivers, then settles 'done' WITH pr_url atomically
                         return result

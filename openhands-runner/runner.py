@@ -44,7 +44,11 @@ _CONTEXT_PREAMBLE = (
     "changing anything, get your bearings: read the project's own guide if present "
     "(AGENTS.md, CLAUDE.md, or README.md in the repo root) and the existing code "
     "around what you're touching, so your change matches the project's conventions "
-    "and structure."
+    "and structure. Do NOT assume the existing code is good — assess what you touch: "
+    "if it's poorly structured, buggy, or has weak/missing tests, that is part of "
+    "the job, not a pattern to copy. Follow the project's stated conventions and "
+    "sound engineering over blindly mimicking bad surrounding code, and note in your "
+    "summary anything pre-existing you had to work around or that needs follow-up."
 )
 # The code-quality bar. Without it the agent optimizes for the ONE thing it's
 # told to satisfy — a green test suite — and ships "a working version": logic
@@ -71,8 +75,12 @@ _QUALITY_BAR = (
 )
 _VERIFY_CODA = (
     "Keep the change focused — do not refactor unrelated code. When done, VERIFY "
-    "your work: run the project's existing test/build command and iterate until it "
-    "passes. Finish with a short summary of what you changed and how you verified it."
+    "your work with the project's OWN tools, and iterate until they pass: run the "
+    "test/build command AND the linter, formatter, and type-checker if the repo has "
+    "any (look in package.json scripts, pyproject.toml / setup.cfg, Makefile, "
+    ".pre-commit-config.yaml, or configs like .eslintrc / ruff / mypy / tsconfig) — "
+    "fix everything they flag, not only failing tests. Finish with a short summary "
+    "of what you changed and the checks you ran (tests + lint + types) to verify it."
 )
 
 _KIND_WRAPPERS = {
