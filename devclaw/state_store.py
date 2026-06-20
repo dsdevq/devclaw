@@ -247,6 +247,13 @@ class StateStore:
                   payload_json    TEXT NOT NULL,
                   ts              INTEGER NOT NULL
                 );
+
+                -- small key/value for process-wide flags (e.g. the global quota
+                -- pause). Survives restart so a pause isn't lost on a recreate.
+                CREATE TABLE IF NOT EXISTS meta (
+                  key             TEXT PRIMARY KEY,
+                  value           TEXT NOT NULL
+                );
                 """
             )
 
@@ -644,6 +651,59 @@ class StateStore:
                 )
                 self._db.commit()
         return ids
+
+    def requeue_task(self, task_id: str) -> bool:
+        """Put a single in-flight task back to 'pending' (e.g. when paused for a
+        quota limit rather than failed). Returns True if a running row was reset."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE tasks SET status = 'pending', started_at = NULL "
+                "WHERE id = ? AND status = 'running'",
+                (task_id,),
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+    # ---- meta / global flags (the quota pause) ---------------------------
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+            self._db.commit()
+
+    def get_meta(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def delete_meta(self, key: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM meta WHERE key = ?", (key,))
+            self._db.commit()
+
+    def set_global_pause(self, until_ms: int, reason: str) -> None:
+        """Pause ALL dispatch until ``until_ms`` (epoch ms) — the whole OAuth quota
+        is account-wide, so a limit on one task pauses everything. Persisted so a
+        restart still honours it."""
+        self.set_meta("pause_until_ms", str(int(until_ms)))
+        self.set_meta("pause_reason", reason or "")
+
+    def global_pause(self) -> tuple[int, str]:
+        """Return (until_ms, reason). until_ms is 0 when no pause is set."""
+        raw = self.get_meta("pause_until_ms")
+        try:
+            until = int(raw) if raw else 0
+        except ValueError:
+            until = 0
+        return until, (self.get_meta("pause_reason") or "")
+
+    def clear_global_pause(self) -> None:
+        self.delete_meta("pause_until_ms")
+        self.delete_meta("pause_reason")
 
     def append_note_to_pending_tasks(self, program_id: str, note: str) -> list[str]:
         """Append a steering note to every PENDING task of a program — work not
