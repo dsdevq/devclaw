@@ -52,19 +52,31 @@ PREVIEW_CPUS = os.environ.get("DEVCLAW_PREVIEW_CPUS", "1.0")
 PREVIEW_MAX = int(os.environ.get("DEVCLAW_PREVIEW_MAX", "3"))
 
 # The in-container launcher. Detects backend/ (FastAPI) and frontend/ (static),
-# serves them on ONE origin so a hard-coded API base + the UI share localhost:8000.
+# serves them on ONE origin (so the UI + API share a host), and normalizes a
+# hard-coded localhost API base in the frontend to SAME-ORIGIN so the preview
+# works over ANY url (SSH tunnel, Tailscale https, ...) — not just localhost:8000.
+# The rewrite is done on a /tmp COPY so the mounted workspace is never mutated.
 _LAUNCHER = r"""
 set -e
 cd /app
+norm() {
+  # copy frontend → writable preview copy, rewrite hard-coded local API bases
+  # (http://localhost:8000 / http://127.0.0.1:8000) to same-origin ("" → /path).
+  rm -rf /tmp/preview-frontend
+  cp -r "$1" /tmp/preview-frontend
+  find /tmp/preview-frontend -type f \( -name '*.js' -o -name '*.html' -o -name '*.ts' \) -print0 \
+    | xargs -0 -r sed -i -E 's#https?://(localhost|127\.0\.0\.1):8000##g'
+}
 if [ -f backend/requirements.txt ]; then
   pip install -q -r backend/requirements.txt
+  if [ -d frontend ]; then norm frontend; fi
   cd backend
   cat > _preview.py <<'PY'
 import os
 from main import app
 try:
     from fastapi.staticfiles import StaticFiles
-    fe = "/app/frontend"
+    fe = "/tmp/preview-frontend"
     if os.path.isdir(fe):
         # mounted LAST so the app's own routes (/docs, /todos, ...) win and the
         # static mount only catches everything else (serves index.html at /).
@@ -74,7 +86,8 @@ except Exception as e:
 PY
   exec uvicorn _preview:app --host 0.0.0.0 --port 8000
 elif [ -d frontend ]; then
-  cd frontend && exec python3 -m http.server 8000
+  norm frontend
+  cd /tmp/preview-frontend && exec python3 -m http.server 8000
 else
   exec python3 -m http.server 8000
 fi
