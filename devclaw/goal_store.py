@@ -142,6 +142,8 @@ class GoalStore:
             last_eval_verdict=fm.get("last_eval_verdict") or None,
             last_eval_at=fm.get("last_eval_at") or None,
             last_eval_note=fm.get("last_eval_note", "") or "",
+            last_progress_at=fm.get("last_progress_at") or None,
+            no_progress_notified=bool(fm.get("no_progress_notified", False)),
         )
 
     def save_status(self, goal_id: str, status: GoalStatus) -> None:
@@ -171,6 +173,8 @@ class GoalStore:
             "last_eval_verdict": status.last_eval_verdict,
             "last_eval_at": status.last_eval_at,
             "last_eval_note": status.last_eval_note,
+            "last_progress_at": status.last_progress_at,
+            "no_progress_notified": status.no_progress_notified,
         }
         body = self._render_status_body(goal_id, status)
         text = "---\n" + yaml.safe_dump(fm, sort_keys=False).rstrip() + "\n---\n\n" + body
@@ -337,6 +341,18 @@ class GoalStore:
 
     def now_iso(self) -> str:
         return self._now().isoformat(timespec="seconds")
+
+    def seconds_since(self, iso_ts: str | None) -> float | None:
+        """Wall-clock seconds between ``iso_ts`` and now (injected clock). None if
+        the timestamp is missing or unparseable — the caller treats that as 'no
+        baseline yet', never as 'zero elapsed'. Used by the no-progress watchdog."""
+        if not iso_ts:
+            return None
+        try:
+            then = datetime.fromisoformat(iso_ts)
+        except ValueError:
+            return None
+        return (self._now() - then).total_seconds()
 
     @staticmethod
     def _read_frontmatter(text: str) -> dict:

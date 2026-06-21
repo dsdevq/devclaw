@@ -107,6 +107,13 @@ class GoalStatus:
     last_eval_verdict: Optional[EvalVerdict] = None
     last_eval_at: Optional[str] = None
     last_eval_note: str = ""
+    #: ISO ts of the last forward progress — a delivery, or (self-initialized by the
+    #: watchdog) when the goal first entered executing. The no-progress watchdog
+    #: measures wall-clock from here; reset on every delivery. None until executing.
+    last_progress_at: Optional[str] = None
+    #: True once the no-progress watchdog has pinged the owner for the CURRENT stall;
+    #: cleared on the next delivery so a later stall fires again (ping once per stall).
+    no_progress_notified: bool = False
 
 
 @dataclass(frozen=True)

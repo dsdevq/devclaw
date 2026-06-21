@@ -166,6 +166,7 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_GOALS_DIR` | `~/memory/goals` | root holding one folder per durable goal (`<id>/goal.yaml` …) |
 | `DEVCLAW_GOAL_TICK_SECONDS` | `900` | goal heartbeat interval — also woken in-process the moment a task settles |
 | `DEVCLAW_GOAL_EVAL_EVERY` | `3` | deliveries between periodic direction evaluations (`0` → evaluate only at the done-gate) |
+| `DEVCLAW_GOAL_NO_PROGRESS_S` | `21600` | wall-clock seconds an executing goal may go without a delivery before the no-progress watchdog pings the owner once (zero tokens; `0` disables). Complements the per-task timeout. |
 | `DEVCLAW_GOAL_VERIFY_DONE` | `1` | when set, a planner `done` proposal dispatches a read-only review of the repo vs `done_when` and the evaluator must confirm `achieved` before the goal closes (`0` → trust an artifact-only done eval) |
 | `DEVCLAW_GOAL_NOTIFY_URL` | — | notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough) |
 | `DEVCLAW_TASK_TIMEOUT_S` | `1800` | per-task wall-clock cap — a run exceeding it is cancelled (its sandbox torn down) and the task marked `failed`, so a hung agent fails cleanly instead of burning quota. `<=0` disables. |
