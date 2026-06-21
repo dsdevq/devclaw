@@ -139,6 +139,7 @@ The single source of truth for **"which repos is devclaw working on, and what's 
 | `project_status(project_id)` | Full status of one project (facts + live goal status) |
 | `update_project(project_id, …)` | Update facts — record a preview URL, pause/archive, fix repo/workspace |
 | `link_goal(project_id, goal_id, unlink?)` | Attach/detach a durable goal (by id; status joined live) |
+| `delete_project(project_id)` | Hard-delete a project record (goals untouched; prefer `update_project(status='archived')` to retire one with a paper trail) |
 
 Same control plane from a terminal (talks to the same stores; no server needed):
 

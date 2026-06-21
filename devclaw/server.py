@@ -906,6 +906,18 @@ async def link_goal(project_id: str, goal_id: str, unlink: bool = False) -> str:
     return json.dumps(p.to_dict(), indent=2)
 
 
+@mcp.tool
+async def delete_project(project_id: str) -> str:
+    """Permanently remove a project from the registry (HARD delete). Drops only the
+    registry record — the goals it linked are untouched (they live on disk and are
+    just unlinked from this view). To retire a project while keeping its record + a
+    paper trail, prefer update_project(status='archived'). Raises if the id is
+    unknown (so a typo doesn't silently no-op)."""
+    if not registry.delete(project_id):
+        raise ToolError(f"unknown project_id: {project_id}")
+    return json.dumps({"deleted": True, "project_id": project_id}, indent=2)
+
+
 # ===== dashboard + SSE (HTTP transport only) =================================
 # Presentation lives in devclaw/dashboard.py (pure renderers); the routes here
 # stay thin — fetch data, hand it to a renderer. _esc is re-exported for the few

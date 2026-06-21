@@ -168,6 +168,12 @@ class ProjectRegistry:
                     ),
                 )
             except sqlite3.IntegrityError as exc:
+                # Roll back the failed INSERT's implicit transaction — otherwise it
+                # stays open on this long-lived connection and holds the write lock
+                # until the next commit, starving every other connection's writes
+                # (the root cause of the 75s `database is locked` stall, found
+                # dogfooding 2026-06-21). pysqlite does NOT auto-rollback here.
+                self._db.rollback()
                 raise ProjectExists(id) from exc
             self._db.commit()
         return p
