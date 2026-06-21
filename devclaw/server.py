@@ -9,6 +9,10 @@ runs in the background):
   - get_program(program_id)        / list_programs(limit?)
   - get_events(program_id | task_id, since_id?, limit?)
   - cancel_task(task_id)           / cancel_program(program_id)  (deliberate abort)
+  - register_project / list_projects / project_status / update_project / link_goal
+        (the project registry — the control plane's source of truth for "which
+         repos is devclaw working on + the live status of each"; also a CLI in
+         devclaw/cli.py and a /projects dashboard view)
 
 Transport:
   - DEVCLAW_TRANSPORT=stdio (default) — local dev + tests
@@ -41,6 +45,7 @@ from . import __version__
 from . import preview as _preview
 from . import repo as _repo
 from .goal_service import GoalService
+from .project_registry import ProjectExists, ProjectRegistry, project_rollup
 from .project_service import ProjectService
 from .project_store import ProjectStore
 from .state_store import StateStore
@@ -89,6 +94,18 @@ else:
 # across heartbeats, dispatching into the SAME queue in-process. Owns goals under
 # DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.
 goals = GoalService(queue, store)
+# The project registry (control plane): the single source of truth for "which
+# repos is devclaw working on, and what's the status of each". Thin — it links to
+# goals by id and joins their live status on read (project_rollup), never caching
+# phase. Shares the SQLite file with the state store.
+registry = ProjectRegistry(DB_PATH)
+
+
+def _goal_get(goal_id: str) -> dict:
+    """Read-only goal status getter for the project rollup (raises KeyError)."""
+    return goals.get_goal(goal_id)
+
+
 mcp: FastMCP = FastMCP(SERVER_NAME, version=__version__)
 
 LimitField = Field(ge=1, le=1000)
@@ -795,6 +812,100 @@ async def approve_spec(project_id: str) -> str:
         raise ToolError(str(err))
 
 
+# ===== project registry (control plane) ======================================
+# The portfolio view: which repos devclaw owns + the live status of each. Distinct
+# from the build-from-scratch project tools above (build_project/get_project/…),
+# which are the one-shot grill→spec→build interview. These manage the durable
+# registry that links repos to their driving goals; status is joined live.
+
+
+@mcp.tool
+async def register_project(
+    project_id: str,
+    name: str,
+    repo_url: Optional[str] = None,
+    workspace_dir: Optional[str] = None,
+    preview_url: Optional[str] = None,
+    notes: str = "",
+) -> str:
+    """Register a repo in the project registry — the control plane's source of
+    truth for 'what is devclaw working on'. ``project_id`` is a stable slug (e.g.
+    'todo-fullstack-demo'). Link the goal(s) driving it with link_goal. Idempotent
+    failure: a taken id is an error (use update_project to change it)."""
+    if not project_id or not name:
+        raise ToolError("register_project requires project_id and name")
+    try:
+        p = registry.create(
+            id=project_id, name=name, repo_url=repo_url,
+            workspace_dir=workspace_dir, preview_url=preview_url, notes=notes,
+        )
+    except ProjectExists:
+        raise ToolError(f"project already exists: {project_id}")
+    return json.dumps(p.to_dict(), indent=2)
+
+
+@mcp.tool
+async def list_projects(status: Optional[str] = None) -> str:
+    """List registered projects with a live status rollup (each project's linked
+    goals' phase/direction + a derived health: working/blocked/done/idle/archived).
+    Filter by status (active|paused|archived). This is the 'show me everything'
+    surface for chat / API / CLI."""
+    items = [
+        project_rollup(p, _goal_get)
+        for p in registry.list(status=status)  # type: ignore[arg-type]
+    ]
+    return json.dumps(items, indent=2)
+
+
+@mcp.tool
+async def project_status(project_id: str) -> str:
+    """Full status of one registered project: its facts (repo, workspace, preview)
+    plus the LIVE status of every goal driving it and a derived health signal.
+    (The registry-level analogue of get_goal; get_project is the build-flow tool.)"""
+    p = registry.get(project_id)
+    if p is None:
+        raise ToolError(f"unknown project_id: {project_id}")
+    return json.dumps(project_rollup(p, _goal_get), indent=2)
+
+
+@mcp.tool
+async def update_project(
+    project_id: str,
+    name: Optional[str] = None,
+    repo_url: Optional[str] = None,
+    workspace_dir: Optional[str] = None,
+    preview_url: Optional[str] = None,
+    status: Optional[Literal["active", "paused", "archived"]] = None,
+    notes: Optional[str] = None,
+) -> str:
+    """Update a registered project's facts — only the fields you pass change. Use to
+    record a preview URL, pause/archive it, or correct the repo/workspace."""
+    try:
+        p = registry.update(
+            project_id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
+            preview_url=preview_url, status=status, notes=notes,
+        )
+    except KeyError:
+        raise ToolError(f"unknown project_id: {project_id}")
+    return json.dumps(p.to_dict(), indent=2)
+
+
+@mcp.tool
+async def link_goal(project_id: str, goal_id: str, unlink: bool = False) -> str:
+    """Attach (or, with unlink=True, detach) a durable goal to/from a project. The
+    link is by id only — the goal's status is joined live in list_projects /
+    project_status, never copied. Idempotent."""
+    try:
+        p = (
+            registry.unlink_goal(project_id, goal_id)
+            if unlink
+            else registry.link_goal(project_id, goal_id)
+        )
+    except KeyError:
+        raise ToolError(f"unknown project_id: {project_id}")
+    return json.dumps(p.to_dict(), indent=2)
+
+
 # ===== dashboard + SSE (HTTP transport only) =================================
 
 
@@ -860,7 +971,7 @@ async def dashboard_index(_request: Request) -> Response:
  th,td{{padding:.4rem .6rem;border-bottom:1px solid #30363d;text-align:left}}
  th{{background:#161b22}}
 </style></head><body>
-<p style="color:#8b949e"><b>programs</b> · <a href="/goals{TOKEN_QS}" style="color:#7ab8ff">goals</a></p>
+<p style="color:#8b949e"><b>programs</b> · <a href="/goals{TOKEN_QS}" style="color:#7ab8ff">goals</a> · <a href="/projects{TOKEN_QS}" style="color:#7ab8ff">projects</a></p>
 <h1>devclaw programs <small>v{_esc(__version__)}</small></h1>
 <p>{len(programs)} program(s). Click a row to open the live event stream.</p>
 <table><thead><tr><th>id</th><th>status</th><th>created</th><th>goal</th></tr></thead>
@@ -1008,13 +1119,57 @@ async def dashboard_goals(_request: Request) -> Response:
 <html lang="en"><head>
 <meta charset="utf-8"><meta http-equiv="refresh" content="10">
 <title>devclaw — goals</title><style>{_DASH_CSS}</style></head><body>
-<p class="nav"><a href="/dashboard{TOKEN_QS}">programs</a> · <b>goals</b></p>
+<p class="nav"><a href="/dashboard{TOKEN_QS}">programs</a> · <b>goals</b> · <a href="/projects{TOKEN_QS}">projects</a></p>
 <h1>devclaw goals <small class="muted">v{_esc(__version__)}</small></h1>
 <p class="muted">{len(items)} goal(s) · auto-refresh 10s · click a goal for the live view</p>
 <table><thead><tr><th>goal</th><th>phase</th><th>lifecycle</th><th>direction</th><th>acts</th><th>objective</th></tr></thead>
 <tbody>{rows or '<tr><td colspan=6 class=muted>no goals yet</td></tr>'}</tbody></table>
 </body></html>"""
     return HTMLResponse(html)
+
+
+@mcp.custom_route("/projects", methods=["GET"])
+async def dashboard_projects(_request: Request) -> Response:
+    """Portfolio view — every registered project + its derived health, the
+    control-plane overview that ties repos to the goals driving them."""
+    items = [project_rollup(p, _goal_get) for p in registry.list()]
+    rows = "".join(
+        (
+            "<tr>"
+            f'<td>{_esc(p["id"])}</td>'
+            f'<td>{_esc(p["name"])}</td>'
+            f'<td><span class="pill {_health_class(p["health"])}">{_esc(p["health"])}</span></td>'
+            f'<td>{_esc(p["status"])}</td>'
+            f'<td>{len(p["goals"])}</td>'
+            f'<td>{_project_preview_cell(p)}</td>'
+            f'<td>{_esc(p.get("repoUrl") or "—")}</td>'
+            "</tr>"
+        )
+        for p in items
+    )
+    html = f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta http-equiv="refresh" content="15">
+<title>devclaw — projects</title><style>{_DASH_CSS}</style></head><body>
+<p class="nav"><a href="/dashboard{TOKEN_QS}">programs</a> · <a href="/goals{TOKEN_QS}">goals</a> · <b>projects</b></p>
+<h1>devclaw projects <small class="muted">v{_esc(__version__)}</small></h1>
+<p class="muted">{len(items)} project(s) · auto-refresh 15s</p>
+<table><thead><tr><th>id</th><th>name</th><th>health</th><th>status</th><th>goals</th><th>preview</th><th>repo</th></tr></thead>
+<tbody>{rows or '<tr><td colspan=7 class=muted>no projects registered yet</td></tr>'}</tbody></table>
+</body></html>"""
+    return HTMLResponse(html)
+
+
+def _health_class(health: str) -> str:
+    return {
+        "working": "run", "done": "ok", "blocked": "bad",
+        "archived": "muted", "idle": "warn",
+    }.get(health, "muted")
+
+
+def _project_preview_cell(p: dict) -> str:
+    url = p.get("previewUrl")
+    return f'<a href="{_esc(url)}">open ↗</a>' if url else "—"
 
 
 @mcp.custom_route("/goals/{goal_id}", methods=["GET"])

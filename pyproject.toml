@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 devclaw-mcp = "devclaw.server:main"
+devclaw = "devclaw.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
