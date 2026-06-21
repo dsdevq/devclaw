@@ -158,6 +158,27 @@ def test_busy_timeout_pragma_applied(reg):
     assert got > 0  # a blocked writer waits, never fails fast at 0
 
 
+def test_failed_create_does_not_leak_a_write_lock(tmp_path):
+    """A duplicate create() raises ProjectExists — but it must ROLL BACK the failed
+    INSERT's implicit transaction, not leave it open holding the write lock. The
+    open-transaction leak was the root cause of the 75s `database is locked` stall:
+    once one connection hit the duplicate-create path, it held the lock until its
+    next commit, blocking every other connection's write."""
+    db = str(tmp_path / "devclaw.db")
+    a = ProjectRegistry(db)
+    b = ProjectRegistry(db)
+    a.create(id="dup", name="A")  # committed
+    with pytest.raises(ProjectExists):
+        a.create(id="dup", name="dup-again")  # IntegrityError -> must roll back
+
+    # If `a` leaked the failed INSERT's transaction, it still holds the write lock
+    # and this write on a *second* connection blocks until busy_timeout then raises.
+    # A short timeout makes the test fail fast (instead of hanging) if the leak is back.
+    b._db.execute("PRAGMA busy_timeout = 500")
+    b.create(id="other", name="B")  # must succeed promptly — `a` holds no lock
+    assert b.get("other") is not None
+
+
 def test_contended_writer_waits_instead_of_failing(tmp_path):
     """Two connections to one db file (the CLI/server split). One holds the write
     lock; the other's write must WAIT for it (busy_timeout) and then succeed —
