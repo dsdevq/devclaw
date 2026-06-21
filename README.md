@@ -53,6 +53,7 @@ devclaw/
 ├── sandcastle_runner.py # `docker run --rm` per task; streams events from the runner
 ├── project_registry.py  # the control plane's source of truth: repos → driving goals → live status
 ├── cli.py               # `devclaw projects …` — the terminal face of the control plane
+├── preview.py           # live preview hosting on the VPS (resource-capped, LRU-evicted)
 │   # --- loom: the reusable orchestration core (neutral name, extraction seam) ---
 ├── loom/__init__.py     # curated public surface: classify_failure · scan_diff · Goal · GoalStore · …
 ├── loom/limits.py       # usage-limit / rate-limit failure classifier (pure)
@@ -104,6 +105,9 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 | `list_goals()` | All goals + phase + direction |
 | `steer_goal(goal_id, message)` | Correct/redirect — recorded as steering, honored on the next tick (poked immediately); unblocks a blocked goal |
 | `evaluate_goal(goal_id)` | Force a direction evaluation now — "is this going the right way?" — judged against `done_when`, grounded in what shipped |
+| `tail_goal(goal_id, …)` | Watch a goal — the deep read-only feed: the grounded deliveries tail (what each action actually shipped) + recent events |
+| `answer_goal(goal_id, answer)` | Reply to a goal that's waiting on you (the Telegram answer channel for scope questions / escalations) |
+| `cancel_goal(goal_id)` | Permanently stop a goal — terminal `cancelled`, tears down any in-flight action, skipped on every future heartbeat |
 
 **How a goal is driven (per heartbeat):**
 1. **Cheap check** (0 tokens) — poll the in-flight action via a local SQLite read.
@@ -151,6 +155,28 @@ devclaw projects link todo-fullstack-demo todo-quality-audit
 ```
 
 …and a portfolio view at **`/projects`** on the HTTP dashboard.
+
+### Preview hosting & provisioning
+
+A from-scratch goal needs somewhere to live and, when it builds, something you can click:
+
+| Tool | Does |
+|---|---|
+| `create_repo(name, private?, description?)` | Stand up a fresh GitHub repo under the configured account so a from-scratch goal has a home |
+| `setup_cicd(workspace_dir)` | Add a standard self-hosted GitHub Actions CI workflow if the repo has none (detects the stack: dotnet / python / node / go) |
+| `start_preview(workspace_dir, slug, port?)` | Run a built app as a live preview on the VPS → clickable frontend + API `/docs` URLs, so the owner can *open* the result |
+| `preview_status(slug)` / `list_previews()` | Status of one preview (exists / running / ready + URLs) / list them all |
+| `stop_preview(slug)` | Stop a preview and free its VPS resources |
+
+Previews run under per-preview memory/CPU caps with max-N **LRU eviction** so they can't overwhelm the VPS.
+
+### Reliability & quality
+
+Built to run unattended, and to ship code you'd actually merge:
+
+- **Survives usage limits.** A quota / rate-limit pause is *classified*, not treated as a failure: the task is requeued and a single account-wide `paused_until` gates **both** the task queue and the goal heartbeat, which auto-resume when the cap resets — zero tokens while paused, the owner pinged once. Auth errors are surfaced, never slept on.
+- **No-progress watchdog.** An executing goal that ships nothing for `DEVCLAW_GOAL_NO_PROGRESS_S` (default 6h) pings the owner once — a zero-token wall-clock check that complements the per-task timeout.
+- **In-house quality gate (no third-party QC).** The engineer is briefed to *audit before extending* — assume even fine-looking code may be poor — and the verify gate runs a **test-integrity** check that fails the gate on deleted / skipped / weakened tests, closing the "go green by gutting the tests" path.
 
 ## Auth (the design constraint)
 
