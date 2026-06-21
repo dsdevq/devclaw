@@ -46,7 +46,7 @@ from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .review_gate import format_feedback, review_diff
-from .sandcastle_runner import _translate_workspace_path, run_sandcastle
+from .sandcastle_runner import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
@@ -683,7 +683,14 @@ class TaskQueue:
                         # Gate passed — now the checks that READ the change. Compute
                         # the diff once and share it between the test-integrity guard
                         # and the adversarial review gate.
-                        diff = await _git_diff(_translate_workspace_path(workspace_dir))
+                        # NB: git runs in THIS (host/server) process, so it needs the
+                        # workspace path as we see it — NOT the docker-bind host path.
+                        # `_translate_workspace_path` maps container→host for the
+                        # sandbox `-v` mount; using it here pointed git at a path that
+                        # doesn't exist in our mount namespace (`/srv/...`), so the
+                        # diff came back empty and BOTH guards silently no-op'd in
+                        # the deployed container. Use workspace_dir directly.
+                        diff = await _git_diff(workspace_dir)
                         integrity = _integrity_failure(diff)
                         review_fb = (
                             None if integrity is not None
