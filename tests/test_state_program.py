@@ -21,6 +21,14 @@ def test_create_and_get_program_roundtrips(store):
     assert p.workspace_dir == "/ws"
 
 
+def test_busy_timeout_pragma_applied(store):
+    from devclaw.state_store import SQLITE_BUSY_TIMEOUT_MS
+
+    got = store._db.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert got == SQLITE_BUSY_TIMEOUT_MS
+    assert got > 0  # wait for the lock instead of failing fast at 0
+
+
 def test_program_running_then_done_transitions(store):
     store.create_program(id="p1", goal="g", workspace_dir="/ws")
     store.mark_program_running("p1")

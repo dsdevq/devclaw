@@ -12,6 +12,7 @@ output, so MCP consumers keep working across the rewrite.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -190,12 +191,22 @@ def _row_to_event(r: sqlite3.Row) -> TaskEvent:
     )
 
 
+#: How long a blocked writer waits for the lock before raising
+#: ``sqlite3.OperationalError: database is locked``. WAL gives concurrent reads +
+#: a single writer, but the default busy_timeout is 0 — so a *separate* process
+#: (e.g. the ``devclaw`` CLI) writing while the server holds the write lock fails
+#: instantly instead of waiting its turn. A few seconds lets contending writers
+#: queue politely. Shared default with ``project_registry`` (same db file).
+SQLITE_BUSY_TIMEOUT_MS = int(os.environ.get("DEVCLAW_SQLITE_BUSY_TIMEOUT_MS", "5000"))
+
+
 class StateStore:
     def __init__(self, db_path: str) -> None:
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")  # concurrent reads, single writer
+        self._db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")  # wait, don't fail-fast
         self._db.execute("PRAGMA foreign_keys = ON")
         self._lock = threading.RLock()
         self._bootstrap()

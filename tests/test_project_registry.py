@@ -148,3 +148,40 @@ def test_rollup_health_archived_short_circuits(reg):
     reg.link_goal("todo", "g1")
     table = {"g1": {"phase": "in_flight", "progress": {}}}
     assert project_rollup(reg.get("todo"), _goal_get(table))["health"] == "archived"
+
+
+def test_busy_timeout_pragma_applied(reg):
+    from devclaw.state_store import SQLITE_BUSY_TIMEOUT_MS
+
+    got = reg._db.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert got == SQLITE_BUSY_TIMEOUT_MS
+    assert got > 0  # a blocked writer waits, never fails fast at 0
+
+
+def test_contended_writer_waits_instead_of_failing(tmp_path):
+    """Two connections to one db file (the CLI/server split). One holds the write
+    lock; the other's write must WAIT for it (busy_timeout) and then succeed —
+    not raise `database is locked` as it did before the timeout was set."""
+    import threading
+    import time
+
+    db = str(tmp_path / "devclaw.db")
+    holder = ProjectRegistry(db)
+    writer = ProjectRegistry(db)
+
+    holder._db.execute("BEGIN IMMEDIATE")  # grab + hold the single write lock
+
+    released = threading.Event()
+
+    def _release() -> None:
+        time.sleep(0.3)  # << the writer's 5s busy_timeout, so it waits then wins
+        holder._db.commit()
+        released.set()
+
+    t = threading.Thread(target=_release)
+    t.start()
+    writer.create(id="b", name="B")  # blocks until the holder commits, then writes
+    t.join()
+
+    assert released.is_set()
+    assert writer.get("b") is not None

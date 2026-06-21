@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
+from .state_store import SQLITE_BUSY_TIMEOUT_MS
+
 ProjectStatus = Literal["active", "paused", "archived"]
 #: a read-only getter that returns a goal's live status dict (or raises KeyError);
 #: goal_service.get_goal and a GoalStore-backed getter both satisfy it.
@@ -106,6 +108,11 @@ class ProjectRegistry:
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")
+        # Wait for the lock instead of failing fast — the CLI and the server each
+        # open a connection to this shared file, so a CLI write while the server
+        # holds the lock must queue, not raise `database is locked`. See
+        # state_store.SQLITE_BUSY_TIMEOUT_MS (same env knob, same db file).
+        self._db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         self._lock = threading.RLock()
         self._bootstrap()
 

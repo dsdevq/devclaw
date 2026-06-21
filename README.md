@@ -193,6 +193,7 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_MAX_CONCURRENT` | `4` | global cap on concurrently-running tasks (backpressure) |
 | `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | per-program concurrency cap |
 | `DEVCLAW_TICK_SECONDS` | `10` | task-queue heartbeat interval — advances DAGs and resumes recovered work from DB state |
+| `DEVCLAW_SQLITE_BUSY_TIMEOUT_MS` | `5000` | how long a blocked SQLite writer waits for the lock before raising `database is locked`. The server and the `devclaw` CLI each open a connection to the same db file; with the default `0` a CLI write while the server holds the lock fails instantly — this lets it queue and succeed. |
 | `DEVCLAW_GOALS_DIR` | `~/memory/goals` | root holding one folder per durable goal (`<id>/goal.yaml` …) |
 | `DEVCLAW_GOAL_TICK_SECONDS` | `900` | goal heartbeat interval — also woken in-process the moment a task settles |
 | `DEVCLAW_GOAL_EVAL_EVERY` | `3` | deliveries between periodic direction evaluations (`0` → evaluate only at the done-gate) |
