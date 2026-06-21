@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw import limits, task_queue
+from devclaw import task_queue
+from devclaw.loom import limits  # the constant's real home post-extraction
 from devclaw.engine import EngineRequest
 from devclaw.state_store import StateStore, _now_ms
 from devclaw.task_queue import TaskQueue

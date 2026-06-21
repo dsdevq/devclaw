@@ -31,7 +31,6 @@ import subprocess
 import sys
 import textwrap
 import urllib.parse
-from html import escape as _html_escape
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
@@ -42,6 +41,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from . import __version__
+from . import dashboard as _dash
 from . import preview as _preview
 from . import repo as _repo
 from .goal_service import GoalService
@@ -907,10 +907,11 @@ async def link_goal(project_id: str, goal_id: str, unlink: bool = False) -> str:
 
 
 # ===== dashboard + SSE (HTTP transport only) =================================
+# Presentation lives in devclaw/dashboard.py (pure renderers); the routes here
+# stay thin — fetch data, hand it to a renderer. _esc is re-exported for the few
+# inline 404 strings + the SSE path.
 
-
-def _esc(s: str) -> str:
-    return _html_escape(s, quote=True)
+_esc = _dash.esc
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -950,34 +951,7 @@ async def goals_answer(request: Request) -> Response:
 @mcp.custom_route("/dashboard", methods=["GET"])
 async def dashboard_index(_request: Request) -> Response:
     programs = store.list_programs(limit=50)
-    rows = "".join(
-        (
-            "<tr>"
-            f'<td><a href="/dashboard/{p.id}{TOKEN_QS}">{p.id[:8]}</a></td>'
-            f"<td>{_esc(p.status)}</td>"
-            f"<td>{_esc(_iso(p.created_at))}</td>"
-            f"<td>{_esc(p.goal[:117] + '...' if len(p.goal) > 120 else p.goal)}</td>"
-            "</tr>"
-        )
-        for p in programs
-    )
-    html = f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><title>devclaw — programs</title>
-<style>
- body{{font:14px/1.4 -apple-system,system-ui,sans-serif;margin:2rem;color:#eee;background:#0d1117}}
- a{{color:#7ab8ff}}
- table{{border-collapse:collapse;width:100%;margin-top:1rem}}
- th,td{{padding:.4rem .6rem;border-bottom:1px solid #30363d;text-align:left}}
- th{{background:#161b22}}
-</style></head><body>
-<p style="color:#8b949e"><b>programs</b> · <a href="/goals{TOKEN_QS}" style="color:#7ab8ff">goals</a> · <a href="/projects{TOKEN_QS}" style="color:#7ab8ff">projects</a></p>
-<h1>devclaw programs <small>v{_esc(__version__)}</small></h1>
-<p>{len(programs)} program(s). Click a row to open the live event stream.</p>
-<table><thead><tr><th>id</th><th>status</th><th>created</th><th>goal</th></tr></thead>
-<tbody>{rows}</tbody></table>
-</body></html>"""
-    return HTMLResponse(html)
+    return HTMLResponse(_dash.render_programs(programs, version=__version__, token_qs=TOKEN_QS))
 
 
 @mcp.custom_route("/dashboard/{program_id}", methods=["GET"])
@@ -985,41 +959,8 @@ async def dashboard_program(request: Request) -> Response:
     program_id = request.path_params["program_id"]
     program = store.get_program(program_id)
     if not program:
-        return HTMLResponse(f"<p>unknown program: {_esc(program_id)}</p>", status_code=404)
-    html = f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><title>devclaw — {_esc(program_id)}</title>
-<style>
- body{{font:13px/1.4 -apple-system,system-ui,sans-serif;margin:2rem;color:#eee;background:#0d1117}}
- a{{color:#7ab8ff}}
- h1{{font-size:1.2rem}}
- #events{{margin-top:1rem;border:1px solid #30363d;border-radius:6px;padding:1rem;background:#161b22;max-height:80vh;overflow:auto;font-family:ui-monospace,monospace;font-size:12px}}
- .ev{{padding:.2rem 0;border-bottom:1px solid #21262d}}
- .type{{color:#79c0ff;font-weight:bold}} .source{{color:#8b949e}} .id{{color:#6e7681}}
-</style></head><body>
-<p><a href="/dashboard{TOKEN_QS}">&larr; all programs</a></p>
-<h1>program {_esc(program_id)} <small>({_esc(program.status)})</small></h1>
-<p>{_esc(program.goal)}</p>
-<div id="events"></div>
-<script>
- const box = document.getElementById('events');
- const src = new EventSource('/programs/{program_id}/events{TOKEN_QS}');
- src.onmessage = (e) => {{
-   try {{
-     const ev = JSON.parse(e.data);
-     const div = document.createElement('div');
-     div.className = 'ev';
-     div.innerHTML = '<span class=id>#' + ev.id + '</span> ' +
-                     '<span class=type>' + ev.type + '</span> ' +
-                     '<span class=source>(' + ev.source + ')</span>';
-     box.appendChild(div);
-     box.scrollTop = box.scrollHeight;
-   }} catch (err) {{ /* swallow */ }}
- }};
- src.onerror = () => {{ /* browser auto-reconnects with Last-Event-Id */ }};
-</script>
-</body></html>"""
-    return HTMLResponse(html)
+        return HTMLResponse(_dash.render_not_found("program", program_id), status_code=404)
+    return HTMLResponse(_dash.render_program(program, token_qs=TOKEN_QS))
 
 
 @mcp.custom_route("/programs/{program_id}/events", methods=["GET"])
@@ -1076,56 +1017,10 @@ async def program_events(request: Request) -> Response:
     return EventSourceResponse(gen())
 
 
-_DASH_CSS = """
- body{font:14px/1.5 -apple-system,system-ui,sans-serif;margin:2rem;color:#eee;background:#0d1117}
- a{color:#7ab8ff;text-decoration:none} a:hover{text-decoration:underline}
- h1{font-size:1.3rem} h2{font-size:1rem;color:#8b949e;margin:1.4rem 0 .4rem;text-transform:uppercase;letter-spacing:.04em}
- table{border-collapse:collapse;width:100%;margin-top:1rem}
- th,td{padding:.45rem .6rem;border-bottom:1px solid #30363d;text-align:left;vertical-align:top}
- th{background:#161b22}
- .pill{display:inline-block;padding:.1rem .5rem;border-radius:1rem;font-size:12px;background:#21262d}
- .ok{color:#3fb950} .warn{color:#d29922} .bad{color:#f85149} .run{color:#79c0ff}
- pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:.8rem;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,monospace;max-height:32vh;overflow:auto}
- .nav{color:#8b949e} .muted{color:#8b949e}
- .now{background:#161b22;border:1px solid #30363d;border-left:3px solid #79c0ff;border-radius:6px;padding:.7rem 1rem;margin-top:.6rem}
-"""
-
-
-def _phase_class(phase: str) -> str:
-    return {
-        "done": "ok", "blocked": "bad", "cancelled": "muted", "error": "bad",
-        "in_flight": "run", "verifying": "run",
-    }.get(phase, "warn")
-
-
 @mcp.custom_route("/goals", methods=["GET"])
 async def dashboard_goals(_request: Request) -> Response:
     """Live overview of every durable goal — the 'what's devclaw doing' pane."""
-    items = goals.list_goals()
-    rows = "".join(
-        (
-            "<tr>"
-            f'<td><a href="/goals/{_esc(g["id"])}{TOKEN_QS}">{_esc(g["id"])}</a></td>'
-            f'<td><span class="pill {_phase_class(g.get("phase",""))}">{_esc(g.get("phase",""))}</span></td>'
-            f'<td>{_esc(g.get("lifecycle") or "")}</td>'
-            f'<td>{_esc(str(g.get("direction") or "—"))}</td>'
-            f'<td>{g.get("actions_dispatched",0)}</td>'
-            f'<td>{_esc(g.get("objective",""))}</td>'
-            "</tr>"
-        )
-        for g in items
-    )
-    html = f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta http-equiv="refresh" content="10">
-<title>devclaw — goals</title><style>{_DASH_CSS}</style></head><body>
-<p class="nav"><a href="/dashboard{TOKEN_QS}">programs</a> · <b>goals</b> · <a href="/projects{TOKEN_QS}">projects</a></p>
-<h1>devclaw goals <small class="muted">v{_esc(__version__)}</small></h1>
-<p class="muted">{len(items)} goal(s) · auto-refresh 10s · click a goal for the live view</p>
-<table><thead><tr><th>goal</th><th>phase</th><th>lifecycle</th><th>direction</th><th>acts</th><th>objective</th></tr></thead>
-<tbody>{rows or '<tr><td colspan=6 class=muted>no goals yet</td></tr>'}</tbody></table>
-</body></html>"""
-    return HTMLResponse(html)
+    return HTMLResponse(_dash.render_goals(goals.list_goals(), version=__version__, token_qs=TOKEN_QS))
 
 
 @mcp.custom_route("/projects", methods=["GET"])
@@ -1133,43 +1028,7 @@ async def dashboard_projects(_request: Request) -> Response:
     """Portfolio view — every registered project + its derived health, the
     control-plane overview that ties repos to the goals driving them."""
     items = [project_rollup(p, _goal_get) for p in registry.list()]
-    rows = "".join(
-        (
-            "<tr>"
-            f'<td>{_esc(p["id"])}</td>'
-            f'<td>{_esc(p["name"])}</td>'
-            f'<td><span class="pill {_health_class(p["health"])}">{_esc(p["health"])}</span></td>'
-            f'<td>{_esc(p["status"])}</td>'
-            f'<td>{len(p["goals"])}</td>'
-            f'<td>{_project_preview_cell(p)}</td>'
-            f'<td>{_esc(p.get("repoUrl") or "—")}</td>'
-            "</tr>"
-        )
-        for p in items
-    )
-    html = f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta http-equiv="refresh" content="15">
-<title>devclaw — projects</title><style>{_DASH_CSS}</style></head><body>
-<p class="nav"><a href="/dashboard{TOKEN_QS}">programs</a> · <a href="/goals{TOKEN_QS}">goals</a> · <b>projects</b></p>
-<h1>devclaw projects <small class="muted">v{_esc(__version__)}</small></h1>
-<p class="muted">{len(items)} project(s) · auto-refresh 15s</p>
-<table><thead><tr><th>id</th><th>name</th><th>health</th><th>status</th><th>goals</th><th>preview</th><th>repo</th></tr></thead>
-<tbody>{rows or '<tr><td colspan=7 class=muted>no projects registered yet</td></tr>'}</tbody></table>
-</body></html>"""
-    return HTMLResponse(html)
-
-
-def _health_class(health: str) -> str:
-    return {
-        "working": "run", "done": "ok", "blocked": "bad",
-        "archived": "muted", "idle": "warn",
-    }.get(health, "muted")
-
-
-def _project_preview_cell(p: dict) -> str:
-    url = p.get("previewUrl")
-    return f'<a href="{_esc(url)}">open ↗</a>' if url else "—"
+    return HTMLResponse(_dash.render_projects(items, version=__version__, token_qs=TOKEN_QS))
 
 
 @mcp.custom_route("/goals/{goal_id}", methods=["GET"])
@@ -1180,65 +1039,8 @@ async def dashboard_goal(request: Request) -> Response:
     try:
         d = goals.tail_goal(goal_id, log_lines=40, deliveries_chars=8000, event_limit=40)
     except KeyError:
-        return HTMLResponse(f"<p>unknown goal: {_esc(goal_id)}</p>", status_code=404)
-
-    inf = d.get("in_flight") or {}
-    direction = d.get("direction") or {}
-    now_bits = []
-    if d.get("next"):
-        now_bits.append(f"<b>next:</b> {_esc(d['next'])}")
-    if inf:
-        prog_link = ""
-        if inf.get("ref_kind") == "program":
-            prog_link = f' · <a href="/dashboard/{_esc(inf["id"])}{TOKEN_QS}">live event stream &rarr;</a>'
-        now_bits.append(
-            f'<b>in flight:</b> <span class="run">{_esc(inf.get("tool",""))}</span> '
-            f'<span class=muted>({_esc((inf.get("id") or "")[:8])})</span>{prog_link}'
-        )
-    if d.get("blocked_on"):
-        now_bits.append(f'<b class="bad">blocked on:</b> {_esc(d["blocked_on"])}')
-    now_html = "<br>".join(now_bits) or '<span class="muted">idle — nothing in flight</span>'
-
-    dir_html = ""
-    if direction.get("verdict"):
-        dir_html = (
-            f'<p><b>direction:</b> <span class="pill">{_esc(direction.get("verdict",""))}</span> '
-            f'{_esc(direction.get("note",""))} <span class=muted>{_esc(direction.get("at") or "")}</span></p>'
-        )
-
-    events = "".join(
-        f'<div><span class="run">{_esc(e.get("type",""))}</span> '
-        f'<span class=muted>({_esc(e.get("source",""))})</span></div>'
-        for e in (d.get("live_events") or [])
-    ) or '<span class="muted">no live events</span>'
-
-    html = f"""<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8"><meta http-equiv="refresh" content="8">
-<title>devclaw goal — {_esc(goal_id)}</title><style>{_DASH_CSS}</style></head><body>
-<p class="nav"><a href="/goals{TOKEN_QS}">&larr; all goals</a></p>
-<h1>{_esc(goal_id)} <span class="pill {_phase_class(d.get("phase",""))}">{_esc(d.get("phase",""))}</span>
- <small class="muted">{_esc(d.get("lifecycle") or "")} · {d.get("actions_dispatched",0)} action(s) · auto-refresh 8s</small></h1>
-<p>{_esc(d.get("objective",""))}</p>
-{dir_html}
-<h2>working on now</h2>
-<div class="now">{now_html}</div>
-<h2>done when</h2>
-<p class="muted">{_esc(d.get("done_when","") or "—")}</p>
-<h2>deliveries (what shipped)</h2>
-<pre>{_esc(d.get("deliveries","") or "nothing shipped yet")}</pre>
-<h2>recent activity</h2>
-<pre>{_esc(d.get("recent_log","") or "—")}</pre>
-<h2>live events (last {len(d.get("live_events") or [])})</h2>
-<div>{events}</div>
-</body></html>"""
-    return HTMLResponse(html)
-
-
-def _iso(ms: int) -> str:
-    import datetime
-
-    return datetime.datetime.fromtimestamp(ms / 1000, tz=datetime.timezone.utc).isoformat()
+        return HTMLResponse(_dash.render_not_found("goal", goal_id), status_code=404)
+    return HTMLResponse(_dash.render_goal(d, goal_id, token_qs=TOKEN_QS))
 
 
 def _safe_parse(s: str) -> object:

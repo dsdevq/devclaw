@@ -37,7 +37,7 @@ from .goal_models import Action, EvalResult, Goal, GoalStatus
 from .goal_notify import Notifier
 from .goal_planner import ClaudeCaller
 from .goal_store import GoalStore
-from .limits import classify_failure, pause_seconds
+from .loom.limits import classify_failure, pause_seconds
 from .state_store import _now_ms
 from .workspace import WorkspaceError, prepare_workspace
 

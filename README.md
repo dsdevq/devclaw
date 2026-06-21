@@ -45,11 +45,18 @@ The full rationale — including why OpenHands and sandbox isolation are **ortho
 
 ```
 devclaw/
-├── server.py            # FastMCP server — task + goal tools, dashboard + SSE, bearer-auth middleware
+├── server.py            # FastMCP server — task + goal + project tools, thin dashboard/SSE routes, bearer-auth
+├── dashboard.py         # pure HTML renderers (programs/goals/projects pages) — presentation, no wiring
 ├── planner.py           # Goal → task DAG (shells out to `claude --print`)
 ├── state_store.py       # SQLite: programs, tasks, append-only events
 ├── task_queue.py        # async task lifecycle (asyncio) + concurrency + on-settle hook
 ├── sandcastle_runner.py # `docker run --rm` per task; streams events from the runner
+├── project_registry.py  # the control plane's source of truth: repos → driving goals → live status
+├── cli.py               # `devclaw projects …` — the terminal face of the control plane
+│   # --- loom: the reusable orchestration core (neutral name, extraction seam) ---
+├── loom/__init__.py     # curated public surface: classify_failure · scan_diff · Goal · GoalStore · …
+├── loom/limits.py       # usage-limit / rate-limit failure classifier (pure)
+├── loom/test_integrity.py # gate guard: flags deleted/weakened tests in a diff (pure)
 │   # --- the goal layer (folded-in goalclaw) ---
 ├── goal_service.py      # wires the layer: heartbeat loop, in-proc wake, the create/get/steer/eval surface
 ├── goal_tick.py         # one heartbeat: cheap check → plan → evaluate → dispatch → done-gate
