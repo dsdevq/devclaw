@@ -45,6 +45,7 @@ from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
+from .review_gate import format_feedback, review_diff
 from .sandcastle_runner import _translate_workspace_path, run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
@@ -68,6 +69,16 @@ TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "1800"))
 #: self-correct (a fix that didn't fully land, a transient error). 0 disables.
 #: NOT applied to timeouts — a stuck run would likely just hang again.
 TASK_MAX_RETRIES = int(os.environ.get("DEVCLAW_MAX_RETRIES", "1"))
+#: the pre-PR adversarial review gate: after the verify gate + test-integrity
+#: pass (behaviour is proven), a Claude pass READS the diff against the ticket +
+#: the quality bar and can send it back through the retry loop (request_changes)
+#: BEFORE the PR opens — closing the "green but untrustworthy" hole a spectator-PO
+#: can't see. On by default; DEVCLAW_REVIEW_GATE=0 disables it (escape hatch +
+#: quota lever, since it costs one Claude call per successful code task).
+REVIEW_GATE_ENABLED = os.environ.get("DEVCLAW_REVIEW_GATE", "1") not in ("0", "false", "False", "")
+#: review applies only to code-producing kinds (a diff to read); review_repository
+#: is read-only and onboard writes only a comprehension doc.
+_REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
 
 #: _run_and_settle returns this when a task was paused for a quota limit (not
 #: settled): the task is back to 'pending' and the global pause holds dispatch.
@@ -116,11 +127,12 @@ async def _git_diff(host_dir: str) -> str:
     return await asyncio.to_thread(_git_diff_sync, host_dir)
 
 
-async def _test_integrity_failure(workspace_dir: str) -> Optional[str]:
+def _integrity_failure(diff: str) -> Optional[str]:
     """Return a failure summary if the change weakened the tests (deleted/skipped),
-    else None. Enforces what the prompt only asks for. Best-effort — never raises."""
+    else None. Enforces what the prompt only asks for. Operates on an already-
+    computed diff (shared with the review gate). Best-effort — never raises."""
     try:
-        report = scan_diff(await _git_diff(_translate_workspace_path(workspace_dir)))
+        report = scan_diff(diff)
     except Exception:  # noqa: BLE001 — a guard must never break a real task
         return None
     if report.ok:
@@ -139,11 +151,15 @@ class TaskQueue:
         planner: Optional[PlannerFn] = None,
         runner: Optional[RunnerFn] = None,
         on_settle: Optional[Callable[[], None]] = None,
+        reviewer: Optional[Callable[..., Awaitable[dict]]] = None,
     ) -> None:
         self._store = store
         # Injectable for tests — default to the real planner / sandcastle runner.
         self._planner: PlannerFn = planner or (lambda g, w: plan_goal(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
+        # The pre-PR review gate's cognition (diff → verdict). Injectable so tests
+        # stub the Claude call; defaults to the real review_diff (host-side claude).
+        self._reviewer: Callable[..., Awaitable[dict]] = reviewer or review_diff
         # Optional in-process hook fired whenever a task/program reaches a
         # terminal state — the goal layer wires its heartbeat-wake here so a
         # finished engine run triggers an immediate goal tick (replacing the old
@@ -663,16 +679,30 @@ class TaskQueue:
                     verify = result.get("verify")
                     if verify and verify.get("ran") and not verify.get("passed"):
                         last_failure = _verify_failure_summary(verify)
-                    elif (integrity := await _test_integrity_failure(workspace_dir)) is not None:
-                        # gate passed but the change weakened the tests — treat as a
-                        # gate failure so it retries with the tampering fed back.
-                        last_failure = integrity
-                    elif defer_done:
-                        # caller delivers, then settles 'done' WITH pr_url atomically
-                        return result
                     else:
-                        self._store.mark_done(task_id, json.dumps(result))
-                        return None
+                        # Gate passed — now the checks that READ the change. Compute
+                        # the diff once and share it between the test-integrity guard
+                        # and the adversarial review gate.
+                        diff = await _git_diff(_translate_workspace_path(workspace_dir))
+                        integrity = _integrity_failure(diff)
+                        review_fb = (
+                            None if integrity is not None
+                            else await self._review_failure(kind, goal, diff)
+                        )
+                        if integrity is not None:
+                            # gate passed but the change weakened the tests — treat as
+                            # a gate failure so it retries with the tampering fed back.
+                            last_failure = integrity
+                        elif review_fb is not None:
+                            # gate + tests fine, but review found a real defect — feed
+                            # the issues back through the SAME retry loop as a gate fail.
+                            last_failure = review_fb
+                        elif defer_done:
+                            # caller delivers, then settles 'done' WITH pr_url atomically
+                            return result
+                        else:
+                            self._store.mark_done(task_id, json.dumps(result))
+                            return None
             # Quota guard: a usage/rate limit must NOT be retried-now (that burns
             # the remaining quota on the same doomed call). Pause ALL dispatch and
             # requeue this task; the tick loop auto-resumes when the pause expires.
@@ -696,6 +726,29 @@ class TaskQueue:
         # every attempt failed — escalate.
         suffix = f" (failed after {attempts} attempts)" if attempts > 1 else ""
         self._store.mark_failed(task_id, f"{last_failure}{suffix}")
+        return None
+
+    async def _review_failure(self, kind: TaskKind, goal: str, diff: str) -> Optional[str]:
+        """Run the pre-PR adversarial review gate on the change's diff. Returns the
+        request-changes feedback (→ fed back into the retry loop like a gate fail),
+        or None to let the task ship. Fails OPEN — a disabled gate, a non-code kind,
+        an empty diff, or any reviewer error returns None: a review hiccup must
+        never block a change that already passed the behavioural gate."""
+        if not REVIEW_GATE_ENABLED or kind not in _REVIEWABLE_KINDS:
+            return None
+        if not diff.strip():
+            return None
+        try:
+            review = await self._reviewer(goal=goal, kind=kind, diff=diff)
+        except Exception as err:  # noqa: BLE001 — never block a verified task on a review crash
+            sys.stderr.write(f"task-queue: review gate errored (failing open): {err}\n")
+            return None
+        if review.get("verdict") == "request_changes":
+            sys.stderr.write(
+                f"task-queue: review gate requested changes "
+                f"({len(review.get('blocking', []))} blocking issue(s))\n"
+            )
+            return format_feedback(review)
         return None
 
     # ---- notify ---------------------------------------------------------
