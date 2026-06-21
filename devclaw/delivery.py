@@ -65,10 +65,55 @@ def _pr_title(goal: str, kind: str | None = None, limit: int = 72) -> str:
     return _truncate_words(summary, limit)
 
 
-def _pr_body(goal: str, task_id: str, verify: dict | None, files_stat: str | None) -> str:
-    """A PR body a reviewer can actually use: the ticket, the gate verdict, the
-    diffstat, and an honest caveat that a green gate is not a quality guarantee."""
-    parts = ["## What", goal.strip(), ""]
+# A conventional-commit subject: `type(scope)?!: summary`.
+_CC = re.compile(r"^([a-z]+)(\([^)]+\))?!?:\s*(.+)$", re.IGNORECASE)
+
+
+def _cc_type(subject: str, kind: str | None) -> str:
+    """The conventional-commit *type* for a branch prefix — taken from the agent's
+    own commit subject if it wrote one (`fix(x): …` → `fix`), else mapped from the
+    task kind. So the branch matches what the change actually is."""
+    m = _CC.match(subject.strip())
+    return (m.group(1).lower() if m else "") or _KIND_TYPE.get(kind or "", "chore")
+
+
+def _cc_description(subject: str) -> str:
+    """The subject with any leading `type(scope): ` stripped — the basis for a
+    clean branch slug (`feat/add-deal-crud`, not `feat/feat-add-deal-crud`)."""
+    m = _CC.match(subject.strip())
+    return (m.group(3) if m else subject).strip()
+
+
+def _looks_conventional(subject: str) -> bool:
+    return bool(_CC.match(subject.strip()))
+
+
+async def _agent_commit_msg(workspace_dir: str, base: str | None) -> tuple[str, str] | None:
+    """The (subject, body) the AGENT committed for this change (HEAD of base..HEAD),
+    or None if it didn't commit. The engineer writing its own commit is what makes
+    the delivered PR describe WHAT CHANGED instead of pasting the task instruction."""
+    rng = f"{base}..HEAD" if base else "HEAD~1..HEAD"
+    rc, subj = await _run("git", "log", "-1", "--format=%s", rng, cwd=workspace_dir)
+    if rc != 0 or not subj.strip():
+        return None
+    _, body = await _run("git", "log", "-1", "--format=%b", rng, cwd=workspace_dir)
+    return subj.strip(), body.strip()
+
+
+def _pr_body(
+    goal: str, task_id: str, verify: dict | None, files_stat: str | None,
+    *, changes: str | None = None,
+) -> str:
+    """A PR body a reviewer can actually use. When the engineer wrote its own commit
+    (``changes``), lead with what CHANGED and keep the (long) task instruction as a
+    collapsed Ticket; otherwise fall back to the instruction as What. Always carries
+    the gate verdict, diffstat, and the honest green-gate-≠-correct caveat."""
+    if changes is not None:
+        parts = ["## Changes", changes.strip() or "(see commit)", ""]
+        parts += ["<details><summary>📋 Ticket (what was asked + why)</summary>", "",
+                  goal.strip(), "", "</details>", ""]
+    else:
+        parts = ["## What", goal.strip(), ""]
     if verify and verify.get("ran"):
         cmd = verify.get("cmd", "")
         if verify.get("passed"):
@@ -160,17 +205,36 @@ async def deliver_change(
         result["error"] = "no changes to deliver"
         return result
 
-    title = _pr_title(goal, kind)
-    branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
+    # Prefer the ENGINEER's own commit for the title / branch / PR body — so the
+    # delivery reads as "what changed", not the task instruction. The _COMMIT_CODA
+    # asks the agent to commit; when it did (clean tree, ahead of base) we derive
+    # from its commit. The dirty-tree path (agent left it uncommitted) is the
+    # fallback: devclaw commits with a goal-derived conventional title on a
+    # devclaw/* branch (so an auto-committed change is visibly distinct from an
+    # engineer-authored one).
+    agent_msg = await _agent_commit_msg(workspace_dir, base) if (not dirty and ahead > 0) else None
+    if agent_msg:
+        subject, body = agent_msg
+        title = _truncate_words(subject if _looks_conventional(subject) else _pr_title(subject, kind), 72)
+        branch = f"{_cc_type(subject, kind)}/{_slug(_cc_description(subject))}"
+        changes: str | None = body or subject
+    else:
+        title = _pr_title(goal, kind)
+        branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
+        changes = None
     result["branch"] = branch
 
-    # Put the change on devclaw's own branch (never push the agent's branch name,
-    # nor the base branch). `checkout -b` carries HEAD — including any commits the
-    # agent already made — onto the new branch.
+    # Put the change on its branch. `checkout -b` carries HEAD — including any
+    # commits the agent already made — onto the new branch. A feature slug can
+    # repeat across tasks, so on collision disambiguate with a short task suffix.
     rc, out = await _run("git", "checkout", "-b", branch, cwd=workspace_dir)
     if rc != 0:
-        result["error"] = f"branch failed: {out}"
-        return result
+        branch = f"{branch}-{task_id[:6]}"
+        rc, out = await _run("git", "checkout", "-b", branch, cwd=workspace_dir)
+        if rc != 0:
+            result["error"] = f"branch failed: {out}"
+            return result
+        result["branch"] = branch
 
     if dirty:
         await _run("git", "add", "-A", cwd=workspace_dir)
@@ -210,7 +274,7 @@ async def deliver_change(
         rc, out = await _run(
             "gh", "pr", "create", "--head", branch,
             "--title", title,
-            "--body", _pr_body(goal, task_id, verify, files_stat),
+            "--body", _pr_body(goal, task_id, verify, files_stat, changes=changes),
             cwd=workspace_dir,
         )
         url = _extract_pr_url(out)
