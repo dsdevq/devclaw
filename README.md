@@ -121,6 +121,29 @@ For a whole project (not one task), DevClaw **grills you to a shared spec first*
 
 The grill (one question at a time, each with a recommended answer) adapts [Matt Pocock's MIT `grill-me`](https://github.com/mattpocock/skills); the build runs as a program you can watch with `get_program` / the dashboard. The agreed spec + interview transcript are written to `$DEVCLAW_STATE/projects/<id>/` for the human record.
 
+### The project registry (control plane)
+
+The single source of truth for **"which repos is devclaw working on, and what's the status of each"** — one entity above the tasks/programs/goals primitives, drivable from chat, API, *and* CLI. A `Project` is a thin record (repo · workspace · preview url · status · the goal(s) driving it); it links goals **by id** and joins their live status on read, so it never caches "phase" and never rots. (Distinct from `build_project` above — that's the one-shot interview; this is the durable portfolio.)
+
+| Tool | Does |
+|---|---|
+| `register_project(project_id, name, …)` | Register a repo in the portfolio (slug id; optional repo_url / workspace_dir / preview_url) |
+| `list_projects(status?)` | Every project + a live rollup: each linked goal's phase/direction + derived `health` (working/blocked/done/idle/archived) |
+| `project_status(project_id)` | Full status of one project (facts + live goal status) |
+| `update_project(project_id, …)` | Update facts — record a preview URL, pause/archive, fix repo/workspace |
+| `link_goal(project_id, goal_id, unlink?)` | Attach/detach a durable goal (by id; status joined live) |
+
+Same control plane from a terminal (talks to the same stores; no server needed):
+
+```bash
+devclaw projects list                 # or: python -m devclaw.cli projects list
+devclaw projects show todo-fullstack-demo
+devclaw projects register todo "Todo App" --repo-url git@github.com:me/todo.git
+devclaw projects link todo-fullstack-demo todo-quality-audit
+```
+
+…and a portfolio view at **`/projects`** on the HTTP dashboard.
+
 ## Auth (the design constraint)
 
 DevClaw inherits a `claude` OAuth session — it never uses an API key. `ANTHROPIC_API_KEY` is **actively refused** at both the host (planner) and sandbox layers so a stray key can't silently switch autonomous runs onto metered billing. All you need is a logged-in `claude` CLI: the planner shells out to it, and the per-task sandbox bind-mounts `~/.claude` **read-only** (auth works; nothing else from the host is mounted, and the container is destroyed on exit so no state escapes).
@@ -136,10 +159,10 @@ npm install -g @agentclientprotocol/claude-agent-acp   # ACP adapter (one-time, 
 DEVCLAW_TRANSPORT=stdio devclaw-mcp        # local dev (MCP over stdio)
 # or HTTP for a long-running service:
 DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
-#   → MCP at /mcp, live dashboard at /dashboard, SSE at /programs/:id/events
+#   → MCP at /mcp, dashboards at /dashboard (programs) · /goals · /projects, SSE at /programs/:id/events
 ```
 
-(`devclaw-mcp` is the console script; `python -m devclaw.server` works too.)
+(`devclaw-mcp` is the console script for the server; `devclaw` is the control-plane CLI; `python -m devclaw.server` / `python -m devclaw.cli` work too.)
 
 ### Engine modes (`DEVCLAW_ENGINE`)
 
