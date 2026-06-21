@@ -77,3 +77,21 @@ def test_unknown_kind_falls_back_to_implement_feature(runner):
     assert runner._wrap_goal("frobnicate", "X") == runner._wrap_goal(
         "implement_feature", "X"
     )
+
+
+def test_implement_feature_asks_for_a_clean_self_authored_commit(runner):
+    # The engineer writes its OWN conventional commit (so the delivered PR
+    # describes the change, not the instruction), and does NOT push/PR itself.
+    wrapped = runner._wrap_goal("implement_feature", "GOAL-TOKEN")
+    assert "conventional-commit" in wrapped.lower()
+    assert "COMMIT" in wrapped
+    assert "do not push" in wrapped.lower() and "pull request" in wrapped.lower()
+
+
+def test_wrapper_makes_agents_md_the_accumulated_harness(runner):
+    # AGENTS.md is read FIRST and kept current as the reusable knowledge harness —
+    # so future tasks don't re-derive the same context (token efficiency).
+    wrapped = runner._wrap_goal("implement_feature", "x")
+    assert "AGENTS.md" in wrapped
+    assert "keep it current" in wrapped.lower()
+    assert "re-derive" in wrapped.lower()

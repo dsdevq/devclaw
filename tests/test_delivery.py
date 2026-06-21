@@ -107,9 +107,10 @@ async def test_deliver_noop_when_clean(tmp_path):
     assert r["committed"] is False and "no changes to deliver" in r["error"]
 
 
-async def test_deliver_ships_agent_committed_branch(tmp_path):
-    # The agent committed its change to its own branch, leaving a CLEAN tree.
-    # Delivery must still ship it: put it on a devclaw branch and push.
+async def test_deliver_uses_the_engineer_commit_for_branch_not_the_goal(tmp_path):
+    # The agent committed its own change with a conventional-commit message. The
+    # delivered branch (and title/body) must describe WHAT CHANGED — derived from
+    # the agent's commit — NOT the raw task instruction.
     origin = str(tmp_path / "origin.git")
     subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
     repo = str(tmp_path / "repo")
@@ -121,26 +122,38 @@ async def test_deliver_ships_agent_committed_branch(tmp_path):
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
     _git(repo, "push", "-q", "origin", "HEAD")
-    # simulate the agent: a new branch + commit, then a clean tree
-    _git(repo, "checkout", "-q", "-b", "feat/agent-work")
+    # simulate the agent: a commit with a real conventional message, clean tree
     (tmp_path / "repo" / "feature.txt").write_text("agent change\n")
     _git(repo, "add", "-A")
-    _git(repo, "commit", "-q", "-m", "agent change")
+    _git(repo, "commit", "-q", "-m", "feat(api): add the widget endpoint")
 
+    # the GOAL is a long instruction; it must NOT shape the branch.
     r = await deliver_change(
-        workspace_dir=repo, task_id="abcd1234ef", goal="add feature", kind="implement_feature"
+        workspace_dir=repo, task_id="abcd1234ef",
+        goal="Read PRD.md first, then implement the widget API in one coherent change...",
+        kind="implement_feature",
     )
 
-    assert r["committed"] is True
-    assert r["pushed"] is True
-    assert r["delivered"] is True
-    assert r["branch"] == "devclaw/abcd1234-add-feature"
-    assert r["pr_url"] is None  # local (non-github) remote → no gh pr create
-    # the agent's commit reached origin on the devclaw branch
+    assert r["committed"] is True and r["pushed"] is True and r["delivered"] is True
+    # branch is derived from the engineer's commit subject, not the goal slug
+    assert r["branch"] == "feat/add-the-widget-endpoint"
     refs = subprocess.run(
         ["git", "ls-remote", "--heads", origin], capture_output=True, text=True
     ).stdout
-    assert "devclaw/abcd1234-add-feature" in refs
+    assert "feat/add-the-widget-endpoint" in refs and "devclaw/" not in refs
+
+
+def test_cc_helpers_and_changes_body():
+    from devclaw.delivery import _cc_type, _cc_description, _looks_conventional
+    assert _looks_conventional("feat(api): add x") and not _looks_conventional("add x")
+    assert _cc_type("fix(db): y", "implement_feature") == "fix"      # from the subject
+    assert _cc_type("just a subject", "fix_bug") == "fix"            # falls back to kind
+    assert _cc_description("feat(api): add the widget") == "add the widget"
+    # the changes-path body leads with what changed + collapses the ticket
+    body = _pr_body("the long ticket instruction", "id", None, None, changes="Added a widget endpoint + tests")
+    assert "## Changes" in body and "Added a widget endpoint" in body
+    assert "Ticket" in body and "the long ticket instruction" in body
+    assert "## What" not in body  # the instruction is the ticket, not the headline
 
 
 # ---- TaskQueue wiring ------------------------------------------------------

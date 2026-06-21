@@ -48,7 +48,27 @@ _CONTEXT_PREAMBLE = (
     "if it's poorly structured, buggy, or has weak/missing tests, that is part of "
     "the job, not a pattern to copy. Follow the project's stated conventions and "
     "sound engineering over blindly mimicking bad surrounding code, and note in your "
-    "summary anything pre-existing you had to work around or that needs follow-up."
+    "summary anything pre-existing you had to work around or that needs follow-up. "
+    "AGENTS.md in the repo root is the project's ACCUMULATED AGENT HARNESS — read it "
+    "FIRST so you don't re-derive what's already known (stack, how to run/test, "
+    "layout, conventions, key decisions, gotchas, reusable patterns). As part of "
+    "this change, KEEP IT CURRENT: if it's missing, create it; if you learned or "
+    "decided something a future task would otherwise have to re-reason, record it "
+    "there concisely. It is the memory that saves the next task from re-thinking "
+    "the same topics — treat maintaining it as part of the work, not optional."
+)
+# The engineer writes its OWN commit, the way a developer does — so the delivered
+# PR's title/branch/body describe WHAT CHANGED, not the ticket instruction. devclaw
+# derives the branch + PR from this commit, so a clean conventional-commit message
+# here is what makes the history readable. (Don't push or open a PR — devclaw does.)
+_COMMIT_CODA = (
+    "Finally, COMMIT your change yourself with a clean conventional-commit message: "
+    "a concise subject line in the form `type(scope): what changed` (type = feat / "
+    "fix / refactor / test / docs / chore; imperative, ≤ ~70 chars, describing the "
+    "CHANGE — not the task you were given), then a blank line, then a short body "
+    "explaining WHY and how you verified it. Make ONE commit for the whole change "
+    "(stage everything, including new files). Do NOT push and do NOT open a pull "
+    "request — devclaw delivers your commit as a branch + PR."
 )
 # The code-quality bar. Without it the agent optimizes for the ONE thing it's
 # told to satisfy — a green test suite — and ships "a working version": logic
@@ -85,12 +105,12 @@ _VERIFY_CODA = (
 
 _KIND_WRAPPERS = {
     "implement_feature": (
-        f"{_CONTEXT_PREAMBLE}\n\n{_QUALITY_BAR}\n\n{_VERIFY_CODA}\n\n"
+        f"{_CONTEXT_PREAMBLE}\n\n{_QUALITY_BAR}\n\n{_VERIFY_CODA}\n\n{_COMMIT_CODA}\n\n"
         f"Feature to implement:\n{{goal}}"
     ),
     "fix_bug": (
         f"{_CONTEXT_PREAMBLE} Make the smallest change that fixes the bug.\n\n"
-        f"{_QUALITY_BAR}\n\n{_VERIFY_CODA}\n\nBug description:\n{{goal}}"
+        f"{_QUALITY_BAR}\n\n{_VERIFY_CODA}\n\n{_COMMIT_CODA}\n\nBug description:\n{{goal}}"
     ),
     "review_repository": (
         "You are reviewing this repository — READ ONLY. Do NOT modify, create, "
