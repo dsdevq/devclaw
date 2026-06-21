@@ -18,6 +18,10 @@ from devclaw.limits import FailureKind, classify_failure, _parse_retry_after
     # the REAL Claude Code usage-cap wording observed in the dogfood:
     ("Internal error: You're out of extra usage · resets 10pm (UTC)", FailureKind.QUOTA),
     ("Conversation run failed: Internal error: You're out of extra usage · resets 10pm (UTC)", FailureKind.QUOTA),
+    # the Claude Code 5-hour SESSION-cap wording (dogfood 2026-06-21 — slipped
+    # past the patterns, so the goal churned instead of pausing):
+    ("You've hit your session limit · resets 12:20am (Europe/Dublin)", FailureKind.QUOTA),
+    ("claude --print exited 1. stdout:\nYou've hit your session limit · resets 12:20am", FailureKind.QUOTA),
     # --- RATE_LIMIT (short cap / 429) ---
     ("API Error: 429 Too Many Requests", FailureKind.RATE_LIMIT),
     ("rate limit exceeded, slow down", FailureKind.RATE_LIMIT),

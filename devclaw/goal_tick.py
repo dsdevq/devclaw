@@ -38,6 +38,7 @@ from .goal_notify import Notifier
 from .goal_planner import ClaudeCaller
 from .goal_store import GoalStore
 from .loom.limits import classify_failure, pause_seconds
+from .planner import PlannerError
 from .state_store import _now_ms
 from .workspace import WorkspaceError, prepare_workspace
 
@@ -94,6 +95,17 @@ def _notify_floor() -> NotifyLevel:
     return _ALTITUDES.get(
         os.environ.get("DEVCLAW_NOTIFY_ALTITUDE", "owner").strip().lower(), NotifyLevel.OWNER
     )
+
+
+def _action_label(ref) -> str:
+    """A SHORT human label for an action — its first line, trimmed. An action's
+    full ``goal`` is a long instruction prompt; putting it in a notification (which
+    happens when the plain-language summarizer is quota-blocked and falls back to
+    the raw text) spams the owner with the entire prompt. Keep the notification
+    terse BY CONSTRUCTION so it reads well even without the summarizer."""
+    text = (getattr(ref, "goal", None) or getattr(ref, "tool", "") or "change").strip()
+    first = text.splitlines()[0].strip() if text else "change"
+    return (first[:90].rstrip() + "…") if len(first) > 90 else first
 
 
 async def _notify(
@@ -278,11 +290,20 @@ async def tick_goal(
                     store.append_log(goal_id, f"auto-merged {poll.pr_url}")
                     await _notify(
                         notifier, NotifyLevel.OWNER,
-                        f"✅ [{goal_id}] shipped + merged — {ref.goal or ref.tool} ({poll.pr_url})",
+                        f"✅ [{goal_id}] shipped + merged — {_action_label(ref)} ({poll.pr_url})",
                         summarize=summary_caller,
                     )
                 else:
                     store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
+
+        # Persist the consumed action (in_flight is now None) IMMEDIATELY — before
+        # the next-action planner (and any other downstream cognition) runs. That
+        # planner call can RAISE on a usage limit; if the cleared state isn't saved
+        # first, the tick aborts with in_flight still pointing at the just-finished
+        # action, and the NEXT tick re-reads it and re-ships / re-announces the same
+        # work — forever (the duplicate-merge loop, dogfood 2026-06-21). One save
+        # here makes "action consumed" durable so a later crash can't undo it.
+        store.save_status(goal_id, status)
 
     # ---- DISCOVERY resolution: the investigating review just finished -------
     if discovery_detail is not None:
@@ -359,9 +380,14 @@ async def tick_goal(
             goal, status, store.recent_log(goal_id), steering, finished_detail,
             claude_caller=planner_caller, discovery=store.read_discovery(goal_id),
         )
-    except _planner.GoalPlannerError as exc:
+    except (_planner.GoalPlannerError, PlannerError) as exc:
         # A usage/rate limit reaching the PLANNER must pause the layer, not be
         # logged as a plan error and retried next tick (which re-burns the quota).
+        # NB: the goal planner shells out via the shared `claude --print` caller,
+        # which raises `planner.PlannerError` (NOT GoalPlannerError) on a non-zero
+        # exit — e.g. a session/usage limit. Catching only GoalPlannerError let it
+        # escape to the outer "tick error (isolated)" handler, so it never paused
+        # and the tick churned every cycle (dogfood 2026-06-21). Catch both.
         paused = _maybe_pause(engine, store, goal_id, str(exc))
         if paused is not None:
             store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))

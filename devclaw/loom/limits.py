@@ -80,7 +80,11 @@ _AUTH = re.compile(
 _QUOTA = re.compile(
     r"usage limit|weekly limit|quota|out of (extra )?usage|ran out of \w*\s*usage|"
     r"limit reached|reached your (usage|plan) limit|you'?ve reached|"
-    r"plan limit|insufficient_quota|credit balance",
+    r"plan limit|insufficient_quota|credit balance|"
+    # "You've hit your session limit · resets 12:20am" — the Claude Code 5-hour
+    # session cap; resets at a time, so pause + resume (dogfood finding 2026-06-21,
+    # this wording slipped past and the goal churned instead of pausing).
+    r"session limit|hit your [\w ]{0,16}limit",
     re.IGNORECASE,
 )
 # RATE_LIMIT: short-term throttling (per-min / 5-hour) + HTTP 429.

@@ -875,3 +875,104 @@ async def test_blocked_on_prep_failure_does_not_respam(tmp_path):
     assert out is Outcome.IDLE
     assert planner2.calls == 0
     assert len(notifier.sent) == sent_after_block        # no second ping
+
+
+# ---- regression: the duplicate-ship loop (dogfood 2026-06-21) ---------------
+
+
+class RaisingClaude:
+    """A cognition caller that always raises — models the planner hitting a usage
+    limit (or any error) right after an action finished."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls = 0
+
+    async def __call__(self, prompt: str) -> str:
+        self.calls += 1
+        raise self.exc
+
+
+@pytest.mark.asyncio
+async def test_consumed_action_is_persisted_before_a_planner_crash(tmp_path, monkeypatch):
+    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    # The bug: in_flight=None was computed in memory but NOT saved before the
+    # next-action planner ran; the planner crashing on a usage limit aborted the
+    # tick with the stale pointer on disk, so the next tick re-shipped/re-announced
+    # the same finished action forever. A non-(Goal)PlannerError still escapes
+    # tick_goal — but the cleared state must already be durable.
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "build M2\n\nlong body"),
+    ))
+    planner = RaisingClaude(RuntimeError("boom after the action finished"))
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="done",
+        pr_url="https://github.com/o/r/pull/2", gate_passed=True,
+    ))
+    notifier = RecordingNotifier()
+    merger = RecordingMerger(ok=True)
+
+    with pytest.raises(RuntimeError):
+        await _tick(store, "g", planner, FakeClaude(), engine, notifier, merger=merger)
+
+    # the action was consumed + merged exactly once …
+    assert merger.merged == ["https://github.com/o/r/pull/2"]
+    # … and the cleared in_flight is DURABLE despite the crash — so a re-tick
+    # plans the next milestone instead of re-shipping this one.
+    assert store.load_status("g").in_flight is None
+
+
+@pytest.mark.asyncio
+async def test_planner_session_limit_is_caught_not_escaped(tmp_path):
+    # The shared `claude --print` caller raises planner.PlannerError (NOT
+    # GoalPlannerError) on a usage limit. goal_tick must catch it (so it can pause
+    # / handle it) rather than let it escape to the outer 'tick error (isolated)'.
+    from devclaw.planner import PlannerError
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "build M2"),
+    ))
+    planner = RaisingClaude(PlannerError("You've hit your session limit · resets 12:20am (Europe/Dublin)"))
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="done",
+        pr_url="https://github.com/o/r/pull/2", gate_passed=True,
+    ))
+
+    out = await _tick(store, "g", planner, FakeClaude(), engine, RecordingNotifier(), merger=RecordingMerger())
+
+    # caught + handled (FakeEngine has no set_global_pause → ERROR, but NOT raised)
+    assert out is Outcome.ERROR
+    assert store.load_status("g").in_flight is None  # still durably cleared
+
+
+@pytest.mark.asyncio
+async def test_ship_notification_is_concise_not_the_full_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    # The notification must not paste the action's full instruction prompt (which
+    # is what happened when the plain-language summarizer was quota-blocked and
+    # fell back to raw text). With summary_caller=None the raw text is sent — and
+    # it must already be terse.
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    long_goal = "Implement M2 deals CRUD\n\nSECRET_DETAIL_LINE that must never be pasted into a ping\n- a\n- b"
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", long_goal),
+    ))
+    planner = FakeClaude(ACT_FEATURE)
+    notifier = RecordingNotifier()
+
+    await _tick(store, "g", planner, FakeClaude(), FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="done",
+        pr_url="https://github.com/o/r/pull/2", gate_passed=True,
+    )), notifier, merger=RecordingMerger())
+
+    ship = [m for m in notifier.sent if "shipped + merged" in m]
+    assert ship, "expected a shipped+merged notification"
+    assert "SECRET_DETAIL_LINE" not in ship[0]      # not the full prompt
+    assert len(ship[0]) < 160                        # terse
