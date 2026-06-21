@@ -233,6 +233,32 @@ async def test_review_skipped_when_disabled(store, monkeypatch):
     assert store.get_task(tid).status == "done" and called["n"] == 0
 
 
+async def test_diff_uses_workspace_path_verbatim_not_host_translation(store, monkeypatch):
+    # Regression: the post-gate git diff (shared by the test-integrity guard AND
+    # the review gate) runs in THIS process, so it must use the workspace path as
+    # we see it — NOT the docker-bind host path. Translating container→host pointed
+    # git at a `/srv/...` path that doesn't exist in our mount namespace → empty
+    # diff → BOTH guards silently no-op'd in the deployed container. The suite
+    # missed it because test workspaces don't start with the container prefix, so
+    # the translation was a harmless no-op locally. This pins the contract.
+    monkeypatch.setenv("DEVCLAW_CONTAINER_PATH_PREFIX", "/var/lib/devclaw/workspaces")
+    monkeypatch.setenv("DEVCLAW_HOST_PATH_PREFIX", "/srv/devclaw/workspaces")
+    seen: dict = {}
+
+    async def capture_diff(path):
+        seen["path"] = path
+        return ""  # empty → guards pass; we only assert WHICH path git was given
+
+    monkeypatch.setattr(task_queue, "_git_diff", capture_diff)
+    ws = "/var/lib/devclaw/workspaces/abc/due-dates"
+    q = TaskQueue(store, runner=_ok_gate_runner([]))
+    tid = q.submit(kind="implement_feature", workspace_dir=ws, goal="g", verify_cmd="pytest")
+    await q.drain()
+    assert store.get_task(tid).status == "done"
+    # verbatim container path — NOT "/srv/devclaw/workspaces/abc/due-dates"
+    assert seen["path"] == ws
+
+
 async def test_review_skipped_for_non_code_kind(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     called = {"n": 0}
