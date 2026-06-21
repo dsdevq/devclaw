@@ -42,10 +42,10 @@ import httpx
 
 from .delivery import deliver_change
 from .engine import Engine, EngineEvent, EngineRequest
-from .limits import classify_failure, pause_seconds
+from .loom.limits import classify_failure, pause_seconds
+from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .sandcastle_runner import _translate_workspace_path, run_sandcastle
-from .test_integrity import scan_diff
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
