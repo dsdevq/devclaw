@@ -250,6 +250,7 @@ class GoalService:
                 if s.in_flight else None
             ),
             "actions_dispatched": s.actions_dispatched,
+            "progress": {"last_at": s.last_progress_at, "stalled": s.no_progress_notified},
             "direction": (
                 {"verdict": s.last_eval_verdict, "at": s.last_eval_at, "note": s.last_eval_note}
                 if s.last_eval_verdict else None
@@ -306,6 +307,7 @@ class GoalService:
                  "is_done_check": s.in_flight.is_done_check}
                 if s.in_flight else None
             ),
+            "progress": {"last_at": s.last_progress_at, "stalled": s.no_progress_notified},
             "direction": (
                 {"verdict": s.last_eval_verdict, "at": s.last_eval_at,
                  "note": s.last_eval_note}

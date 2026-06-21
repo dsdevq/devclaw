@@ -46,6 +46,11 @@ WorkspacePrep = Callable[[str, "str | None"], Awaitable[str]]
 
 #: deliveries between periodic direction evaluations (0 → only at the done-gate)
 EVAL_EVERY = int(os.environ.get("DEVCLAW_GOAL_EVAL_EVERY", "3"))
+#: wall-clock seconds an EXECUTING goal may go without a delivery before the
+#: no-progress watchdog pings the owner once. Complements the per-task timeout
+#: (which kills one hung run) by catching a goal that keeps churning — dispatching,
+#: failing the gate, re-planning — without ever shipping. 0 disables. Default 6h.
+NO_PROGRESS_S = int(os.environ.get("DEVCLAW_GOAL_NO_PROGRESS_S", "21600"))
 #: when True, a planner "done" proposal dispatches a read-only review of the repo
 #: against done_when and the evaluator judges THAT before the goal closes.
 VERIFY_DONE = os.environ.get("DEVCLAW_GOAL_VERIFY_DONE", "1") not in ("0", "false", "")
@@ -140,6 +145,52 @@ async def _block_on_prep_failure(
     return Outcome.BLOCKED
 
 
+def _progress_window_active(status: GoalStatus) -> bool:
+    """Is this a goal the no-progress watchdog should measure? Only one that is
+    actively executing — not waiting on the owner (blocked / grilling / plan_review,
+    which already pinged), not done/cancelled (returned earlier). 'verifying' counts
+    (the done-gate review is still work in flight)."""
+    return (status.lifecycle or "executing") == "executing" and status.phase in (
+        "idle", "in_flight", "verifying",
+    )
+
+
+async def _check_no_progress(
+    goal_id: str, goal: Goal, status: GoalStatus,
+    *, store: GoalStore, notifier: Notifier, window_s: int,
+    summarize: "ClaudeCaller | None" = None,
+) -> GoalStatus:
+    """Zero-token wall-clock watchdog. Self-initializes the progress baseline the
+    first time it sees an executing goal, then fires exactly one OWNER ping if the
+    goal has gone ``window_s`` without a delivery. Returns the (possibly updated)
+    status so the caller carries the baseline/flag forward instead of clobbering it.
+
+    Pure mechanism: it reads timestamps and never calls cognition on the measuring
+    path (the summarizer only runs for the one ping that actually clears the gate)."""
+    if window_s <= 0 or not _progress_window_active(status):
+        return status
+    if status.last_progress_at is None:
+        # start the clock — the goal just began executing (covers legacy goals and
+        # any path into executing, without touching every transition site).
+        status = replace(status, last_progress_at=store.now_iso())
+        store.save_status(goal_id, status)
+        return status
+    elapsed = store.seconds_since(status.last_progress_at)
+    if elapsed is None or elapsed < window_s or status.no_progress_notified:
+        return status
+    hours = round(elapsed / 3600, 1)
+    status = replace(status, no_progress_notified=True)
+    store.save_status(goal_id, status)
+    store.append_log(goal_id, f"no-progress watchdog fired — ~{hours}h since last delivery")
+    await _notify(
+        notifier, NotifyLevel.OWNER,
+        f"🐢 [{goal_id}] no progress in ~{hours}h on \"{goal.objective}\" — "
+        f"it's still working but nothing has shipped; you may want to take a look",
+        summarize=summarize,
+    )
+    return status
+
+
 async def tick_goal(
     goal_id: str,
     *,
@@ -152,6 +203,7 @@ async def tick_goal(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     grill_caller: "ClaudeCaller | None" = None,
@@ -165,6 +217,15 @@ async def tick_goal(
     #: None on a legacy goal → it behaves as "executing" (flat backlog), never
     #: entering the planning front-end. New outcome goals start at "new".
     lifecycle = status.lifecycle or "executing"
+
+    # ---- no-progress watchdog (zero tokens): runs first, every tick, including
+    # while an action is still in-flight — pure timestamp math. Self-initializes
+    # the baseline the first time it sees an executing goal, fires one owner ping
+    # if the goal has gone too long without shipping, and is reset by deliveries.
+    status = await _check_no_progress(
+        goal_id, goal, status,
+        store=store, notifier=notifier, window_s=no_progress_s, summarize=summary_caller,
+    )
 
     # ---- cheap check (zero tokens): poll any in-flight action ---------------
     finished_detail = ""
@@ -202,6 +263,9 @@ async def tick_goal(
             status = replace(
                 status, in_flight=None, phase="idle",
                 deliveries_since_eval=status.deliveries_since_eval + delivered,
+                # a delivery is forward progress → reset the no-progress watchdog.
+                last_progress_at=(store.now_iso() if delivered else status.last_progress_at),
+                no_progress_notified=(False if delivered else status.no_progress_notified),
             )
             # Hands-off auto-merge (decision 2): a delivered change whose verify
             # gate passed is merged by devclaw itself, with a plain owner ping.
@@ -657,6 +721,7 @@ async def tick_all(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     grill_caller: "ClaudeCaller | None" = None,
@@ -680,7 +745,7 @@ async def tick_all(
                 goal_id, store=store, engine=engine,
                 planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                 notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-                eval_every=eval_every, verify_done=verify_done,
+                eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
                 summary_caller=summary_caller, merger=merger, grill_caller=grill_caller,
             )
         except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
