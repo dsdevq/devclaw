@@ -177,6 +177,7 @@ Built to run unattended, and to ship code you'd actually merge:
 - **Survives usage limits.** A quota / rate-limit pause is *classified*, not treated as a failure: the task is requeued and a single account-wide `paused_until` gates **both** the task queue and the goal heartbeat, which auto-resume when the cap resets — zero tokens while paused, the owner pinged once. Auth errors are surfaced, never slept on.
 - **No-progress watchdog.** An executing goal that ships nothing for `DEVCLAW_GOAL_NO_PROGRESS_S` (default 6h) pings the owner once — a zero-token wall-clock check that complements the per-task timeout.
 - **In-house quality gate (no third-party QC).** The engineer is briefed to *audit before extending* — assume even fine-looking code may be poor — and the verify gate runs a **test-integrity** check that fails the gate on deleted / skipped / weakened tests, closing the "go green by gutting the tests" path.
+- **Pre-PR review gate — green means *reviewed*.** A green gate proves behaviour, not quality; it can't see a dead-code line or a frontend change it never exercises. So after the gate + test-integrity pass and **before** the PR opens, a separate `claude` pass *reads the diff* against the ticket + quality bar and returns `approve` / `request_changes`. A `request_changes` verdict feeds its located issues back through the same retry loop as a gate failure (then escalates), so the change a spectator-PO finally sees has been read, not just run. Fails open and `DEVCLAW_REVIEW_GATE=0` disables it.
 
 ## Auth (the design constraint)
 
@@ -229,6 +230,8 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `DEVCLAW_GOAL_NOTIFY_URL` | — | notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough) |
 | `DEVCLAW_TASK_TIMEOUT_S` | `1800` | per-task wall-clock cap — a run exceeding it is cancelled (its sandbox torn down) and the task marked `failed`, so a hung agent fails cleanly instead of burning quota. `<=0` disables. |
 | `DEVCLAW_MAX_RETRIES` | `1` | re-runs of a task that fails its verify gate (or errors), each with the failure fed back into the goal, before escalating. `0` disables. Timeouts are never retried. |
+| `DEVCLAW_REVIEW_GATE` | `1` | the pre-PR adversarial review gate: after the gate + test-integrity pass, a `claude` pass reads the diff and can send it back through the retry loop (`request_changes`) before the PR opens. `0` disables (escape hatch + quota lever — one `claude` call per successful code task). |
+| `DEVCLAW_REVIEW_MODEL` | `sonnet` | model tier for the review-gate `claude` pass (alias or full id; empty → account default). |
 | `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery (or use a logged-in `gh`). Separate from the Claude OAuth pillar — this is git access, not cognition billing. |
 | `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | wall-clock cap for the verify-gate command (the `verify_cmd` run after the agent finishes); on expiry the gate fails the task. |
 | `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image (see `.sandcastle/Dockerfile`) |
