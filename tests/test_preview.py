@@ -15,6 +15,18 @@ def test_preview_name_slugifies():
     assert preview.preview_name("///") == "devclaw-preview-app"
 
 
+def test_launcher_handles_root_requirements_fastapi():
+    # The layout devclaw builds from scratch — a FastAPI app at app/main.py with
+    # requirements.txt at the repo root, serving its own UI at / — must be detected
+    # and run with uvicorn, NOT fall through to a python http.server file listing.
+    # Regression guard for the closeloop mis-serve (dir listing instead of the CRM).
+    launcher = preview._LAUNCHER
+    assert "elif [ -f requirements.txt ]" in launcher
+    assert "app.main" in launcher            # the closeloop layout's module candidate
+    assert r"FastAPI\(" in launcher          # ASGI-app detection grep (regex-escaped paren)
+    assert 'uvicorn "$target"' in launcher
+
+
 def test_build_run_args_has_resource_caps_and_ports():
     args = preview._build_run_args(name="devclaw-preview-x", host_path="/srv/ws/x", port=8000)
     j = " ".join(args)
