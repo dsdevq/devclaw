@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Awaitable, Callable
 
 from . import goal_evaluator as _evaluator
+from . import deploy as _deploy
 from . import goal_grill as _grill
 from . import goal_merge as _merge
 from . import goal_planner as _planner
@@ -471,6 +472,26 @@ async def _run_mid_flight_eval(
     return None
 
 
+async def _auto_deploy(goal_id: str, goal: Goal, store: GoalStore) -> str:
+    """Deploy the built app to a durable Tailscale URL on goal completion and return
+    a short suffix to append to the completion notice (the live URL, or empty). Fully
+    best-effort: any failure is logged and swallowed — a verified-complete goal must
+    never be reopened because hosting wobbled. Off via DEVCLAW_GOAL_AUTODEPLOY=0."""
+    if os.environ.get("DEVCLAW_GOAL_AUTODEPLOY", "1") == "0":
+        return ""
+    try:
+        out = await _deploy.deploy_project(goal.workspace_dir, goal_id)
+    except Exception as exc:  # noqa: BLE001 — handoff is a bonus; completion is not contingent on it
+        store.append_log(goal_id, f"auto-deploy skipped: {exc}")
+        return ""
+    url = out.get("url") or out.get("loopback_url", "")
+    store.append_log(goal_id, f"deployed: {url or out.get('container')} (ready={out.get('ready')})")
+    if out.get("tailscale_served") and out.get("url"):
+        return f"\n🔗 live: {out['url']}"
+    # Tailscale not wired from here — hand back the one-time serve command.
+    return f"\n🔗 deployed on the VPS — expose once: {out.get('serve_command', '')}"
+
+
 async def _resolve_done_gate(
     goal_id: str, goal: Goal, status: GoalStatus, review_report: str,
     *, store: GoalStore, evaluator_caller: ClaudeCaller, notifier: Notifier,
@@ -498,7 +519,11 @@ async def _resolve_done_gate(
     store.append_log(goal_id, f"done-gate: {ev.verdict} — {ev.rationale[:200]}")
     if ev.verdict == "achieved":
         store.save_status(goal_id, replace(base, phase="done", next=ev.rationale[:200]))
-        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}", summarize=summarize)
+        # Handoff: a completed goal should be a thing the owner can OPEN, not just a
+        # closed ticket. Best-effort deploy the built app to a durable Tailscale URL.
+        # NEVER let a deploy hiccup undo a verified-complete goal — the goal IS done.
+        live = await _auto_deploy(goal_id, goal, store)
+        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}{live}", summarize=summarize)
         return Outcome.DONE
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"
