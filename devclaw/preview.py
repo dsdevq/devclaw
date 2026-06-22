@@ -85,6 +85,26 @@ except Exception as e:
     print("preview: static mount skipped:", e)
 PY
   exec uvicorn _preview:app --host 0.0.0.0 --port 8000
+elif [ -f requirements.txt ]; then
+  # Root-level Python ASGI app — the layout devclaw builds from scratch: FastAPI
+  # at app/main.py serving its OWN static UI at /, requirements.txt at the repo
+  # root (NOT the backend/+frontend/ split above). closeloop is exactly this.
+  # Detect the ASGI app (module:app) and run it — the app serves its own UI, so
+  # no static mount/rewrite is needed. Falls back to a file listing only if no
+  # ASGI app is found (so a non-web repo still does something instead of crashing).
+  pip install -q -r requirements.txt
+  target=""
+  for cand in app.main main app application src.main app.app; do
+    f="$(echo "$cand" | tr . /).py"
+    if [ -f "$f" ] && grep -qE 'FastAPI\(|Starlette\(' "$f"; then
+      target="$cand:app"; break
+    fi
+  done
+  if [ -n "$target" ]; then
+    exec uvicorn "$target" --host 0.0.0.0 --port 8000
+  else
+    exec python3 -m http.server 8000
+  fi
 elif [ -d frontend ]; then
   norm frontend
   cd /tmp/preview-frontend && exec python3 -m http.server 8000
