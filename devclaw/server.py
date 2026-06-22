@@ -42,6 +42,7 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 
 from . import __version__
 from . import dashboard as _dash
+from . import deploy as _deploy
 from . import preview as _preview
 from . import repo as _repo
 from .goal_service import GoalService
@@ -749,6 +750,53 @@ async def stop_preview(slug: str) -> str:
 async def list_previews() -> str:
     """List all live previews (running + stopped) with their status."""
     return json.dumps(await _preview.list_previews(), indent=2)
+
+
+# ===== durable deploy hosting ================================================
+# The handoff twin of preview: a long-lived, reboot-surviving container at a
+# STABLE per-slug URL over Tailscale. Auto-fires when a goal reaches `achieved`
+# (see goal_tick). See devclaw/deploy.py.
+
+
+@mcp.tool
+async def deploy_project(workspace_dir: str, slug: str) -> str:
+    """Deploy a project's BUILT app as a DURABLE host on the VPS and return its stable
+    Tailscale URL — so the owner is HANDED a running product to open, not a diff to
+    read. Unlike a preview (ephemeral, SSH-tunnel), a deploy survives reboots
+    (--restart unless-stopped), lives at a fixed per-slug port so the URL never
+    changes across redeploys, and is reachable over Tailscale (https, auto-TLS,
+    never public). Idempotent: redeploying the same slug replaces the container at
+    the same URL. workspace_dir = the goal's checkout; slug = a short stable name."""
+    if not workspace_dir or not slug:
+        raise ToolError("deploy_project requires workspace_dir and slug")
+    try:
+        return json.dumps(await _deploy.deploy_project(workspace_dir, slug), indent=2)
+    except _deploy.DeployError as err:
+        raise ToolError(str(err))
+
+
+@mcp.tool
+async def deploy_status(slug: str) -> str:
+    """Status of a durable deploy: whether it exists, is running, is answering
+    (ready), its stable Tailscale URL, and the one-time serve command."""
+    if not slug:
+        raise ToolError("deploy_status requires slug")
+    return json.dumps(await _deploy.deploy_status(slug), indent=2)
+
+
+@mcp.tool
+async def stop_deploy(slug: str) -> str:
+    """Stop and remove a durable deploy, tear down its Tailscale serve, and free its
+    VPS resources."""
+    if not slug:
+        raise ToolError("stop_deploy requires slug")
+    return json.dumps(await _deploy.stop_deploy(slug), indent=2)
+
+
+@mcp.tool
+async def list_deploys() -> str:
+    """List all durable deploys (running + stopped) with their status."""
+    return json.dumps(await _deploy.list_deploys(), indent=2)
 
 
 @mcp.tool

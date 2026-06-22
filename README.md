@@ -54,6 +54,7 @@ devclaw/
 ├── project_registry.py  # the control plane's source of truth: repos → driving goals → live status
 ├── cli.py               # `devclaw projects …` — the terminal face of the control plane
 ├── preview.py           # live preview hosting on the VPS (resource-capped, LRU-evicted)
+├── deploy.py            # durable deploy hosting (reboot-surviving, stable Tailscale URL)
 │   # --- loom: the reusable orchestration core (neutral name, extraction seam) ---
 ├── loom/__init__.py     # curated public surface: classify_failure · scan_diff · Goal · GoalStore · …
 ├── loom/limits.py       # usage-limit / rate-limit failure classifier (pure)
@@ -167,8 +168,13 @@ A from-scratch goal needs somewhere to live and, when it builds, something you c
 | `start_preview(workspace_dir, slug, port?)` | Run a built app as a live preview on the VPS → clickable frontend + API `/docs` URLs, so the owner can *open* the result |
 | `preview_status(slug)` / `list_previews()` | Status of one preview (exists / running / ready + URLs) / list them all |
 | `stop_preview(slug)` | Stop a preview and free its VPS resources |
+| `deploy_project(workspace_dir, slug)` | **Durable** deploy of a built app → a *stable* Tailscale `https://<node>.<tailnet>.ts.net:<port>/` URL that survives reboots, so the owner is handed a running product. Auto-fires when a goal reaches `achieved`. |
+| `deploy_status(slug)` / `list_deploys()` | Status of one durable deploy (exists / running / ready + stable URL) / list them all |
+| `stop_deploy(slug)` | Stop a deploy, tear down its Tailscale serve, free its VPS resources |
 
 Previews run under per-preview memory/CPU caps with max-N **LRU eviction** so they can't overwhelm the VPS.
+
+**Preview vs deploy** — a *preview* is a verify-time artifact (ephemeral, `--restart no`, SSH-tunnel, auto-reaped); a *deploy* is the **handoff** (durable, `--restart unless-stopped`, stable per-slug URL over Tailscale, auto-deployed on goal completion). Same convention-based launcher; different lifecycle. Tailscale wiring is best-effort + graceful-degradation: `deploy_project` attempts `tailscale serve` and, if devclaw's container can't reach tailscaled, returns the one-time serve command (which then persists across reboots). Mounting the tailscaled socket into the devclaw-mcp container makes it fully automatic with no code change.
 
 ### Reliability & quality
 
