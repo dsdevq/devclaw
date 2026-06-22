@@ -45,6 +45,39 @@ def test_serve_command_is_idempotent_one_liner():
     assert "tailscale serve" in cmd and "--https=8217" in cmd and "127.0.0.1:8217" in cmd
 
 
+def test_ready_probes_root_not_docs():
+    # Regression: closeloop serves `/` 200 but has no `/docs` (Swagger). The
+    # readiness probe must default to `/`, else healthy apps report not-ready.
+    import inspect
+    assert inspect.signature(deploy._ready).parameters["path"].default == "/"
+
+
+@pytest.mark.asyncio
+async def test_tailnet_dns_name_tolerates_version_skew_warning(monkeypatch):
+    # Regression: `tailscale` prints a non-fatal version-skew warning to stderr,
+    # which `_run` folds into stdout — prepending non-JSON. The parse must slice
+    # from the first `{` (this is why the first live deploy missed the DNS name).
+    polluted = (
+        'Warning: client version "1.98.4" != tailscaled server version "1.98.3"\n'
+        '{"Self": {"DNSName": "lifekit-vps.tail1cb676.ts.net."}}'
+    )
+
+    async def fake_run(bin_, *args):
+        return 0, polluted
+
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    assert await deploy._tailnet_dns_name() == "lifekit-vps.tail1cb676.ts.net"
+
+
+@pytest.mark.asyncio
+async def test_tailnet_dns_name_none_when_no_json(monkeypatch):
+    async def fake_run(bin_, *args):
+        return 0, "tailscale: not logged in"   # no JSON object at all
+
+    monkeypatch.setattr(deploy, "_run", fake_run)
+    assert await deploy._tailnet_dns_name() is None
+
+
 @pytest.fixture()
 def _no_sleep(monkeypatch):
     async def _fast(_):

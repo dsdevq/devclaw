@@ -127,13 +127,20 @@ async def _container_running(name: str) -> bool:
     return rc == 0 and out.strip() == "true"
 
 
-async def _ready(name: str, path: str = "/docs") -> bool:
+async def _ready(name: str, path: str = "/") -> bool:
     """Best-effort readiness — curl the app from INSIDE the container (the published
-    port is on the host loopback, unreachable from the devclaw-mcp container)."""
-    rc, _ = await _docker(
-        "exec", name, "python3", "-c",
-        f"import urllib.request; urllib.request.urlopen('http://localhost:{CONTAINER_PORT}{path}', timeout=3)",
+    port is on the host loopback, unreachable from the devclaw-mcp container). The app
+    is "ready" once uvicorn ANSWERS — any HTTP status counts, including 4xx. Probing
+    ``/`` (not ``/docs``) avoids a false negative on apps that don't ship Swagger:
+    closeloop serves ``/`` 200 but has no ``/docs``. Only a refused/timed-out
+    connection (server not up yet) is not-ready."""
+    probe = (
+        "import urllib.request, urllib.error, sys\n"
+        f"try: urllib.request.urlopen('http://localhost:{CONTAINER_PORT}{path}', timeout=3)\n"
+        "except urllib.error.HTTPError: pass\n"  # server answered (4xx/5xx) → it's up
+        "except Exception: sys.exit(1)\n"        # refused / timeout → not up yet
     )
+    rc, _ = await _docker("exec", name, "python3", "-c", probe)
     return rc == 0
 
 
@@ -159,14 +166,23 @@ async def _evict_to_make_room(keep_name: str) -> list[str]:
 # ---- Tailscale reachability (best-effort, graceful-degradation) -------------
 
 async def _tailnet_dns_name() -> str | None:
-    """The node's MagicDNS name (e.g. ``lifekit-vps.tailnet-xyz.ts.net``), trailing
-    dot stripped. None if tailscale isn't reachable from here."""
+    """The node's MagicDNS name (e.g. ``lifekit-vps.tail1cb676.ts.net``), trailing
+    dot stripped. None if tailscale isn't reachable from here.
+
+    NB: ``_run`` folds stderr into stdout, and ``tailscale`` prints a non-fatal
+    "Warning: client version != tailscaled server version" line to stderr on a
+    version skew — which would prepend non-JSON to the output and break a naive
+    ``json.loads``. Slice from the first ``{`` so the warning is tolerated (the
+    real cause of the live "DNS name wasn't readable" miss on the first deploy)."""
     rc, out = await _run(TAILSCALE_BIN, "status", "--json")
     if rc != 0:
         return None
+    start = out.find("{")
+    if start < 0:
+        return None
     try:
         import json
-        name = json.loads(out).get("Self", {}).get("DNSName", "")
+        name = json.loads(out[start:]).get("Self", {}).get("DNSName", "")
     except (ValueError, AttributeError):
         return None
     return name.rstrip(".") or None
