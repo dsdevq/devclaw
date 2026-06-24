@@ -193,47 +193,21 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `host` | OpenHands **on the host** (no container) | ⚠ **none** — agent has full filesystem access | dev/CI/validation where docker is unavailable |
 | `stub` | deterministic stub (no OpenHands, no claude) | n/a | harness validation (`evals/`) |
 
-### Useful env
+### Environment variables
+
+Every env var the runtime reads — organized by what it controls (transport, state, sandbox, goals, model tiering, deploy, review gate) — lives in [`docs/env-vars.md`](./docs/env-vars.md). The most common ones to know:
 
 | Var | Default | Purpose |
 |---|---|---|
 | `DEVCLAW_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `DEVCLAW_PORT` | `8000` | HTTP port |
-| `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address (set `127.0.0.1` to restrict to loopback) |
-| `DEVCLAW_TOKEN` | — | Bearer-token gate for HTTP routes except `/health` (via `Authorization: Bearer <token>` or `?token=`). Unset = no auth (local dev). |
 | `DEVCLAW_DB` | `./devclaw.db` | SQLite path for state |
-| `DEVCLAW_MAX_CONCURRENT` | `4` | global cap on concurrently-running tasks |
-| `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | per-program concurrency cap |
-| `DEVCLAW_TICK_SECONDS` | `10` | task-queue heartbeat interval |
-| `DEVCLAW_SQLITE_BUSY_TIMEOUT_MS` | `5000` | how long a blocked SQLite writer waits for the lock |
-| `DEVCLAW_GOALS_DIR` | `~/memory/goals` | root holding one folder per durable goal |
-| `DEVCLAW_GOAL_TICK_SECONDS` | `900` | goal heartbeat interval — also woken in-process the moment a task settles |
-| `DEVCLAW_GOAL_EVAL_EVERY` | `3` | deliveries between periodic direction evaluations (`0` → evaluate only at the done-gate) |
-| `DEVCLAW_GOAL_NO_PROGRESS_S` | `21600` | wall-clock seconds an executing goal may go without a delivery before the watchdog pings the owner once (`0` disables) |
-| `DEVCLAW_GOAL_VERIFY_DONE` | `1` | done-gate: planner `done` triggers a grounded review vs `done_when` before closing (`0` → trust artifact-only done eval) |
-| `DEVCLAW_GOAL_NOTIFY_URL` | — | notify-relay endpoint for goal-level Telegram messages |
-| `DEVCLAW_TASK_TIMEOUT_S` | `1800` | per-task wall-clock cap — a hung run is cancelled, sandbox torn down, task marked `failed` |
-| `DEVCLAW_MAX_RETRIES` | `1` | re-runs of a gate-failing task, each with the failure fed back as steering, before escalating |
-| `DEVCLAW_REVIEW_GATE` | `1` | the pre-PR adversarial review gate — `0` disables (escape hatch + quota lever) |
-| `DEVCLAW_REVIEW_MODEL` | `sonnet` | model tier for the review-gate `claude` pass |
-| `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery (or use a logged-in `gh`) |
-| `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | wall-clock cap for the `verify_cmd` run after the agent finishes |
-| `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image |
-| `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
-| `DEVCLAW_HOST_CLAUDE_DIR` | `~/.claude` | host path bind-mounted read-only into each sandbox |
-| `DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST` | `.credentials.json,.claude.json` | comma-separated entries **under** `~/.claude` to bind into the sandbox |
+| `DEVCLAW_GOALS_DIR` | `~/memory/goals` | one folder per durable goal |
+| `DEVCLAW_ENGINE` | *(unset)* | engine mode: unset = OpenHands sandbox, `host` / `stub` / `claude_sdk` |
+| `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | the in-sandbox coding agent's model (full id) |
+| `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery |
 
-### Model tiering
-
-Cognition is tiered per role so an autonomous run doesn't burn quota on Opus where a lighter model does the job. Host roles take a `claude --model` value (alias like `sonnet`/`opus`); the exec engine takes a full model id. Set any to empty to fall back to the account default.
-
-| Var | Default | Role |
-|---|---|---|
-| `DEVCLAW_PLANNER_MODEL` | `opus` | planner (`plan_goal`) — rare, high-leverage decomposition |
-| `DEVCLAW_JUDGE_MODEL` | `haiku` | failure-analysis judge |
-| `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **the OpenHands coding agent — the token/quota bulk.** Set `claude-opus-4-8` to opt a run up to Opus. |
-| `DEVCLAW_GOAL_PLANNER_MODEL` | `sonnet` | the goal layer's next-action planner |
-| `DEVCLAW_GOAL_EVAL_MODEL` | `sonnet` | the direction evaluator (bump to `opus` per goal for hard direction calls) |
+For the full table (~60 vars), see [`docs/env-vars.md`](./docs/env-vars.md).
 
 ## Tests
 
