@@ -1,16 +1,16 @@
 """Stub engine + cognition — deterministic, offline, for HARNESS VALIDATION.
 
 When ``DEVCLAW_ENGINE=stub`` the server wires these in place of OpenHands (the
-engine) AND claude (the grill + planner). The whole pipeline then runs with no
-docker and no claude, so ``evals/run.py`` can exercise everything *around* the
-agent — the MCP tools, the grill loop, approval, scheduling, execution wiring,
-event recording, scoring, archiving — and prove the plumbing is sound. A live
-run then tests only the one thing this can't fake: real agent quality.
+engine) AND claude (the planner). The whole pipeline then runs with no docker
+and no claude, so harness tests can exercise everything *around* the agent — the
+MCP tools, scheduling, execution wiring, event recording — and prove the plumbing
+is sound. A live run then tests only the one thing this can't fake: real agent
+quality.
 
-It is NOT a real builder. For the bundled golden project (`json-yaml-cli`) the
-stub engine writes a genuinely-working `jyq` so the green path (acceptance pass →
-judge=success) is provable end-to-end; for any other goal it writes a placeholder
-(which fails acceptance — exercising the failure path).
+It is NOT a real builder. For a `jyq` goal the stub engine writes a
+genuinely-working package so the green path is provable end-to-end; for any
+other goal it writes a placeholder (which fails acceptance — exercising the
+failure path).
 """
 
 from __future__ import annotations
@@ -79,46 +79,7 @@ async def stub_engine(req: EngineRequest) -> EngineResult:
     return {"status": "ok", "workspaceDir": req.workspace_dir, "message": message}
 
 
-# ---- cognition (grill + planners) ------------------------------------------
-
-_STUB_SPEC = """# jyq — spec (stub)
-## Goal
-A tiny CLI `jyq` that converts between JSON and YAML.
-## Scope
-In: `to-yaml` and `to-json` subcommands reading a file, printing to stdout.
-Out: everything else.
-## Stack & arch
-Python stdlib + PyYAML; a single `jyq/` package with `__main__.py`.
-## Milestones
-- M1 build the CLI
-## Acceptance
-`python -m jyq` round-trips JSON → YAML → JSON losslessly.
-## Constraints
-PyYAML only.
-## Open risks
-None (stub)."""
-
-
-async def stub_grill(prompt: str) -> str:
-    """Ask one throwaway question, then finalize the canned spec. Detects the
-    second turn by the transcript marker the grill prompt includes."""
-    if "INTERVIEW SO FAR" in prompt:
-        return json.dumps({"action": "done", "spec": _STUB_SPEC})
-    return json.dumps(
-        {"action": "ask", "question": "Stub grill — any constraints to note?", "recommended": "none, proceed"}
-    )
-
-
-async def stub_spec_planner(spec: str, workspace_dir: str) -> list[PlannedTask]:
-    return [
-        PlannedTask(
-            key="m1-build",
-            goal="Build the jyq CLI package (JSON<->YAML) per the spec",
-            kind="implement_feature",
-            depends_on_keys=[],
-            milestone="M1 build the CLI",
-        )
-    ]
+# ---- cognition (planner) ----------------------------------------------------
 
 
 async def stub_goal_planner(goal: str, workspace_dir: str) -> list[PlannedTask]:

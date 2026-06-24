@@ -1,34 +1,29 @@
-"""Durable deploy hosting — the handoff twin of :mod:`devclaw.preview`.
+"""Durable deploy hosting — runs a built app on the VPS at a stable Tailscale URL.
 
-A *preview* (see preview.py) is a verify-time artifact: ephemeral, ``--restart no``,
-reachable over an SSH tunnel, auto-reaped. A *deploy* is the **handoff**: when a
-goal reaches ``achieved``, the owner wants to OPEN the running product at a stable
-URL that survives reboots and keeps working without a laptop tunnel held open.
+When a goal reaches ``achieved``, the owner wants to OPEN the running product at a
+stable URL that survives reboots and keeps working without a laptop tunnel held
+open. A deploy is:
 
-The two share a launcher (same convention-based backend/frontend detection on one
-origin) and differ in exactly the ways that make a deploy *durable*:
-
-  * Container ``devclaw-deploy-<slug>`` (distinct name + ``devclaw.deploy=1`` label),
-    so deploys and previews never collide and are listed/reaped separately.
-  * ``--restart unless-stopped`` (NOT ``no``): the deploy comes back after a VPS
-    reboot or a docker daemon restart. That is the whole point of "durable".
+  * Container ``devclaw-deploy-<slug>`` with ``devclaw.deploy=1`` label.
+  * ``--restart unless-stopped``: the deploy comes back after a VPS reboot or a
+    docker daemon restart. That is the whole point of "durable".
   * A **deterministic per-slug host port** (not a caller-chosen one): the handoff
     URL must be STABLE across redeploys — every merge to main redeploys the same
     container at the same port, so the link the owner bookmarked keeps working.
-  * Reachability is **Tailscale**, not an SSH tunnel: the container publishes to
-    ``127.0.0.1:<port>`` (same loopback-only posture as preview + the dashboard),
-    and ``tailscale serve --bg --https=<port> http://127.0.0.1:<port>`` exposes it
-    as ``https://<node>.<tailnet>.ts.net:<port>/`` with auto-TLS. Tailscale-only by
+  * Reachability is **Tailscale**: the container publishes to ``127.0.0.1:<port>``
+    (loopback-only posture, same as the dashboard), and ``tailscale serve --bg
+    --https=<port> http://127.0.0.1:<port>`` exposes it as
+    ``https://<node>.<tailnet>.ts.net:<port>/`` with auto-TLS. Tailscale-only by
     decision (matches the stack's never-public posture) — no domain, no DNS, no
     public ingress.
 
-Tailscale wiring is **best-effort + graceful-degradation**, mirroring preview's
-best-effort readiness probe: ``deploy_project`` ATTEMPTS the serve, and if the
-``tailscale`` CLI / tailscaled socket isn't reachable from devclaw's own container
-it falls back to returning the exact one-line command + the resulting URL for a
-human to run once (the serve config then persists across reboots, so it's truly
-one-time-per-app). Mounting the tailscaled socket into the devclaw-mcp container
-upgrades this to fully-automatic with no code change — the seam is already here.
+Tailscale wiring is **best-effort + graceful-degradation**: ``deploy_project``
+ATTEMPTS the serve, and if the ``tailscale`` CLI / tailscaled socket isn't
+reachable from devclaw's own container it falls back to returning the exact
+one-line command + the resulting URL for a human to run once (the serve config
+then persists across reboots, so it's truly one-time-per-app). Mounting the
+tailscaled socket into the devclaw-mcp container upgrades this to fully-automatic
+with no code change — the seam is already here.
 
 State outside docker + tailscaled is intentionally zero; everything is read back
 from the daemons. Tests inject a fake runner so they never touch docker/tailscale.
@@ -39,8 +34,65 @@ from __future__ import annotations
 import asyncio
 import os
 
-from .preview import _LAUNCHER  # the deploy container is the preview container, made durable
 from .sandcastle_runner import _translate_workspace_path  # reuse host-path mapping
+
+# In-container launcher. Detects backend/ (FastAPI) and frontend/ (static), serves
+# them on ONE origin (so UI + API share a host), and rewrites hard-coded localhost
+# API bases in the frontend to same-origin so the deploy works over ANY url. The
+# rewrite is done on a /tmp COPY so the mounted workspace is never mutated.
+_LAUNCHER = r"""
+set -e
+cd /app
+norm() {
+  # copy frontend → writable preview copy, rewrite hard-coded local API bases
+  # (http://localhost:8000 / http://127.0.0.1:8000) to same-origin ("" → /path).
+  rm -rf /tmp/preview-frontend
+  cp -r "$1" /tmp/preview-frontend
+  find /tmp/preview-frontend -type f \( -name '*.js' -o -name '*.html' -o -name '*.ts' \) -print0 \
+    | xargs -0 -r sed -i -E 's#https?://(localhost|127\.0\.0\.1):8000##g'
+}
+if [ -f backend/requirements.txt ]; then
+  pip install -q -r backend/requirements.txt
+  if [ -d frontend ]; then norm frontend; fi
+  cd backend
+  cat > _preview.py <<'PY'
+import os
+from main import app
+try:
+    from fastapi.staticfiles import StaticFiles
+    fe = "/tmp/preview-frontend"
+    if os.path.isdir(fe):
+        # mounted LAST so the app's own routes (/docs, /todos, ...) win and the
+        # static mount only catches everything else (serves index.html at /).
+        app.mount("/", StaticFiles(directory=fe, html=True), name="ui")
+except Exception as e:
+    print("preview: static mount skipped:", e)
+PY
+  exec uvicorn _preview:app --host 0.0.0.0 --port 8000
+elif [ -f requirements.txt ]; then
+  # Root-level Python ASGI app — FastAPI at app/main.py serving its OWN static UI
+  # at /, requirements.txt at the repo root. Detect the ASGI app (module:app) and
+  # run it. Falls back to a file listing only if no ASGI app is found.
+  pip install -q -r requirements.txt
+  target=""
+  for cand in app.main main app application src.main app.app; do
+    f="$(echo "$cand" | tr . /).py"
+    if [ -f "$f" ] && grep -qE 'FastAPI\(|Starlette\(' "$f"; then
+      target="$cand:app"; break
+    fi
+  done
+  if [ -n "$target" ]; then
+    exec uvicorn "$target" --host 0.0.0.0 --port 8000
+  else
+    exec python3 -m http.server 8000
+  fi
+elif [ -d frontend ]; then
+  norm frontend
+  cd /tmp/preview-frontend && exec python3 -m http.server 8000
+else
+  exec python3 -m http.server 8000
+fi
+"""
 
 DEPLOY_IMAGE = os.environ.get("DEVCLAW_DEPLOY_IMAGE") or os.environ.get(
     "DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest"

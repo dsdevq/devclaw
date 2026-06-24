@@ -43,12 +43,9 @@ from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, R
 from . import __version__
 from . import dashboard as _dash
 from . import deploy as _deploy
-from . import preview as _preview
 from . import repo as _repo
 from .goal_service import GoalService
 from .project_registry import ProjectExists, ProjectRegistry, project_rollup
-from .project_service import ProjectService
-from .project_store import ProjectStore
 from .state_store import StateStore
 from .task_queue import TaskQueue
 
@@ -70,14 +67,13 @@ _engine = os.environ.get("DEVCLAW_ENGINE", "")
 if _engine == "stub":
     # Harness-validation mode: deterministic stub engine + cognition, no docker,
     # no claude. Proves the plumbing around the agent; never use in production.
-    from .stub_engine import stub_engine, stub_goal_planner, stub_grill, stub_spec_planner
+    from .stub_engine import stub_engine, stub_goal_planner
 
     sys.stderr.write(
         "⚠ DEVCLAW_ENGINE=stub — deterministic stub engine + cognition "
         "(NO OpenHands, NO claude). For harness validation only.\n"
     )
     queue = TaskQueue(store, planner=stub_goal_planner, runner=stub_engine)
-    projects = ProjectService(ProjectStore(), queue, grill_caller=stub_grill, spec_planner=stub_spec_planner)
 elif _engine == "host":
     # Real cognition + real OpenHands, but run on the HOST with NO sandbox.
     from .host_runner import run_host
@@ -87,10 +83,8 @@ elif _engine == "host":
         "isolation (agent has full filesystem access). Dev/validation only.\n"
     )
     queue = TaskQueue(store, runner=run_host)
-    projects = ProjectService(ProjectStore(), queue)
 else:
     queue = TaskQueue(store)
-    projects = ProjectService(ProjectStore(), queue)
 # The goal layer (folded-in goalclaw): durable, steerable, evaluated goals driven
 # across heartbeats, dispatching into the SAME queue in-process. Owns goals under
 # DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.
@@ -653,20 +647,6 @@ async def answer_goal(goal_id: str, answer: str) -> str:
 
 
 @mcp.tool
-async def evaluate_goal(goal_id: str) -> str:
-    """Force a direction evaluation NOW and return the verdict + rationale. The
-    evaluator judges the goal's actual delivered work against done_when (grounded
-    in what shipped), not by counting backlog items. Any corrections it produces
-    are fed back as steering. Use to ask 'is this going the right way?' on demand."""
-    if not goal_id:
-        raise ToolError("evaluate_goal requires goal_id")
-    try:
-        return json.dumps(await goals.evaluate_goal(goal_id), indent=2)
-    except KeyError:
-        raise ToolError(f"unknown goal_id: {goal_id}")
-
-
-@mcp.tool
 async def cancel_goal(goal_id: str) -> str:
     """Permanently stop a durable goal. Sets its phase to 'cancelled' (a terminal
     state — DevClaw will skip it on every future heartbeat) and tears down any
@@ -707,66 +687,20 @@ async def create_repo(
         raise ToolError(str(err))
 
 
-# ===== live preview hosting ==================================================
-# Run a built app on the VPS and hand back clickable links (Swagger /docs +
-# frontend). Long-lived, resource-capped containers; see devclaw/preview.py.
-
-
-@mcp.tool
-async def start_preview(workspace_dir: str, slug: str, port: int = 8000) -> str:
-    """Run a project's BUILT app as a live preview on the VPS and return clickable
-    URLs — the frontend and the API's Swagger /docs — so the owner can OPEN the
-    thing, not just read the diff. Serves frontend + API on one origin/port (so a
-    hard-coded localhost API base works behind a single SSH tunnel). Long-lived +
-    resource-capped; replaces an existing preview for the same slug and evicts the
-    oldest preview if at the VPS concurrency cap. workspace_dir = the goal's
-    checkout (the built app); slug = a short stable name for the preview."""
-    if not workspace_dir or not slug:
-        raise ToolError("start_preview requires workspace_dir and slug")
-    try:
-        return json.dumps(await _preview.start_preview(workspace_dir, slug, port=port), indent=2)
-    except _preview.PreviewError as err:
-        raise ToolError(str(err))
-
-
-@mcp.tool
-async def preview_status(slug: str) -> str:
-    """Status of a live preview: whether it exists, is running, is answering
-    (ready), and its URLs. Use to check a preview started with start_preview."""
-    if not slug:
-        raise ToolError("preview_status requires slug")
-    return json.dumps(await _preview.preview_status(slug), indent=2)
-
-
-@mcp.tool
-async def stop_preview(slug: str) -> str:
-    """Stop and remove a live preview, freeing its VPS resources."""
-    if not slug:
-        raise ToolError("stop_preview requires slug")
-    return json.dumps(await _preview.stop_preview(slug), indent=2)
-
-
-@mcp.tool
-async def list_previews() -> str:
-    """List all live previews (running + stopped) with their status."""
-    return json.dumps(await _preview.list_previews(), indent=2)
-
-
 # ===== durable deploy hosting ================================================
-# The handoff twin of preview: a long-lived, reboot-surviving container at a
-# STABLE per-slug URL over Tailscale. Auto-fires when a goal reaches `achieved`
-# (see goal_tick). See devclaw/deploy.py.
+# Long-lived, reboot-surviving container at a STABLE per-slug URL over Tailscale.
+# Auto-fires when a goal reaches `achieved` (see goal_tick). See devclaw/deploy.py.
 
 
 @mcp.tool
 async def deploy_project(workspace_dir: str, slug: str) -> str:
     """Deploy a project's BUILT app as a DURABLE host on the VPS and return its stable
     Tailscale URL — so the owner is HANDED a running product to open, not a diff to
-    read. Unlike a preview (ephemeral, SSH-tunnel), a deploy survives reboots
-    (--restart unless-stopped), lives at a fixed per-slug port so the URL never
-    changes across redeploys, and is reachable over Tailscale (https, auto-TLS,
-    never public). Idempotent: redeploying the same slug replaces the container at
-    the same URL. workspace_dir = the goal's checkout; slug = a short stable name."""
+    read. Survives reboots (--restart unless-stopped), lives at a fixed per-slug
+    port so the URL never changes across redeploys, and is reachable over Tailscale
+    (https, auto-TLS, never public). Idempotent: redeploying the same slug replaces
+    the container at the same URL. workspace_dir = the goal's checkout; slug = a
+    short stable name."""
     if not workspace_dir or not slug:
         raise ToolError("deploy_project requires workspace_dir and slug")
     try:
@@ -799,72 +733,9 @@ async def list_deploys() -> str:
     return json.dumps(await _deploy.list_deploys(), indent=2)
 
 
-@mcp.tool
-async def build_project(idea: str, workspace_dir: str) -> str:
-    """Start a project from scratch. DevClaw GRILLS you — one question at a time,
-    each with a recommended answer — to reach a shared understanding of what to
-    build and how, before any code is written. Returns a project_id and the first
-    question. Answer with answer_question(project_id, answer); repeat until
-    status='ready' (a spec), then approve_spec(project_id) to build it (which may
-    run for a long time via OpenHands)."""
-    if not idea or not workspace_dir:
-        raise ToolError("build_project requires idea and workspace_dir")
-    return json.dumps(await projects.start(idea, workspace_dir), indent=2)
-
-
-@mcp.tool
-async def answer_question(project_id: str, answer: str) -> str:
-    """Answer the project's current grill question. Returns the next question, or
-    status='ready' with the finalized spec once the interview converges."""
-    try:
-        return json.dumps(await projects.answer(project_id, answer), indent=2)
-    except KeyError:
-        raise ToolError(f"unknown project_id: {project_id}")
-    except ValueError as err:
-        raise ToolError(str(err))
-
-
-@mcp.tool
-async def get_project(project_id: str) -> str:
-    """Status of a build-from-scratch project across all phases — idea,
-    transcript, the outstanding question, the spec, and (once approved) the
-    program_id of the running build."""
-    project = projects.get(project_id)
-    if not project:
-        raise ToolError(f"unknown project_id: {project_id}")
-    return json.dumps(project.to_dict(), indent=2)
-
-
-@mcp.tool
-async def steer(project_id: str, message: str) -> str:
-    """Inject direction into a running build without stopping it. The message is
-    folded into the project's not-yet-started tasks (work already running or done
-    is untouched) and recorded in the project's steer log. Use to redirect
-    mid-build — e.g. 'actually use Postgres, not SQLite'."""
-    try:
-        return json.dumps(await projects.steer(project_id, message), indent=2)
-    except KeyError:
-        raise ToolError(f"unknown project_id: {project_id}")
-
-
-@mcp.tool
-async def approve_spec(project_id: str) -> str:
-    """Approve a ready project spec and start building. Decomposes the spec into a
-    milestone task DAG and hands it to the executor; returns the program_id. Poll
-    get_program(program_id) or get_project(project_id) for progress."""
-    try:
-        return json.dumps(await projects.approve(project_id), indent=2)
-    except KeyError:
-        raise ToolError(f"unknown project_id: {project_id}")
-    except ValueError as err:
-        raise ToolError(str(err))
-
-
 # ===== project registry (control plane) ======================================
-# The portfolio view: which repos devclaw owns + the live status of each. Distinct
-# from the build-from-scratch project tools above (build_project/get_project/…),
-# which are the one-shot grill→spec→build interview. These manage the durable
-# registry that links repos to their driving goals; status is joined live.
+# The portfolio view: which repos devclaw owns + the live status of each. The
+# registry links repos to their driving goals; status is joined live.
 
 
 @mcp.tool
