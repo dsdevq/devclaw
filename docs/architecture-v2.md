@@ -248,7 +248,7 @@ Two altitudes, one service:
   like the rest of the vault — ephemeral body, durable mind.
 
 These are different time-scales/state-lifecycles; the goal layer sits *above* the
-task/program engine and dispatches into it **in-process** (`goal_engine.py`). When
+task/program engine and dispatches into it **in-process** (`goal.engine.py`). When
 goalclaw was a separate service it dispatched over HTTP MCP and re-derived "delivered"
 from a camelCase blob + a separate `/wake` callback — that whole transport, its
 bearer token, and the "polled `done` before `pr_url` was written" race are gone by
@@ -258,7 +258,7 @@ wakes the goal heartbeat immediately.
 
 ### How a goal is driven (the heartbeat), and the quota guard
 
-`goal_tick.tick_goal` runs the same mechanism/cognition split as everything else,
+`goal.tick.tick_goal` runs the same mechanism/cognition split as everything else,
 ordered so **idle ticks cost ~0 `claude` calls** (the load-bearing quota guard —
 burned this way 2026-05-18):
 
@@ -268,9 +268,9 @@ burned this way 2026-05-18):
    *full* task `result_json` (the agent's own output + the verify-gate output) and
    append a grounded record to `deliveries.md`. This is richer than the wire ever
    exposed, and it's the substrate the evaluator reads.
-3. **Next-action plan** (`goal_planner`, 1 LLM call, only past the gate) — choose the
+3. **Next-action plan** (`goal.planner`, 1 LLM call, only past the gate) — choose the
    single next action from backlog/steering and dispatch it. JSON-validated.
-4. **Direction evaluation** (`goal_evaluator`, periodic LLM call) — every
+4. **Direction evaluation** (`goal.evaluator`, periodic LLM call) — every
    `DEVCLAW_GOAL_EVAL_EVERY` deliveries (or on direction-steering), judge whether the
    *delivered work* is achieving the objective, grounded in `deliveries.md` — not by
    counting backlog items. `off_track` → corrections written to `inbox.md` as

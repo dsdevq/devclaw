@@ -1,105 +1,26 @@
-# DevClaw evals — golden-project build harness
+# DevClaw evals
 
-A repeatable, scored smoke test for build-a-project-from-scratch. It drives the
-**real** pipeline (claude + docker) through `build_project → grill → approve →
-build`, grades each run against a hard acceptance check, and rolls N runs into a
-pass-rate. Because the build is non-deterministic, **one run means little — the
-rate across N runs is the metric**, and comparing the rate across git SHAs is how
-you tell whether a change actually improved things.
+Three measurement harnesses against the **real** pipeline (claude + docker + OpenHands). Each drives the engine end-to-end, captures structured results into `evals/runs/`, and exits with a number you can compare across git SHAs.
 
-This is the project's answer to the long-standing open question *"does OpenHands
-have the skill-quality for high-quality autonomous work?"* — now measurable.
+| Harness | What it measures | Suite |
+|---|---|---|
+| `measure_passrate.py` | Single-task pass rate on a real backend repo | A basket of `implement_feature` / `fix_bug` tasks on `lifekit-dashboard`, gated by `cd backend && dotnet test`, delivered as PRs. The June-15 must-have. |
+| `measure_quality_todo.py` | Quality vs gate-greenness on harder tasks | Deliberately ambiguous / multi-file / pure-UI tasks on `todo-fullstack-demo`. Each PR is reviewed adversarially after the gate passes. Step 1 of "make green mean trustworthy." |
+| `validate_review_gate.py` | Discrimination power of the pre-PR review gate | The pre-PR review gate fed the three real "green" diffs from the passrate run (false-positive rate) plus two synthetic bad diffs (dead code; happy-path-only tests). Measures both arms — does it pass good diffs, does it catch bad ones. |
 
-## How it's isolated
-The grill is answered from a **fixed script** (`answers.txt`), so the spec is held
-roughly constant and you're measuring the **build**, not the interview. (Evaluating
-the grill itself is a separate concern.)
+Each driver wires the engine exactly like the server does (`StateStore` + `TaskQueue(runner=run_sandcastle)`), so what it measures is what production behaves like. No mocks past the test boundary.
 
-## Validate the harness first (offline, no docker/claude)
-
-Before spending real runs, prove the *plumbing* with the stub engine — a
-deterministic build + cognition (`DEVCLAW_ENGINE=stub`). The whole pipeline runs
-with no docker and no claude, so a live failure is isolated to the agent, not the
-harness:
+## Run
 
 ```bash
-pip install -e . pyyaml
-DEVCLAW_ENGINE=stub DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp &   # stub server
-python evals/run.py evals/json-yaml-cli --n 3
-# expect: acceptance_pass_rate = 1.0  (the stub builds a real jyq for the golden project)
+# inside the devclaw-mcp container or a host with claude + docker + the dotnet image:
+.venv/bin/python evals/measure_passrate.py
+.venv/bin/python evals/measure_quality_todo.py
+DEVCLAW_REVIEW_MODEL=sonnet .venv/bin/python evals/validate_review_gate.py
 ```
 
-If that's green, the MCP tools, grill loop, approval, scheduling, execution
-wiring, scoring, and archiving all work — the only unknown left for a live run is
-real agent quality.
+Output lands in `evals/runs/<harness>-<timestamp>.json` next to a one-line stderr summary (`passrate=5/5`, etc).
 
-## Run it (live)
+## What's missing on purpose
 
-```bash
-# 1. real engine up (see ../docs/live-shakedown.md for setup):
-docker build -t devclaw-sandbox:latest -f .sandcastle/Dockerfile .
-DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp     # leave running
-
-# 2. run the eval (start SMALL — each run is real Pro spend + minutes):
-python evals/run.py evals/json-yaml-cli --n 3
-```
-
-Output per run + an aggregate:
-
-```
-=== SUMMARY ===
-{ "runs": 3, "acceptance_passed": 2, "acceptance_pass_rate": 0.667,
-  "builds_completed": 3, "avg_milestone_pct": 83.3, "avg_wall_ms": 412000,
-  "stuck_runs": 0, "git_sha": "abc1234", "project": "json-yaml-cli" }
-```
-
-Artifacts land in `evals/runs/<git-sha>/<project>/` (per-run scorecard + the agreed
-spec + summary). `evals/runs/` is gitignored — it's results, not source.
-
-## The success criterion
-For `json-yaml-cli`: **acceptance** = `python -m jyq` round-trips JSON → YAML → JSON
-losslessly (`accept.sh`). A healthy result is a high `acceptance_pass_rate`. As you
-polish the feature, the rate at a new SHA should climb vs. the old one — that's
-"progress," made objective.
-
-## Scorecard fields
-`acceptance_passed` (the gate) · `program_status` · `tasks_done/total` ·
-`milestone_done/total` + `milestone_pct` (partial credit at milestone granularity) ·
-`wall_ms` · `stuck` (no progress within `--stuck`). Aggregated by `devclaw/evals.py`,
-which is unit-tested (`tests/test_evals.py`) so the *scoring* is trustworthy even
-though the live runs aren't reproducible.
-
-## Failure analysis (`--judge`)
-
-Add `--judge` to automate the "what went wrong?" step. After each run a second
-`claude` call reads the spec, the task DAG, an event digest, and the acceptance
-result, then buckets the run into a **fixed failure-mode vocabulary** — so failures
-*aggregate*:
-
-```bash
-python evals/run.py evals/json-yaml-cli --n 5 --judge
-```
-
-```
-=== SUMMARY ===
-{ … "failure_analysis": {
-      "runs_judged": 5,
-      "by_category": {"success": 3, "acceptance_gap": 1, "engine_failure": 1},
-      "top_failure_mode": "acceptance_gap" } }
-```
-
-Categories: `success · planning_error · incomplete_build · constraint_violation ·
-acceptance_gap · engine_failure · stuck · other`. Each run's verdict (category +
-diagnosis + a concrete suggestion) is saved in its `run-*.json`. `top_failure_mode`
-tells you where to spend the next polish pass. The judge scoring/vocab is unit-tested
-(`tests/test_eval_judge.py`); the diagnosis text is `claude`'s.
-
-## Add a project
-Create `evals/<slug>/` with:
-- `idea.txt` — the `build_project` idea (pin the interface contract so acceptance is well-defined)
-- `answers.txt` — one scripted grill answer per line (extras default to "use your recommendation")
-- `accept.sh` — runs in the built workspace; exit 0 = pass
-
-## Tuning
-`--n` runs · `--timeout` per-run wall cap (s) · `--stuck` no-progress timeout (s) ·
-`--url` the server's `/mcp` · `--out` archive dir.
+There's no harness for the build-from-scratch interview flow — the spec-kit elicitation (`build_project` / `answer_question` / `approve_spec`) and its `evals/run.py` golden-project harness were removed as drift (vault explicitly rejected the multi-pass spec-kit flow). Build-from-scratch is now expressed as a normal goal with `done_when`; measure it through the durable goal layer instead.
