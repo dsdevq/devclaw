@@ -1,112 +1,27 @@
-"""DevClaw — MCP server.
+"""All MCP tool decorators — the chef's menu.
 
-Tools (every task/program submission is async — returns an id immediately and
-runs in the background):
-  - implement_feature / fix_bug / review_repository / onboard -> {task_id}
-  - setup_cicd(workspace_dir)                                 -> {status, detail}  (sync)
-  - start_program(workspace_dir, goal)              -> {program_id}  (planner decomposes into a task DAG)
-  - get_status(task_id)            / list_tasks(status?, kind?, limit?)
-  - get_program(program_id)        / list_programs(limit?)
-  - get_events(program_id | task_id, since_id?, limit?)
-  - cancel_task(task_id)           / cancel_program(program_id)  (deliberate abort)
-  - register_project / list_projects / project_status / update_project / link_goal
-        (the project registry — the control plane's source of truth for "which
-         repos is devclaw working on + the live status of each"; also a CLI in
-         devclaw/cli.py and a /projects dashboard view)
-
-Transport:
-  - DEVCLAW_TRANSPORT=stdio (default) — local dev + tests
-  - DEVCLAW_TRANSPORT=http            — streamable-http on $DEVCLAW_PORT (default 8000);
-                                        also serves /dashboard + /programs/:id/events (SSE)
-
-State: SQLite at $DEVCLAW_DB (default ./devclaw.db).
+Each tool delegates to the long-lived services in ``_state`` (queue, store,
+goals, registry) or to a sibling module (``deploy``, ``repo``). The tools stay
+thin on purpose: validate inputs, dispatch, return JSON. Cognition lives below
+(planner / evaluator / review gate), not here.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
-import sys
 import textwrap
-import urllib.parse
 from pathlib import Path
 from typing import Annotated, Literal, Optional
 
-from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
-from . import __version__
-from . import dashboard as _dash
-from . import deploy as _deploy
-from . import repo as _repo
-from .goal_service import GoalService
-from .project_registry import ProjectExists, ProjectRegistry, project_rollup
-from .state_store import StateStore
-from .task_queue import TaskQueue
-
-SERVER_NAME = "devclaw"
-DB_PATH = os.path.abspath(os.environ.get("DEVCLAW_DB", "devclaw.db"))
-HTTP_PORT = int(os.environ.get("DEVCLAW_PORT", "8000"))
-# Default 0.0.0.0 so sibling compose containers (e.g. openclaw-gateway) can
-# reach the endpoint. Set DEVCLAW_HOST=127.0.0.1 to restrict to loopback.
-HTTP_HOST = os.environ.get("DEVCLAW_HOST", "0.0.0.0")
-# Optional bearer-token guard for the HTTP transport. When DEVCLAW_TOKEN is set,
-# every route except /health requires it — via `Authorization: Bearer <token>`
-# (MCP clients) or a `?token=<token>` query param (the browser dashboard +
-# EventSource, which can't set headers). Unset -> auth disabled (local dev).
-AUTH_TOKEN = os.environ.get("DEVCLAW_TOKEN", "")
-TOKEN_QS = f"?token={urllib.parse.quote(AUTH_TOKEN)}" if AUTH_TOKEN else ""
-
-store = StateStore(DB_PATH)
-_engine = os.environ.get("DEVCLAW_ENGINE", "")
-if _engine == "stub":
-    # Harness-validation mode: deterministic stub engine + cognition, no docker,
-    # no claude. Proves the plumbing around the agent; never use in production.
-    from .stub_engine import stub_engine, stub_goal_planner
-
-    sys.stderr.write(
-        "⚠ DEVCLAW_ENGINE=stub — deterministic stub engine + cognition "
-        "(NO OpenHands, NO claude). For harness validation only.\n"
-    )
-    queue = TaskQueue(store, planner=stub_goal_planner, runner=stub_engine)
-elif _engine == "host":
-    # Real cognition + real OpenHands, but run on the HOST with NO sandbox.
-    from .host_runner import run_host
-
-    sys.stderr.write(
-        "⚠ DEVCLAW_ENGINE=host — OpenHands runs on the HOST with NO sandbox "
-        "isolation (agent has full filesystem access). Dev/validation only.\n"
-    )
-    queue = TaskQueue(store, runner=run_host)
-else:
-    queue = TaskQueue(store)
-# The goal layer (folded-in goalclaw): durable, steerable, evaluated goals driven
-# across heartbeats, dispatching into the SAME queue in-process. Owns goals under
-# DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.
-goals = GoalService(queue, store)
-# The project registry (control plane): the single source of truth for "which
-# repos is devclaw working on, and what's the status of each". Thin — it links to
-# goals by id and joins their live status on read (project_rollup), never caching
-# phase. Shares the SQLite file with the state store.
-registry = ProjectRegistry(DB_PATH)
-
-
-def _goal_get(goal_id: str) -> dict:
-    """Read-only goal status getter for the project rollup (raises KeyError)."""
-    return goals.get_goal(goal_id)
-
-
-mcp: FastMCP = FastMCP(SERVER_NAME, version=__version__)
-
-LimitField = Field(ge=1, le=1000)
-
-
-# ===== tools =================================================================
+from .. import deploy as _deploy
+from .. import repo as _repo
+from ..project_registry import ProjectExists, project_rollup
+from ._state import _goal_get, goals, mcp, queue, registry, store
 
 
 @mcp.tool
@@ -191,6 +106,9 @@ async def review_repository(
         notify_url=notify_url,
     )
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
+
+
+# ===== setup_cicd (pure mechanism — no cognition) ============================
 
 
 def _detect_stack(workspace: Path) -> str:
@@ -525,8 +443,7 @@ async def cancel_program(program_id: str) -> str:
 # open-ended standing intent that DevClaw drives across many heartbeats —
 # planning the next action, dispatching it into the queue, and EVALUATING whether
 # the work is actually moving toward the objective (not just shipping PRs). These
-# tools are the steer/observe surface: ask what's going on, correct it, force an
-# evaluation.
+# tools are the steer/observe surface: ask what's going on, correct it.
 
 
 @mcp.tool
@@ -779,8 +696,7 @@ async def list_projects(status: Optional[str] = None) -> str:
 @mcp.tool
 async def project_status(project_id: str) -> str:
     """Full status of one registered project: its facts (repo, workspace, preview)
-    plus the LIVE status of every goal driving it and a derived health signal.
-    (The registry-level analogue of get_goal; get_project is the build-flow tool.)"""
+    plus the LIVE status of every goal driving it and a derived health signal."""
     p = registry.get(project_id)
     if p is None:
         raise ToolError(f"unknown project_id: {project_id}")
@@ -835,229 +751,3 @@ async def delete_project(project_id: str) -> str:
     if not registry.delete(project_id):
         raise ToolError(f"unknown project_id: {project_id}")
     return json.dumps({"deleted": True, "project_id": project_id}, indent=2)
-
-
-# ===== dashboard + SSE (HTTP transport only) =================================
-# Presentation lives in devclaw/dashboard.py (pure renderers); the routes here
-# stay thin — fetch data, hand it to a renderer. _esc is re-exported for the few
-# inline 404 strings + the SSE path.
-
-_esc = _dash.esc
-
-
-@mcp.custom_route("/health", methods=["GET"])
-async def health(_request: Request) -> Response:
-    return JSONResponse({"ok": True, "name": SERVER_NAME, "version": __version__})
-
-
-@mcp.custom_route("/goals/answer", methods=["POST"])
-async def goals_answer(request: Request) -> Response:
-    """Deterministic reply→goal routing for the dedicated devclaw Telegram channel.
-    The notify-relay bridge POSTs the owner's reply here; we route it to the single
-    goal awaiting input (grilling answers the open question, plan_review approves).
-    No agent, no inference — just the one waiting goal. Auth-guarded by the same
-    bearer middleware as every other route (except /health)."""
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid json"}, status_code=400)
-    text = str(body.get("text") or "").strip()
-    if not text:
-        return JSONResponse({"error": "missing text"}, status_code=400)
-    waiting = [g for g in goals.list_goals() if g.get("lifecycle") in ("grilling", "plan_review")]
-    if not waiting:
-        return JSONResponse({"routed_to": None, "reason": "no goal awaiting input"}, status_code=409)
-    if len(waiting) > 1:
-        return JSONResponse(
-            {"routed_to": None, "reason": "multiple goals awaiting", "goals": [g["id"] for g in waiting]},
-            status_code=409,
-        )
-    try:
-        result = goals.answer_goal(waiting[0]["id"], text)
-    except KeyError:
-        return JSONResponse({"error": "goal vanished"}, status_code=409)
-    return JSONResponse(result)
-
-
-@mcp.custom_route("/dashboard", methods=["GET"])
-async def dashboard_index(_request: Request) -> Response:
-    programs = store.list_programs(limit=50)
-    return HTMLResponse(_dash.render_programs(programs, version=__version__, token_qs=TOKEN_QS))
-
-
-@mcp.custom_route("/dashboard/{program_id}", methods=["GET"])
-async def dashboard_program(request: Request) -> Response:
-    program_id = request.path_params["program_id"]
-    program = store.get_program(program_id)
-    if not program:
-        return HTMLResponse(_dash.render_not_found("program", program_id), status_code=404)
-    return HTMLResponse(_dash.render_program(program, token_qs=TOKEN_QS))
-
-
-@mcp.custom_route("/programs/{program_id}/events", methods=["GET"])
-async def program_events(request: Request) -> Response:
-    """Resumable SSE stream of one program's events.
-
-    Resume protocol: the EventSource Last-Event-Id header (sent by the browser
-    on auto-reconnect) is the cursor; each frame's id is the event row's PK.
-    Live tail: SQLite has no LISTEN/NOTIFY, so we poll every 750ms after the
-    initial backlog (cheap, indexed). Termination: when the program is terminal
-    AND the last poll returned nothing new, emit a final `done` frame and close.
-    """
-    from sse_starlette.sse import EventSourceResponse  # local import: http-only dep path
-
-    program_id = request.path_params["program_id"]
-    if not store.get_program(program_id):
-        return PlainTextResponse(f"unknown program: {program_id}", status_code=404)
-
-    leh = request.headers.get("last-event-id")
-    cursor = int(leh) if (leh and leh.isdigit() and int(leh) > 0) else 0
-
-    async def gen():
-        nonlocal cursor
-        yield {"comment": "ok"}  # forces EventSource onopen even with zero events
-        while True:
-            if await request.is_disconnected():
-                return
-            try:
-                drained = store.list_events(program_id=program_id, since_id=cursor, limit=200)
-            except Exception as err:
-                yield {"event": "error", "data": json.dumps({"message": str(err)})}
-                return
-            for ev in drained:
-                yield {
-                    "id": str(ev.id),
-                    "data": json.dumps(
-                        {
-                            "id": ev.id,
-                            "type": ev.type,
-                            "source": ev.source,
-                            "ts": ev.ts,
-                            "payload": _safe_parse(ev.payload_json),
-                        }
-                    ),
-                }
-                cursor = ev.id
-            current = store.get_program(program_id)
-            terminal = current is not None and current.status in ("done", "failed")
-            if terminal and not drained:
-                yield {"event": "done", "data": json.dumps({"status": current.status})}
-                return
-            await asyncio.sleep(0.75)
-
-    return EventSourceResponse(gen())
-
-
-@mcp.custom_route("/goals", methods=["GET"])
-async def dashboard_goals(_request: Request) -> Response:
-    """Live overview of every durable goal — the 'what's devclaw doing' pane."""
-    return HTMLResponse(_dash.render_goals(goals.list_goals(), version=__version__, token_qs=TOKEN_QS))
-
-
-@mcp.custom_route("/projects", methods=["GET"])
-async def dashboard_projects(_request: Request) -> Response:
-    """Portfolio view — every registered project + its derived health, the
-    control-plane overview that ties repos to the goals driving them."""
-    items = [project_rollup(p, _goal_get) for p in registry.list()]
-    return HTMLResponse(_dash.render_projects(items, version=__version__, token_qs=TOKEN_QS))
-
-
-@mcp.custom_route("/goals/{goal_id}", methods=["GET"])
-async def dashboard_goal(request: Request) -> Response:
-    """Live detail for one goal: what it's working on NOW, what shipped, the log,
-    and the live event tail. Reuses the same data as the tail_goal MCP tool."""
-    goal_id = request.path_params["goal_id"]
-    try:
-        d = goals.tail_goal(goal_id, log_lines=40, deliveries_chars=8000, event_limit=40)
-    except KeyError:
-        return HTMLResponse(_dash.render_not_found("goal", goal_id), status_code=404)
-    return HTMLResponse(_dash.render_goal(d, goal_id, token_qs=TOKEN_QS))
-
-
-def _safe_parse(s: str) -> object:
-    try:
-        return json.loads(s)
-    except Exception:
-        return s
-
-
-# ===== auth middleware =======================================================
-
-
-class AuthMiddleware:
-    """Pure-ASGI bearer-token gate. No-op when DEVCLAW_TOKEN is unset. /health
-    stays open so container health checks don't need the token."""
-
-    def __init__(self, app) -> None:
-        self.app = app
-
-    async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or not AUTH_TOKEN or scope.get("path") == "/health":
-            await self.app(scope, receive, send)
-            return
-        headers = dict(scope.get("headers") or [])
-        auth = headers.get(b"authorization", b"").decode()
-        ok = auth == f"Bearer {AUTH_TOKEN}"
-        if not ok:
-            qs = urllib.parse.parse_qs(scope.get("query_string", b"").decode())
-            ok = qs.get("token", [None])[0] == AUTH_TOKEN
-        if ok:
-            await self.app(scope, receive, send)
-            return
-        resp = JSONResponse(
-            {"error": "unauthorized"}, status_code=401, headers={"www-authenticate": "Bearer"}
-        )
-        await resp(scope, receive, send)
-
-
-# ===== entrypoint ============================================================
-
-
-def _start_loops() -> None:
-    """Start the two heartbeats: the task queue (resumes work + advances DAGs) and
-    the goal layer (drives durable goals). Wire the queue's on-settle hook to the
-    goal heartbeat so a finished task triggers an immediate goal tick in-process."""
-    queue.start_ticking()
-    queue.set_on_settle(goals.poke)
-    goals.start()
-
-
-async def _serve_stdio() -> None:
-    _start_loops()
-    await mcp.run_stdio_async()
-
-
-async def _serve_http() -> None:
-    import uvicorn
-    from starlette.middleware import Middleware
-
-    app = mcp.http_app(path="/mcp", middleware=[Middleware(AuthMiddleware)])
-    _start_loops()
-    config = uvicorn.Config(app, host=HTTP_HOST, port=HTTP_PORT, log_level="warning")
-    await uvicorn.Server(config).serve()
-
-
-def main() -> None:
-    transport = os.environ.get("DEVCLAW_TRANSPORT", "stdio")
-    if transport not in ("stdio", "http"):
-        raise SystemExit(f'Unknown DEVCLAW_TRANSPORT={transport}; expected "stdio" or "http"')
-
-    # Crash recovery before anything serves: reset tasks left 'running' by a
-    # dead process so the heartbeat resumes them. Sync — runs before the loop.
-    reaped = queue.recover()
-
-    if transport == "stdio":
-        sys.stderr.write(
-            f"{SERVER_NAME} v{__version__} ready (stdio, db={DB_PATH}, recovered={reaped})\n"
-        )
-        asyncio.run(_serve_stdio())
-    else:
-        sys.stderr.write(
-            f"{SERVER_NAME} v{__version__} ready "
-            f"(http://{HTTP_HOST}:{HTTP_PORT}/mcp, db={DB_PATH}, recovered={reaped})\n"
-        )
-        asyncio.run(_serve_http())
-
-
-if __name__ == "__main__":
-    main()

@@ -34,7 +34,7 @@ class _Goals:
 @pytest.mark.asyncio
 async def test_routes_to_single_waiting_goal(monkeypatch):
     fg = _Goals([{"id": "g1", "lifecycle": "grilling"}, {"id": "g2", "lifecycle": "executing"}])
-    monkeypatch.setattr(server, "goals", fg)
+    monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "Postgres"}))
     assert resp.status_code == 200
     assert fg.answered == [("g1", "Postgres")]
@@ -43,7 +43,7 @@ async def test_routes_to_single_waiting_goal(monkeypatch):
 @pytest.mark.asyncio
 async def test_plan_review_also_routes(monkeypatch):
     fg = _Goals([{"id": "g1", "lifecycle": "plan_review"}])
-    monkeypatch.setattr(server, "goals", fg)
+    monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "approved"}))
     assert resp.status_code == 200 and fg.answered == [("g1", "approved")]
 
@@ -51,7 +51,7 @@ async def test_plan_review_also_routes(monkeypatch):
 @pytest.mark.asyncio
 async def test_409_when_none_waiting(monkeypatch):
     fg = _Goals([{"id": "g1", "lifecycle": "executing"}])
-    monkeypatch.setattr(server, "goals", fg)
+    monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "hi"}))
     assert resp.status_code == 409 and fg.answered == []
 
@@ -59,7 +59,7 @@ async def test_409_when_none_waiting(monkeypatch):
 @pytest.mark.asyncio
 async def test_409_when_multiple_waiting(monkeypatch):
     fg = _Goals([{"id": "g1", "lifecycle": "grilling"}, {"id": "g2", "lifecycle": "plan_review"}])
-    monkeypatch.setattr(server, "goals", fg)
+    monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "hi"}))
     assert resp.status_code == 409 and fg.answered == []
 
@@ -67,6 +67,6 @@ async def test_409_when_multiple_waiting(monkeypatch):
 @pytest.mark.asyncio
 async def test_400_missing_text(monkeypatch):
     fg = _Goals([{"id": "g1", "lifecycle": "grilling"}])
-    monkeypatch.setattr(server, "goals", fg)
+    monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "   "}))
     assert resp.status_code == 400 and fg.answered == []
