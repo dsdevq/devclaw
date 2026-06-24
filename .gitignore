@@ -22,7 +22,6 @@ Thumbs.db
 *.db
 *.db-shm
 *.db-wal
-.devclaw-state/
 openhands-runner/.venv/
 __pycache__/
 *.pyc
