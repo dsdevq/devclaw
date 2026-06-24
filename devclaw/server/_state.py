@@ -12,6 +12,12 @@ import os
 import sys
 import urllib.parse
 
+# Load a .env into os.environ FIRST — before any os.environ.get below. Real env
+# vars (shell / systemd / compose) still win; .env is the per-machine default.
+from .._env_loader import load_dotenv as _load_dotenv
+
+_load_dotenv()
+
 from fastmcp import FastMCP
 from pydantic import Field
 

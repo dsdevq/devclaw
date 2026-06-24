@@ -33,6 +33,7 @@ build/
 # Anything that looks like personal state should not be in this repo
 .env
 .env.*
+!.env.example
 *.local.yaml
 auth-profiles.json
 *.pem

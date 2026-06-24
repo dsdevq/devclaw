@@ -1,11 +1,16 @@
 # DevClaw environment variables
 
 Single source of truth for every env var the runtime reads. Grouped by what
-each one controls. Set in a `.env`, the systemd unit, the compose file, or the
-shell — devclaw doesn't care.
+each one controls. Set in `.env` (devclaw loads it on startup), the systemd
+unit, the compose file, or the shell — devclaw doesn't care.
 
-Convention: empty string or unset = "use the default in the table." Bools are
-truthy unless explicitly `0` / `false`.
+**Convention:** empty string or unset = "use the default in the table." Bools
+are truthy unless explicitly `0` / `false`. **Real env vars always win** over
+`.env` — `.env` is the per-machine default surface, not an override.
+
+The committed [`.env.example`](../.env.example) lists every var with its
+default; copy it to `.env` and uncomment what you want to change. Override the
+search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 
 ## Server transport + auth
 

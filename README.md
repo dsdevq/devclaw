@@ -195,7 +195,7 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 
 ### Environment variables
 
-Every env var the runtime reads — organized by what it controls (transport, state, sandbox, goals, model tiering, deploy, review gate) — lives in [`docs/env-vars.md`](./docs/env-vars.md). The most common ones to know:
+Copy [`.env.example`](./.env.example) to `.env` (gitignored) and uncomment what you need — devclaw loads it on startup, and shell/systemd env always wins over it. Every var organized by purpose (transport, state, sandbox, goals, model tiering, deploy, review gate) lives in [`docs/env-vars.md`](./docs/env-vars.md). The most common ones to know:
 
 | Var | Default | Purpose |
 |---|---|---|
