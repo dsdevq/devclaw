@@ -31,7 +31,7 @@ import os
 import re
 from typing import Awaitable, Callable, Optional
 
-from .goal_models import EvalResult, Goal, GoalStatus
+from .models import EvalResult, Goal, GoalStatus
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -198,6 +198,6 @@ async def evaluate(
 
 def default_caller() -> ClaudeCaller:
     """Production cognition caller bound to the evaluator tier (lazy import)."""
-    from .planner import claude_with_model
+    from ..planner import claude_with_model
 
     return claude_with_model(GOAL_EVAL_MODEL)

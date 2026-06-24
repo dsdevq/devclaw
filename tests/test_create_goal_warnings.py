@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_service import GoalConfig, GoalService
+from devclaw.goal.service import GoalConfig, GoalService
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
 

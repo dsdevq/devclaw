@@ -16,7 +16,7 @@ from fastmcp import FastMCP
 from pydantic import Field
 
 from .. import __version__
-from ..goal_service import GoalService
+from ..goal.service import GoalService
 from ..project_registry import ProjectRegistry
 from ..state_store import StateStore
 from ..task_queue import TaskQueue

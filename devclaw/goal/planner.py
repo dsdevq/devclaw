@@ -20,7 +20,7 @@ import os
 import re
 from typing import Awaitable, Callable
 
-from .goal_models import Action, Goal, GoalStatus, PlanResult
+from .models import Action, Goal, GoalStatus, PlanResult
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -204,6 +204,6 @@ def default_caller() -> ClaudeCaller:
     """The production cognition caller, bound to the goal-planner tier. Imported
     lazily from devclaw's shared ``claude --print`` factory so unit tests (which
     inject a fake) never touch the subprocess."""
-    from .planner import claude_with_model
+    from ..planner import claude_with_model
 
     return claude_with_model(GOAL_PLANNER_MODEL)

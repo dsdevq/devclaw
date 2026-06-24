@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_tick import Outcome, tick_all
-from devclaw.goal_store import GoalStore
+from devclaw.goal.tick import Outcome, tick_all
+from devclaw.goal.store import GoalStore
 from devclaw.state_store import _now_ms
 from tests.goal_fakes import Clock, FakeClaude, RecordingNotifier, fake_prepare, seed_goal
 

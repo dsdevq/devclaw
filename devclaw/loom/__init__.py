@@ -33,7 +33,7 @@ from .limits import (
 from .test_integrity import IntegrityReport, scan_diff
 
 # --- re-exported into loom's surface (still physically in devclaw for now) -----
-from ..goal_models import (
+from ..goal.models import (
     Action,
     EvalResult,
     Goal,
@@ -42,7 +42,7 @@ from ..goal_models import (
     PlanResult,
     PollResult,
 )
-from ..goal_store import GoalStore, parse_duration
+from ..goal.store import GoalStore, parse_duration
 
 __all__ = [
     # failure classification

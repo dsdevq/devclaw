@@ -14,9 +14,9 @@ import json
 
 import pytest
 
-from devclaw.goal_models import GoalStatus, InFlight, PollResult
-from devclaw.goal_store import GoalStore
-from devclaw.goal_tick import Outcome, tick_goal
+from devclaw.goal.models import GoalStatus, InFlight, PollResult
+from devclaw.goal.store import GoalStore
+from devclaw.goal.tick import Outcome, tick_goal
 from tests.goal_fakes import Clock, FakeClaude, FakeEngine, RecordingNotifier, fake_prepare, seed_goal
 
 ACT = json.dumps(
@@ -233,7 +233,7 @@ async def test_planner_blocked_notifies(tmp_path):
 def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
     """steer_goal must zero actions_dispatched when unblocking so the dispatch
     cap doesn't re-fire on the very next tick after the human resolves the block."""
-    from devclaw.goal_service import GoalConfig, GoalService
+    from devclaw.goal.service import GoalConfig, GoalService
     from devclaw.state_store import StateStore
     from devclaw.task_queue import TaskQueue
 
@@ -551,7 +551,7 @@ async def test_plan_review_waits_then_approval_starts_executing(tmp_path):
 async def test_discovery_enters_grilling_when_grill_enabled(tmp_path, monkeypatch):
     """With the grill on, a finished investigation flows into grilling (asking the
     first question) instead of straight to executing."""
-    monkeypatch.setattr("devclaw.goal_tick._grill.GRILL_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._grill.GRILL_ENABLED", True)
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", GoalStatus(
@@ -585,7 +585,7 @@ def _delivery_status():
 async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
     """A delivered change whose verify gate passed is merged by devclaw, with a
     plain owner ping — when DEVCLAW_GOAL_AUTOMERGE is on."""
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", _delivery_status())
@@ -605,7 +605,7 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_failed_gate_is_not_auto_merged(tmp_path, monkeypatch):
     """A PR whose gate did NOT pass must never be auto-merged."""
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", _delivery_status())
@@ -895,7 +895,7 @@ class RaisingClaude:
 
 @pytest.mark.asyncio
 async def test_consumed_action_is_persisted_before_a_planner_crash(tmp_path, monkeypatch):
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     # The bug: in_flight=None was computed in memory but NOT saved before the
     # next-action planner ran; the planner crashing on a usage limit aborted the
     # tick with the stale pointer on disk, so the next tick re-shipped/re-announced
@@ -952,7 +952,7 @@ async def test_planner_session_limit_is_caught_not_escaped(tmp_path):
 
 @pytest.mark.asyncio
 async def test_ship_notification_is_concise_not_the_full_prompt(tmp_path, monkeypatch):
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     # The notification must not paste the action's full instruction prompt (which
     # is what happened when the plain-language summarizer was quota-blocked and
     # fell back to raw text). With summary_caller=None the raw text is sent — and

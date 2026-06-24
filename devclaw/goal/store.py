@@ -22,7 +22,7 @@ from typing import Callable
 
 import yaml
 
-from .goal_models import Goal, GoalStatus, InFlight
+from .models import Goal, GoalStatus, InFlight
 
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 _DURATION = re.compile(r"^\s*(\d+)\s*([smhd])\s*$")

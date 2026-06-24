@@ -20,16 +20,21 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
-from . import goal_evaluator, goal_grill, goal_merge, goal_planner, goal_research, goal_summary
-from .goal_engine import InProcessEngine
-from .goal_evaluator import ClaudeCaller
-from .goal_models import GoalStatus
-from .goal_notify import HttpNotifier, Notifier, NullNotifier
-from .goal_store import GoalStore
-from .goal_tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
-from .state_store import StateStore
-from .task_queue import TaskQueue
-from .workspace import prepare_workspace
+from . import evaluator as goal_evaluator
+from . import grill as goal_grill
+from . import merge as goal_merge
+from . import planner as goal_planner
+from . import research as goal_research
+from . import summary as goal_summary
+from .engine import InProcessEngine
+from .evaluator import ClaudeCaller
+from .models import GoalStatus
+from .notify import HttpNotifier, Notifier, NullNotifier
+from .store import GoalStore
+from .tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
+from ..state_store import StateStore
+from ..task_queue import TaskQueue
+from ..workspace import prepare_workspace
 
 
 _BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")

@@ -21,9 +21,9 @@ from __future__ import annotations
 import json
 from typing import Optional, Protocol
 
-from .goal_models import Action, Goal, InFlight, PollResult
-from .state_store import StateStore, TaskKind
-from .task_queue import TaskQueue
+from .models import Action, Goal, InFlight, PollResult
+from ..state_store import StateStore, TaskKind
+from ..task_queue import TaskQueue
 
 _TASK_TERMINAL = {"done", "failed", "cancelled"}
 _PROGRAM_TERMINAL = {"done", "failed", "cancelled"}

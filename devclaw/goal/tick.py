@@ -26,22 +26,22 @@ from dataclasses import replace
 from enum import Enum
 from typing import Awaitable, Callable
 
-from . import goal_evaluator as _evaluator
-from . import deploy as _deploy
-from . import goal_grill as _grill
-from . import goal_merge as _merge
-from . import goal_planner as _planner
-from . import goal_research as _research
-from . import goal_summary as _goal_summary
-from .goal_engine import GoalEngine
-from .goal_models import Action, EvalResult, Goal, GoalStatus
-from .goal_notify import Notifier
-from .goal_planner import ClaudeCaller
-from .goal_store import GoalStore
-from .loom.limits import classify_failure, pause_seconds
-from .planner import PlannerError
-from .state_store import _now_ms
-from .workspace import WorkspaceError, prepare_workspace
+from . import evaluator as _evaluator
+from .. import deploy as _deploy
+from . import grill as _grill
+from . import merge as _merge
+from . import planner as _planner
+from . import research as _research
+from . import summary as _goal_summary
+from .engine import GoalEngine
+from .models import Action, EvalResult, Goal, GoalStatus
+from .notify import Notifier
+from .planner import ClaudeCaller
+from .store import GoalStore
+from ..loom.limits import classify_failure, pause_seconds
+from ..planner import PlannerError
+from ..state_store import _now_ms
+from ..workspace import WorkspaceError, prepare_workspace
 
 #: (workspace_dir, repo_url) -> default branch. Injected so tests pass a no-op.
 WorkspacePrep = Callable[[str, "str | None"], Awaitable[str]]

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 
-from .goal_planner import ClaudeCaller
+from .planner import ClaudeCaller
 
 #: cheap tier — owner notifications are rare, so this never touches idle quota.
 GOAL_SUMMARY_MODEL = os.environ.get("DEVCLAW_GOAL_SUMMARY_MODEL", "haiku") or None
@@ -56,6 +56,6 @@ def default_caller() -> ClaudeCaller:
     """Production summarizer caller, bound to the cheap summary tier. Imported
     lazily from devclaw's shared ``claude --print`` factory so unit tests (which
     inject a fake) never touch the subprocess."""
-    from .planner import claude_with_model
+    from ..planner import claude_with_model
 
     return claude_with_model(GOAL_SUMMARY_MODEL)

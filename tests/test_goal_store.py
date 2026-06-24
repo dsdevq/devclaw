@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_models import GoalStatus, InFlight
-from devclaw.goal_store import GoalStore, parse_duration
+from devclaw.goal.models import GoalStatus, InFlight
+from devclaw.goal.store import GoalStore, parse_duration
 from tests.goal_fakes import Clock, seed_goal
 
 

@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import os
 
-from .elicitation import next_step  # noqa: F401 — re-exported for the tick
-from .goal_models import Goal
-from .goal_planner import ClaudeCaller
+from ..elicitation import next_step  # noqa: F401 — re-exported for the tick
+from .models import Goal
+from .planner import ClaudeCaller
 
 #: off by default — the grill needs the Telegram answer channel wired and a live
 #: round-trip validated before it should drive real goals. When off, a goal flows
@@ -41,6 +41,6 @@ def grill_idea(goal: Goal, discovery: str) -> str:
 
 
 def default_caller() -> ClaudeCaller:
-    from .planner import claude_with_model
+    from ..planner import claude_with_model
 
     return claude_with_model(GRILL_MODEL)

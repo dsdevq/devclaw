@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_summary import plain_summary
+from devclaw.goal.summary import plain_summary
 
 
 @pytest.mark.asyncio

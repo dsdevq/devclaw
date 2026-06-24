@@ -28,7 +28,7 @@ import os
 import sys
 from typing import Optional
 
-from .goal_store import GoalStore
+from .goal.store import GoalStore
 from .project_registry import ProjectExists, ProjectRegistry, project_rollup
 
 

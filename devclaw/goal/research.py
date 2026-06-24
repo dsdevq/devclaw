@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import os
 
-from .goal_models import Goal
-from .goal_planner import ClaudeCaller
+from .models import Goal
+from .planner import ClaudeCaller
 
 #: when on, a newly created goal starts at lifecycle "new" and investigates
 #: (read-only repo analysis → discovery brief) before executing. Off → new goals

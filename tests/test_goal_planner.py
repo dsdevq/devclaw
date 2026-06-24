@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_models import Goal, GoalStatus
-from devclaw.goal_planner import GoalPlannerError, build_prompt, extract_json, validate
+from devclaw.goal.models import Goal, GoalStatus
+from devclaw.goal.planner import GoalPlannerError, build_prompt, extract_json, validate
 
 
 def _goal():

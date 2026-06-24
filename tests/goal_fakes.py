@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from devclaw.goal_models import Action, Goal, InFlight, PollResult
+from devclaw.goal.models import Action, Goal, InFlight, PollResult
 
 
 class FakeClaude:
