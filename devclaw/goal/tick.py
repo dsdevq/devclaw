@@ -22,9 +22,9 @@ claude — and the quota assertion is just "FakeClaude.calls == 0" on idle paths
 from __future__ import annotations
 
 import os
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Tuple, Union
 
 from . import evaluator as _evaluator
 from .. import deploy as _deploy
@@ -204,6 +204,77 @@ async def _check_no_progress(
     return status
 
 
+@dataclass(frozen=True)
+class TickContext:
+    """All the deps a single tick needs, bundled so handlers take one parameter
+    instead of twelve. Read-only; if a handler mutates state it does so through
+    ``ctx.store``."""
+
+    store: GoalStore
+    engine: GoalEngine
+    planner_caller: ClaudeCaller
+    evaluator_caller: ClaudeCaller
+    notifier: Notifier
+    notify_url: str = ""
+    prepare_ws: WorkspacePrep = prepare_workspace
+    eval_every: int = EVAL_EVERY
+    verify_done: bool = VERIFY_DONE
+    no_progress_s: int = NO_PROGRESS_S
+    summary_caller: "ClaudeCaller | None" = None
+    merger: "_merge.Merger | None" = None
+    grill_caller: "ClaudeCaller | None" = None
+
+
+class Phase(str, Enum):
+    """The reified state of a goal at the start of a tick — derived from
+    ``status`` by :func:`_classify`. Drives the handler dispatch in
+    :func:`tick_goal`.
+
+    Polling phases mean "an action is in flight; settle it." Lifecycle phases
+    mean "no in-flight work; do this lifecycle step." Terminal phases are
+    fast-paths that skip even the watchdog."""
+
+    TERMINAL_DONE = "terminal_done"
+    TERMINAL_CANCELLED = "terminal_cancelled"
+    POLLING_DISCOVERY = "polling_discovery"
+    POLLING_DONE_GATE = "polling_done_gate"
+    POLLING_ACTION = "polling_action"
+    INVESTIGATING = "investigating"
+    GRILLING = "grilling"
+    PLAN_REVIEW = "plan_review"
+    EXECUTING = "executing"
+
+
+def _classify(status: GoalStatus) -> Phase:
+    """Map a goal's status to its current phase. Single source of truth for the
+    state-machine — every transition is implicitly through what gets saved to
+    ``status`` (lifecycle / in_flight / phase fields), and reading them here
+    keeps the dispatch one switch instead of a waterfall of branches."""
+    if status.phase == "done":
+        return Phase.TERMINAL_DONE
+    if status.phase == "cancelled":
+        return Phase.TERMINAL_CANCELLED
+    if status.in_flight is not None:
+        ref = status.in_flight
+        if getattr(ref, "is_discovery", False):
+            return Phase.POLLING_DISCOVERY
+        if getattr(ref, "is_done_check", False):
+            return Phase.POLLING_DONE_GATE
+        return Phase.POLLING_ACTION
+    # No in-flight work — dispatch on lifecycle. A None lifecycle (legacy goal)
+    # behaves as "executing"; "investigating" without an in-flight ref is a
+    # crash-recovery edge that falls through to executing too (the discovery
+    # never resolved; carry on with the bare backlog).
+    lifecycle = status.lifecycle or "executing"
+    if lifecycle == "new":
+        return Phase.INVESTIGATING
+    if lifecycle == "grilling":
+        return Phase.GRILLING
+    if lifecycle == "plan_review":
+        return Phase.PLAN_REVIEW
+    return Phase.EXECUTING
+
+
 async def tick_goal(
     goal_id: str,
     *,
@@ -221,214 +292,78 @@ async def tick_goal(
     merger: "_merge.Merger | None" = None,
     grill_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
+    """Run one heartbeat. Reads the goal's status, classifies it into a
+    :class:`Phase`, dispatches to the matching handler.
+
+    Two design pillars carried over from the original implementation:
+      * **Terminal short-circuit** runs BEFORE the no-progress watchdog so done /
+        cancelled goals don't even read the clock.
+      * **Action-poll chains into EXECUTING** in the same tick — a settled
+        regular action records its delivery, clears ``in_flight``, and the
+        planner sees the just-finished detail without waiting another heartbeat.
+        (Discovery / done-gate polls do NOT chain — they have dedicated
+        resolution handlers.)
+    """
+    ctx = TickContext(
+        store=store, engine=engine,
+        planner_caller=planner_caller, evaluator_caller=evaluator_caller,
+        notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
+        eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+        summary_caller=summary_caller, merger=merger, grill_caller=grill_caller,
+    )
+
     goal = store.load_goal(goal_id)
     status = store.load_status(goal_id)
-    if status.phase == "done":
-        return Outcome.SKIP_DONE
-    if status.phase == "cancelled":
-        return Outcome.SKIP_CANCELLED
-    #: None on a legacy goal → it behaves as "executing" (flat backlog), never
-    #: entering the planning front-end. New outcome goals start at "new".
-    lifecycle = status.lifecycle or "executing"
+    phase = _classify(status)
 
-    # ---- no-progress watchdog (zero tokens): runs first, every tick, including
-    # while an action is still in-flight — pure timestamp math. Self-initializes
-    # the baseline the first time it sees an executing goal, fires one owner ping
-    # if the goal has gone too long without shipping, and is reset by deliveries.
+    # Terminal short-circuit — skip even the watchdog.
+    if phase is Phase.TERMINAL_DONE:
+        return Outcome.SKIP_DONE
+    if phase is Phase.TERMINAL_CANCELLED:
+        return Outcome.SKIP_CANCELLED
+
+    # Zero-token no-progress watchdog: pure timestamp math; fires one owner ping
+    # if an executing goal hasn't shipped in too long. Mutates status; never
+    # transitions phase.
     status = await _check_no_progress(
         goal_id, goal, status,
         store=store, notifier=notifier, window_s=no_progress_s, summarize=summary_caller,
     )
 
-    # ---- cheap check (zero tokens): poll any in-flight action ---------------
+    # Polling phases — settle in-flight work first.
+    if phase is Phase.POLLING_DISCOVERY:
+        return await _resolve_polling_discovery(goal_id, goal, status, ctx)
+    if phase is Phase.POLLING_DONE_GATE:
+        return await _resolve_polling_done_gate(goal_id, goal, status, ctx)
+
     finished_detail = ""
-    done_check_detail: str | None = None
-    discovery_detail: str | None = None
-    if status.in_flight is not None:
-        ref = status.in_flight
-        poll = await engine.poll(ref)
-        if poll.running:
-            store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-            return Outcome.IN_FLIGHT
-        # terminal — branch on what kind of action it was.
-        evidence = []
-        if poll.pr_url:
-            evidence.append(f"PR {poll.pr_url}")
-        if poll.gate_passed is not None:
-            evidence.append("gate=passed" if poll.gate_passed else "gate=FAILED")
-        ev_str = (" — " + ", ".join(evidence)) if evidence else ""
-        if ref.is_discovery:
-            store.append_log(goal_id, f"discovery review {ref.id} → {poll.status}")
-            discovery_detail = poll.detail or f"review {poll.status} (no analysis captured)"
-            status = replace(status, in_flight=None, phase="idle")
-        elif ref.is_done_check:
-            store.append_log(goal_id, f"done-check review {ref.id} → {poll.status}")
-            done_check_detail = poll.detail or f"review {poll.status} (no report captured)"
-            status = replace(status, in_flight=None, phase="idle")
-        else:
-            store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
-            # Grounded evidence for the evaluator — the agent's own output + gate.
-            store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "")
-            finished_detail = (
-                f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}\n{poll.detail}"
-            )
-            delivered = 1 if poll.status == "done" else 0
-            status = replace(
-                status, in_flight=None, phase="idle",
-                deliveries_since_eval=status.deliveries_since_eval + delivered,
-                # a delivery is forward progress → reset the no-progress watchdog.
-                last_progress_at=(store.now_iso() if delivered else status.last_progress_at),
-                no_progress_notified=(False if delivered else status.no_progress_notified),
-            )
-            # Hands-off auto-merge (decision 2): a delivered change whose verify
-            # gate passed is merged by devclaw itself, with a plain owner ping.
-            # Best-effort + gated — a failed merge just leaves the PR for review.
-            if (
-                _merge.AUTOMERGE_ENABLED and merger is not None
-                and poll.status == "done" and poll.gate_passed and poll.pr_url
-            ):
-                if await merger(poll.pr_url):
-                    store.append_log(goal_id, f"auto-merged {poll.pr_url}")
-                    await _notify(
-                        notifier, NotifyLevel.OWNER,
-                        f"✅ [{goal_id}] shipped + merged — {_action_label(ref)} ({poll.pr_url})",
-                        summarize=summary_caller,
-                    )
-                else:
-                    store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
+    if phase is Phase.POLLING_ACTION:
+        outcome = await _resolve_polling_action(goal_id, goal, status, ctx)
+        if isinstance(outcome, Outcome):
+            return outcome
+        # A regular action settled; chain to the lifecycle phase that the just-
+        # cleared status now classifies into (usually EXECUTING).
+        status, finished_detail = outcome
+        phase = _classify(status)
 
-        # Persist the consumed action (in_flight is now None) IMMEDIATELY — before
-        # the next-action planner (and any other downstream cognition) runs. That
-        # planner call can RAISE on a usage limit; if the cleared state isn't saved
-        # first, the tick aborts with in_flight still pointing at the just-finished
-        # action, and the NEXT tick re-reads it and re-ships / re-announces the same
-        # work — forever (the duplicate-merge loop, dogfood 2026-06-21). One save
-        # here makes "action consumed" durable so a later crash can't undo it.
-        store.save_status(goal_id, status)
-
-    # ---- DISCOVERY resolution: the investigating review just finished -------
-    if discovery_detail is not None:
-        return await _resolve_discovery(
-            goal_id, goal, status, discovery_detail,
-            store=store, research_caller=evaluator_caller, notifier=notifier,
-            summarize=summary_caller, grill_caller=grill_caller,
-        )
-
-    # ---- DONE-GATE resolution: a verifying review just finished -------------
-    if done_check_detail is not None:
-        return await _resolve_done_gate(
-            goal_id, goal, status, done_check_detail,
-            store=store, evaluator_caller=evaluator_caller, notifier=notifier,
-            summarize=summary_caller,
-        )
-
-    # ---- LIFECYCLE: a new outcome goal investigates before it executes ------
-    # (grilling / plan_review are filled in by later build steps; today the
-    #  investigating phase flows straight to executing once the brief is written.)
-    if lifecycle == "new":
+    # Lifecycle phases (in_flight is None).
+    if phase is Phase.INVESTIGATING:
         return await _open_investigation(
             goal_id, goal, status,
             store=store, engine=engine, notifier=notifier,
             notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
         )
-
-    # ---- GRILLING: align on scope, one question at a time over Telegram -----
-    if lifecycle == "grilling":
+    if phase is Phase.GRILLING:
         return await _run_grill(
             goal_id, goal, status,
             store=store, grill_caller=grill_caller, notifier=notifier, summarize=summary_caller,
         )
+    if phase is Phase.PLAN_REVIEW:
+        return await _handle_plan_review(goal_id, status, ctx)
+    if phase is Phase.EXECUTING:
+        return await _handle_executing(goal_id, goal, status, finished_detail, ctx)
 
-    # ---- PLAN_REVIEW: the spec is agreed; wait for the owner's approval -----
-    if lifecycle == "plan_review":
-        if store.plan_approved(goal_id):
-            store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle", next="plan approved → executing"))
-            store.append_log(goal_id, "plan approved → executing")
-            await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] plan approved — starting work now", summarize=summary_caller)
-            return Outcome.ADVANCED
-        # waiting for approval → zero tokens
-        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-        return Outcome.IDLE
-
-    # ---- should we spend cognition at all? (preserve the zero-token guard) --
-    steering = store.unread_steering(goal_id, status)
-    work = bool(finished_detail) or bool(steering)
-    if status.phase == "blocked":
-        should_plan = work  # cadence does NOT re-poke a blocked goal; only work unblocks
-    else:
-        should_plan = work or store.cadence_due(goal, status)
-    if not should_plan:
-        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-        return Outcome.IDLE
-
-    # ---- periodic direction eval (mid-flight) ------------------------------
-    # Past the gate, and only when enough has shipped, judge direction from the
-    # grounded deliveries. Corrections become steering; a hard verdict blocks.
-    if eval_every > 0 and status.deliveries_since_eval >= eval_every:
-        blocked = await _run_mid_flight_eval(
-            goal_id, goal, status,
-            store=store, evaluator_caller=evaluator_caller, notifier=notifier,
-            summarize=summary_caller,
-        )
-        status = store.load_status(goal_id)  # eval may have written status + steering
-        if blocked is not None:
-            return blocked
-        steering = store.unread_steering(goal_id, status)  # re-read: eval may have steered
-
-    # ---- next-action plan (cognition) + act --------------------------------
-    try:
-        result = await _planner.plan(
-            goal, status, store.recent_log(goal_id), steering, finished_detail,
-            claude_caller=planner_caller, discovery=store.read_discovery(goal_id),
-        )
-    except (_planner.GoalPlannerError, PlannerError) as exc:
-        # A usage/rate limit reaching the PLANNER must pause the layer, not be
-        # logged as a plan error and retried next tick (which re-burns the quota).
-        # NB: the goal planner shells out via the shared `claude --print` caller,
-        # which raises `planner.PlannerError` (NOT GoalPlannerError) on a non-zero
-        # exit — e.g. a session/usage limit. Catching only GoalPlannerError let it
-        # escape to the outer "tick error (isolated)" handler, so it never paused
-        # and the tick churned every cycle (dogfood 2026-06-21). Catch both.
-        paused = _maybe_pause(engine, store, goal_id, str(exc))
-        if paused is not None:
-            store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-            return paused
-        store.append_log(goal_id, f"plan error: {exc}")
-        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-        await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] plan step failed: {exc}")
-        return Outcome.ERROR
-
-    now = store.now_iso()
-    base = replace(
-        status, last_plan_at=now, last_tick_at=now,
-        inbox_cursor=store.steering_cursor(goal_id),  # all current steering consumed
-    )
-
-    if result.decision == "sleep":
-        store.save_status(goal_id, replace(base, phase="idle", next=result.note))
-        store.append_log(goal_id, f"sleep: {result.note}")
-        return Outcome.SLEPT
-
-    if result.decision == "blocked":
-        store.save_status(goal_id, replace(base, phase="blocked", blocked_on=result.question, next=""))
-        store.append_log(goal_id, f"blocked: {result.question}")
-        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] needs you — {result.question}", summarize=summary_caller)
-        return Outcome.BLOCKED
-
-    if result.decision == "done":
-        return await _open_done_gate(
-            goal_id, goal, base,
-            store=store, engine=engine, evaluator_caller=evaluator_caller,
-            notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-            verify_done=verify_done, note=result.note, summarize=summary_caller,
-        )
-
-    # decision == "act"
-    return await _dispatch_action(
-        goal_id, goal, base, result.actions[0],
-        store=store, engine=engine, notifier=notifier,
-        notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
-    )
+    raise RuntimeError(f"unhandled phase {phase} for goal {goal_id}")
 
 
 # ---- evaluation helpers ----------------------------------------------------
@@ -759,6 +694,232 @@ async def _dispatch_action(
     store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}")
     await _notify(notifier, NotifyLevel.TASK, f"🚀 [{goal_id}] {action.tool}: {action.goal}  ({ref.id})")
     return Outcome.DISPATCHED
+
+
+# ---- phase handlers --------------------------------------------------------
+# One handler per Phase value. Each takes (goal_id, goal, status, ctx) — except
+# the polling handlers, which the orchestrator calls with status already loaded
+# — and returns either an :class:`Outcome` (terminal for this tick) or, for
+# ``_resolve_polling_action``, an ``(updated_status, finished_detail)`` tuple
+# so the EXECUTING handler can chain on the same tick.
+
+
+async def _resolve_polling_discovery(
+    goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
+) -> Outcome:
+    """Settle an in-flight discovery review. Still running → IN_FLIGHT. Else
+    record the review outcome, clear in_flight, and synthesize the brief via
+    :func:`_resolve_discovery`."""
+    ref = status.in_flight
+    poll = await ctx.engine.poll(ref)
+    if poll.running:
+        ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+        return Outcome.IN_FLIGHT
+    ctx.store.append_log(goal_id, f"discovery review {ref.id} → {poll.status}")
+    discovery_detail = poll.detail or f"review {poll.status} (no analysis captured)"
+    new_status = replace(status, in_flight=None, phase="idle")
+    # Persist BEFORE the synthesis call (which may raise on a usage limit) so a
+    # later crash can't rewind to "still in-flight" and re-poll the same ref.
+    ctx.store.save_status(goal_id, new_status)
+    return await _resolve_discovery(
+        goal_id, goal, new_status, discovery_detail,
+        store=ctx.store, research_caller=ctx.evaluator_caller, notifier=ctx.notifier,
+        summarize=ctx.summary_caller, grill_caller=ctx.grill_caller,
+    )
+
+
+async def _resolve_polling_done_gate(
+    goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
+) -> Outcome:
+    """Settle an in-flight done-gate review. Still running → IN_FLIGHT. Else
+    record the review outcome, clear in_flight, and judge the repo against
+    ``done_when`` via :func:`_resolve_done_gate`."""
+    ref = status.in_flight
+    poll = await ctx.engine.poll(ref)
+    if poll.running:
+        ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+        return Outcome.IN_FLIGHT
+    ctx.store.append_log(goal_id, f"done-check review {ref.id} → {poll.status}")
+    review_report = poll.detail or f"review {poll.status} (no report captured)"
+    new_status = replace(status, in_flight=None, phase="idle")
+    ctx.store.save_status(goal_id, new_status)
+    return await _resolve_done_gate(
+        goal_id, goal, new_status, review_report,
+        store=ctx.store, evaluator_caller=ctx.evaluator_caller, notifier=ctx.notifier,
+        summarize=ctx.summary_caller,
+    )
+
+
+async def _resolve_polling_action(
+    goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
+) -> "Union[Outcome, Tuple[GoalStatus, str]]":
+    """Settle an in-flight regular action. Still running → IN_FLIGHT.
+    Otherwise: record the delivery (grounded evidence for the evaluator), update
+    the no-progress watchdog, run auto-merge if enabled, persist the cleared
+    state IMMEDIATELY (protects against the duplicate-merge loop dogfooded
+    2026-06-21), and return ``(new_status, finished_detail)`` so the EXECUTING
+    handler can plan the next action on the same tick with the just-finished
+    detail in hand."""
+    ref = status.in_flight
+    poll = await ctx.engine.poll(ref)
+    if poll.running:
+        ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+        return Outcome.IN_FLIGHT
+
+    evidence = []
+    if poll.pr_url:
+        evidence.append(f"PR {poll.pr_url}")
+    if poll.gate_passed is not None:
+        evidence.append("gate=passed" if poll.gate_passed else "gate=FAILED")
+    ev_str = (" — " + ", ".join(evidence)) if evidence else ""
+
+    ctx.store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
+    ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "")
+    finished_detail = f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}\n{poll.detail}"
+
+    delivered = 1 if poll.status == "done" else 0
+    new_status = replace(
+        status, in_flight=None, phase="idle",
+        deliveries_since_eval=status.deliveries_since_eval + delivered,
+        # a delivery is forward progress → reset the no-progress watchdog.
+        last_progress_at=(ctx.store.now_iso() if delivered else status.last_progress_at),
+        no_progress_notified=(False if delivered else status.no_progress_notified),
+    )
+
+    # Hands-off auto-merge: a delivered change whose verify gate passed is
+    # merged by devclaw itself, with a plain owner ping. Best-effort + gated —
+    # a failed merge just leaves the PR for review.
+    if (
+        _merge.AUTOMERGE_ENABLED and ctx.merger is not None
+        and poll.status == "done" and poll.gate_passed and poll.pr_url
+    ):
+        if await ctx.merger(poll.pr_url):
+            ctx.store.append_log(goal_id, f"auto-merged {poll.pr_url}")
+            await _notify(
+                ctx.notifier, NotifyLevel.OWNER,
+                f"✅ [{goal_id}] shipped + merged — {_action_label(ref)} ({poll.pr_url})",
+                summarize=ctx.summary_caller,
+            )
+        else:
+            ctx.store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
+
+    # Persist IMMEDIATELY — the next-action planner can raise on a usage limit;
+    # if the cleared state isn't durable first the tick aborts with in_flight
+    # still pointing at the just-finished action and the next tick re-ships it
+    # (duplicate-merge loop, dogfood 2026-06-21).
+    ctx.store.save_status(goal_id, new_status)
+    return new_status, finished_detail
+
+
+async def _handle_plan_review(
+    goal_id: str, status: GoalStatus, ctx: TickContext,
+) -> Outcome:
+    """Waiting for the owner's approval reply. If approved → advance to
+    EXECUTING; else idle at zero tokens until the answer lands."""
+    if ctx.store.plan_approved(goal_id):
+        ctx.store.save_status(
+            goal_id,
+            replace(status, lifecycle="executing", phase="idle", next="plan approved → executing"),
+        )
+        ctx.store.append_log(goal_id, "plan approved → executing")
+        await _notify(
+            ctx.notifier, NotifyLevel.OWNER,
+            f"✅ [{goal_id}] plan approved — starting work now",
+            summarize=ctx.summary_caller,
+        )
+        return Outcome.ADVANCED
+    ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+    return Outcome.IDLE
+
+
+async def _handle_executing(
+    goal_id: str, goal: Goal, status: GoalStatus, finished_detail: str, ctx: TickContext,
+) -> Outcome:
+    """The cognition path. Gate by work-present + cadence (preserves the
+    zero-token guard — blocked goals only unblock on real work, never on the
+    timer), then optionally run a periodic direction eval, then plan one
+    action and dispatch on the planner's decision."""
+    steering = ctx.store.unread_steering(goal_id, status)
+    work = bool(finished_detail) or bool(steering)
+    if status.phase == "blocked":
+        should_plan = work  # cadence does NOT re-poke a blocked goal; only work unblocks
+    else:
+        should_plan = work or ctx.store.cadence_due(goal, status)
+    if not should_plan:
+        ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+        return Outcome.IDLE
+
+    # Periodic, artifact-grounded direction eval (mid-flight). Past the gate,
+    # and only when enough has shipped, judge direction from the grounded
+    # deliveries. Corrections become steering; a hard verdict blocks.
+    if ctx.eval_every > 0 and status.deliveries_since_eval >= ctx.eval_every:
+        blocked = await _run_mid_flight_eval(
+            goal_id, goal, status,
+            store=ctx.store, evaluator_caller=ctx.evaluator_caller, notifier=ctx.notifier,
+            summarize=ctx.summary_caller,
+        )
+        status = ctx.store.load_status(goal_id)  # eval may have written status + steering
+        if blocked is not None:
+            return blocked
+        steering = ctx.store.unread_steering(goal_id, status)  # re-read
+
+    # Plan one next action.
+    try:
+        result = await _planner.plan(
+            goal, status, ctx.store.recent_log(goal_id), steering, finished_detail,
+            claude_caller=ctx.planner_caller, discovery=ctx.store.read_discovery(goal_id),
+        )
+    except (_planner.GoalPlannerError, PlannerError) as exc:
+        # A usage/rate limit at the PLANNER must pause the layer, not be logged
+        # and retried next tick (re-burning quota). The goal planner shells out
+        # via the shared claude --print caller, which raises PlannerError on a
+        # non-zero exit (e.g. a session limit). Catch BOTH (dogfood 2026-06-21).
+        paused = _maybe_pause(ctx.engine, ctx.store, goal_id, str(exc))
+        if paused is not None:
+            ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+            return paused
+        ctx.store.append_log(goal_id, f"plan error: {exc}")
+        ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+        await _notify(ctx.notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] plan step failed: {exc}")
+        return Outcome.ERROR
+
+    now = ctx.store.now_iso()
+    base = replace(
+        status, last_plan_at=now, last_tick_at=now,
+        inbox_cursor=ctx.store.steering_cursor(goal_id),  # all current steering consumed
+    )
+
+    if result.decision == "sleep":
+        ctx.store.save_status(goal_id, replace(base, phase="idle", next=result.note))
+        ctx.store.append_log(goal_id, f"sleep: {result.note}")
+        return Outcome.SLEPT
+
+    if result.decision == "blocked":
+        ctx.store.save_status(goal_id, replace(base, phase="blocked", blocked_on=result.question, next=""))
+        ctx.store.append_log(goal_id, f"blocked: {result.question}")
+        await _notify(
+            ctx.notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] needs you — {result.question}",
+            summarize=ctx.summary_caller,
+        )
+        return Outcome.BLOCKED
+
+    if result.decision == "done":
+        return await _open_done_gate(
+            goal_id, goal, base,
+            store=ctx.store, engine=ctx.engine, evaluator_caller=ctx.evaluator_caller,
+            notifier=ctx.notifier, notify_url=ctx.notify_url, prepare_ws=ctx.prepare_ws,
+            verify_done=ctx.verify_done, note=result.note, summarize=ctx.summary_caller,
+        )
+
+    # decision == "act"
+    return await _dispatch_action(
+        goal_id, goal, base, result.actions[0],
+        store=ctx.store, engine=ctx.engine, notifier=ctx.notifier,
+        notify_url=ctx.notify_url, prepare_ws=ctx.prepare_ws, summarize=ctx.summary_caller,
+    )
+
+
+# ---- multi-goal driver -----------------------------------------------------
 
 
 async def tick_all(
