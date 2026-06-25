@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from devclaw import dashboard as d
+from devclaw.server import dashboard as d
 
 
 @dataclass

@@ -18,9 +18,9 @@ from typing import Annotated, Literal, Optional
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from .. import deploy as _deploy
+from ..delivery import deploy as _deploy
 from .. import elicitation as _elicitation
-from .. import repo as _repo
+from ..delivery import repo as _repo
 from ..project_registry import ProjectExists, project_rollup
 from ._state import _goal_get, goals, mcp, queue, registry, store
 

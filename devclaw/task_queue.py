@@ -45,7 +45,7 @@ from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
-from .review_gate import format_feedback, review_diff
+from .quality import format_feedback, review_diff
 from .engine.sandcastle import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 

@@ -27,7 +27,7 @@ from enum import Enum
 from typing import Awaitable, Callable, Tuple, Union
 
 from . import evaluator as _evaluator
-from .. import deploy as _deploy
+from ..delivery import deploy as _deploy
 from . import merge as _merge
 from . import planner as _planner
 from . import research as _research

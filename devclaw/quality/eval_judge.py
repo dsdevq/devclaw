@@ -17,7 +17,7 @@ import os
 from collections import Counter
 from typing import Awaitable, Callable, Optional
 
-from .planner import PlannerError, claude_with_model, extract_json
+from ..planner import PlannerError, claude_with_model, extract_json
 
 #: the judge buckets a run into a fixed vocabulary + a suggestion — bounded
 #: classification, so Haiku is the right tier. Empty → account default.
@@ -75,7 +75,7 @@ def build_judge_prompt(
     acceptance: Optional[bool],
     accept_output: str = "",
 ) -> str:
-    from .prompts import load_prompt
+    from ..prompts import load_prompt
 
     acc = {True: "PASSED", False: "FAILED", None: "NOT RUN (build did not complete)"}[acceptance]
     return "\n\n".join(

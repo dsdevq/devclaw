@@ -11,7 +11,8 @@ import inspect
 
 import pytest
 
-from devclaw import eval_judge, elicitation
+from devclaw.quality import eval_judge
+from devclaw import elicitation
 from devclaw import planner
 from devclaw.engine import sandcastle as sandcastle_runner
 from devclaw.planner import _build_claude_argv, call_claude, claude_with_model

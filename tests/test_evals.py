@@ -1,6 +1,6 @@
 """Eval scoring tests — the deterministic core the live harness relies on."""
 
-from devclaw.evals import aggregate, score
+from devclaw.quality.evals import aggregate, score
 
 
 def _task(status, milestone=None):

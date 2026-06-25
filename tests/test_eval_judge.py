@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from devclaw.eval_judge import (
+from devclaw.quality.eval_judge import (
     CATEGORIES,
     events_digest,
     judge_run,

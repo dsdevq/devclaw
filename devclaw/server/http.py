@@ -13,7 +13,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 
 from .. import __version__
-from .. import dashboard as _dash
+from . import dashboard as _dash
 from ..project_registry import project_rollup
 from ._state import (
     SERVER_NAME,

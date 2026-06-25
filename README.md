@@ -58,7 +58,7 @@ devclaw/
 │   ├── store.py        #   on-disk mind: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
 │   ├── engine.py       #   in-process dispatch into the task queue
 │   ├── research.py · merge.py · notify.py · summary.py · models.py
-├── engine/             # everything that executes the work:
+├── engine/             # everything that EXECUTES the work:
 │   ├── __init__.py     #   the Engine protocol (one async callable)
 │   ├── sandcastle.py   #   docker run --rm per task; events stream from the runner (production)
 │   ├── claude_sdk.py   #   spike backend: claude --print inside the same sandbox
@@ -66,6 +66,14 @@ devclaw/
 │   ├── stub.py         #   deterministic engine for tests + offline harness
 │   ├── runner_io.py    #   shared stdout/event-stream parser
 │   └── workspace.py    #   per-action pristine git checkout (devclaw owns it)
+├── delivery/           # how shipped changes REACH the owner:
+│   ├── __init__.py     #   engineer-authored commit → branch → push → PR
+│   ├── deploy.py       #   durable Tailscale deploy hosting (reboot-surviving)
+│   └── repo.py         #   gh repo creation (for create_repo)
+├── quality/            # gates that judge the work past the green test gate:
+│   ├── __init__.py     #   pre-PR adversarial diff review (claude)
+│   ├── eval_judge.py   #   failure-mode classifier across eval runs
+│   └── evals.py        #   eval scoring (pure, used by harnesses)
 ├── prompts/            # every system prompt as a .md file (load_prompt(slug))
 ├── loom/               # reusable orchestration core (engine-agnostic substrate):
 │   ├── limits.py       #   usage-/rate-limit failure classifier (pure)
@@ -76,10 +84,6 @@ devclaw/
 ├── elicitation.py      # scope-grill cognition (called via the scope_grill MCP tool)
 ├── state_store.py      # SQLite: programs, tasks, append-only events
 ├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
-├── delivery.py         # engineer-authored commit → branch → push → PR
-├── review_gate.py      # pre-PR adversarial diff review (claude)
-├── eval_judge.py       # failure-mode classifier across eval runs
-├── deploy.py           # durable Tailscale deploy hosting (reboot-surviving)
 ├── project_registry.py # control plane: repos → driving goals → live status rollup
 └── cli.py              # devclaw projects … (terminal face of the control plane)
 openhands-runner/runner.py  # OpenHands SDK inside the sandbox; emits event/result lines

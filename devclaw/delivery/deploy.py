@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from .engine.sandcastle import _translate_workspace_path  # reuse host-path mapping
+from ..engine.sandcastle import _translate_workspace_path  # reuse host-path mapping
 
 # In-container launcher. Detects backend/ (FastAPI) and frontend/ (static), serves
 # them on ONE origin (so UI + API share a host), and rewrites hard-coded localhost
