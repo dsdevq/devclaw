@@ -31,38 +31,9 @@ GRILL_MODEL = os.environ.get("DEVCLAW_GRILL_MODEL", "sonnet") or None
 #: model is forced to finalize the spec from what it has.
 MAX_GRILL_QUESTIONS = int(os.environ.get("DEVCLAW_MAX_GRILL_QUESTIONS", "20"))
 
-_GRILL_RULES = """You are DevClaw's project elicitor. You are interviewing the
-user to reach a SHARED UNDERSTANDING of a software project before any code is
-written. Methodology (adapted from Matt Pocock's grill-me):
-
-- Interview relentlessly until you genuinely understand WHAT to build and HOW.
-- Walk the design tree branch by branch; resolve dependencies between decisions
-  one at a time. Ask the single most valuable next question given what's known.
-- Ask ONE question at a time. Always include your recommended answer.
-- Decide-instead-of-ask: if a question has an obvious best-practice answer, don't
-  ask it — fold the decision into the spec and move on.
-- Cover at least: the core goal + who it's for, scope (explicitly in AND out),
-  tech stack + key architecture decisions, milestones, acceptance criteria,
-  hard constraints (perf, hosting, deps), and known risks."""
-
-_SPEC_SHAPE = """A spec is Markdown with these sections:
-# <project> — spec
-## Goal            — one paragraph; what success is
-## Scope           — in / out (explicit out-of-scope list)
-## Stack & arch    — decisions + the "why"
-## Milestones      — the coarse phases the build moves through
-## Acceptance      — checkable criteria per milestone
-## Constraints     — perf, deps, hosting, non-negotiables
-## Open risks      — known unknowns carried into execution"""
-
-_RESPONSE_CONTRACT = """Respond with STRICT JSON ONLY — no prose, no fences.
-Either ask the next question:
-  {"action": "ask", "question": "<one question>", "recommended": "<your recommended answer>"}
-or, when you have enough for a shared understanding, finalize:
-  {"action": "done", "spec": "<the full spec.md markdown>"}"""
-
-
 def build_grill_prompt(idea: str, transcript: list[dict], *, finalize: bool) -> str:
+    from .prompts import load_prompt
+
     lines = [f"PROJECT IDEA:\n{idea}", ""]
     if transcript:
         lines.append("INTERVIEW SO FAR (question → recommended → user's answer):")
@@ -83,9 +54,9 @@ def build_grill_prompt(idea: str, transcript: list[dict], *, finalize: bool) -> 
             "Decide: is there a genuinely valuable next question, or do you now "
             "have a shared understanding? Ask one question OR finalize the spec."
         )
-    return "\n".join(
-        [_GRILL_RULES, "", _SPEC_SHAPE, "", *lines, closing, "", _RESPONSE_CONTRACT]
-    )
+    rules = load_prompt("scope-grill")
+    contract = load_prompt("scope-grill-contract")
+    return "\n".join([rules, "", *lines, closing, "", contract])
 
 
 def validate_step(parsed: object) -> dict:

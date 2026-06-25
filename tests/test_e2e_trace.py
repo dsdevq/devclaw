@@ -113,6 +113,25 @@ async def test_e2e_trace_captures_full_lifecycle(tmp_path):
         set_tracer(None)
 
 
+@pytest.mark.asyncio
+async def test_two_runs_produce_identical_prompt_hashes(tmp_path):
+    """Two back-to-back stub runs must hash every cognition prompt the same.
+    If they don't, either the harness has hidden state (e.g. an output dir
+    that accumulates log.md across runs) or the inputs to a build_prompt are
+    nondeterministic. Either way the trace harness can't be a reliable
+    refactor safety net until this holds."""
+    from evals.e2e_trace import _run_stub
+
+    set_tracer(None)
+    t1 = await _run_stub(tmp_path / "a", ticks=3)
+    set_tracer(None)
+    t2 = await _run_stub(tmp_path / "b", ticks=3)
+
+    hashes1 = [e["prompt_hash"] for e in t1.by_kind("cognition")]
+    hashes2 = [e["prompt_hash"] for e in t2.by_kind("cognition")]
+    assert hashes1 == hashes2, (hashes1, hashes2)
+
+
 def test_tracer_dumps_json_and_timeline(tmp_path):
     """The tracer can persist a JSON trace (machine-readable, diffable across
     runs) and a markdown timeline (human-readable). Both are tested as a unit

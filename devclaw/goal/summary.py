@@ -26,16 +26,6 @@ GOAL_SUMMARY_MODEL = os.environ.get("DEVCLAW_GOAL_SUMMARY_MODEL", "haiku") or No
 #: on by default; disable with DEVCLAW_GOAL_PLAIN_SUMMARY=0 to send raw text.
 PLAIN_SUMMARY_ENABLED = os.environ.get("DEVCLAW_GOAL_PLAIN_SUMMARY", "1") not in ("0", "false", "")
 
-_PROMPT = """Rewrite this status update so a NON-TECHNICAL product owner understands it at a glance.
-Rules:
-- One or two plain sentences. No jargon, no IDs, no file names, no tool names.
-- Preserve the meaning and any action the owner must take.
-- Preserve a single leading emoji if the message has one.
-- Output ONLY the rewritten message — no preamble, no quotes.
-
-Message:
-{text}"""
-
 #: a rewrite longer than this is treated as runaway/garbage → fall back to raw.
 _MAX_LEN = 600
 
@@ -43,8 +33,10 @@ _MAX_LEN = 600
 async def plain_summary(text: str, *, caller: ClaudeCaller) -> str:
     """Best-effort plain-language rewrite of ``text``. Returns ``text`` unchanged
     on any failure — a notification must never be lost to a summarizer hiccup."""
+    from ..prompts import load_prompt
+
     try:
-        out = (await caller(_PROMPT.format(text=text))).strip()
+        out = (await caller(load_prompt("owner-summary", text=text))).strip()
     except Exception:  # noqa: BLE001 — best-effort; never break a notification
         return text
     if not out or len(out) > _MAX_LEN:

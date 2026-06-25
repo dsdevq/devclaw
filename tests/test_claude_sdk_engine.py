@@ -14,7 +14,7 @@ from devclaw.engine import EngineRequest
 def test_prompt_picks_template_per_kind():
     req = EngineRequest(kind="fix_bug", workspace_dir="/ws", goal="Off-by-one in pager")
     p = _prompt(req)
-    assert "READ existing code first" in p
+    assert "READ existing code" in p
     assert "Off-by-one in pager" in p
     assert "BLOCKED" in p
 

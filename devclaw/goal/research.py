@@ -33,40 +33,19 @@ class GoalResearchError(RuntimeError):
     """Raised when the discovery synthesis produces no usable brief."""
 
 
-_PROMPT = """You are a senior engineer scoping an outcome for a NON-TECHNICAL owner.
-
-The owner's desired OUTCOME:
-{objective}
-{done_when}
-
-A read-only analysis of the CURRENT repository:
----
-{repo_analysis}
----
-
-Write a concise DISCOVERY BRIEF with exactly these three sections (markdown ##):
-
-## Current state
-What the repository actually does today, grounded in the analysis above. Concrete, no fluff.
-
-## Gap to good
-Where it falls short of the owner's outcome — the meaningful gaps, not nitpicks.
-
-## What good looks like
-A short checklist (bullet points) of what a genuinely good version of this covers —
-the best-practice bar for this kind of software, so we can align scope against it.
-
-Keep the whole brief tight and skimmable. Output only the brief."""
-
-
 async def discovery_brief(goal: Goal, repo_analysis: str, *, caller: ClaudeCaller) -> str:
     """Synthesize the discovery brief from the objective + a read-only repo
     analysis. Raises :class:`GoalResearchError` if the model returns nothing
     usable (the caller decides how to degrade — investigation is foundational but
     must not wedge a goal forever)."""
+    from ..prompts import load_prompt
+
     done = f"\nDone when: {goal.done_when}" if goal.done_when else ""
-    prompt = _PROMPT.format(
-        objective=goal.objective, done_when=done, repo_analysis=repo_analysis or "(no analysis captured)"
+    prompt = load_prompt(
+        "research-discovery",
+        objective=goal.objective,
+        done_when=done,
+        repo_analysis=repo_analysis or "(no analysis captured)",
     )
     brief = (await caller(prompt)).strip()
     if not brief:

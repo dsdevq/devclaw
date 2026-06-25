@@ -66,7 +66,13 @@ async def _run_stub(out_dir: Path, ticks: int) -> Tracer:
     PLAN_DONE = json.dumps({"decision": "done", "note": "all backlog shipped"})
     EVAL_ACHIEVED = json.dumps({"verdict": "achieved", "rationale": "all done_when met"})
 
+    # Fresh per invocation — accumulating log.md across runs would shift the
+    # planner-prompt hash even though the cognition is deterministic, hiding
+    # real changes behind harness noise.
+    import shutil
     tmp = out_dir / "stub-goals"
+    if tmp.exists():
+        shutil.rmtree(tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     store = GoalStore(tmp, now=Clock())
     seed_goal(tmp, "g", backlog=["add /health"])

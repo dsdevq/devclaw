@@ -60,42 +60,19 @@ EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
 AGENT_TIMEOUT_S = int(os.environ.get("DEVCLAW_AGENT_TIMEOUT_S", "1800"))
 
 
-_PROMPT_TEMPLATES = {
-    "implement_feature": (
-        "Implement the following in the workspace ({workspace}). Use the project's "
-        "own conventions; add or update tests; do NOT modify unrelated code.\n\n"
-        "Task:\n{goal}\n\n"
-        "When you finish, say 'DONE' on a line by itself. If you cannot complete "
-        "the task, say 'BLOCKED: <one-line reason>' and stop."
-    ),
-    "fix_bug": (
-        "Fix the following bug in the workspace ({workspace}). READ existing code "
-        "first; make the SMALLEST fix that resolves it; do not refactor unrelated "
-        "code; run the project's tests.\n\n"
-        "Bug:\n{goal}\n\n"
-        "Say 'DONE' or 'BLOCKED: <reason>' when finished."
-    ),
-    "review_repository": (
-        "Review the repository at {workspace}. READ-ONLY — do NOT modify any file. "
-        "Produce a structured report with: scope, what's good, what's risky, "
-        "concrete suggestions.\n\n"
-        "Focus:\n{goal}\n\n"
-        "Say 'DONE' when the report is complete."
-    ),
-    "onboard": (
-        "Onboard this repository at {workspace}. READ-ONLY — only file you may "
-        "create or update is AGENTS.md at the repo root. Capture stack, layout, "
-        "build/run/test commands, conventions, gotchas. Do NOT capture project "
-        "direction or decisions.\n\n"
-        "Focus:\n{goal}\n\n"
-        "Say 'DONE' when AGENTS.md is in place."
-    ),
+_PROMPT_SLUGS = {
+    "implement_feature": "sdk-implement-feature",
+    "fix_bug": "sdk-fix-bug",
+    "review_repository": "sdk-review-repository",
+    "onboard": "sdk-onboard",
 }
 
 
 def _prompt(req: EngineRequest) -> str:
-    template = _PROMPT_TEMPLATES.get(req.kind, _PROMPT_TEMPLATES["implement_feature"])
-    return template.format(workspace=CONTAINER_WORKSPACE, goal=req.goal)
+    from .prompts import load_prompt
+
+    slug = _PROMPT_SLUGS.get(req.kind, "sdk-implement-feature")
+    return load_prompt(slug, workspace=CONTAINER_WORKSPACE, goal=req.goal)
 
 
 def _build_docker_args(
