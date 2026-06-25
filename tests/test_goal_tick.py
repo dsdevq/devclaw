@@ -465,29 +465,6 @@ async def test_idle_tick_never_invokes_summarizer(tmp_path, monkeypatch):
     assert planner.calls == 0 and evaluator.calls == 0
 
 
-# ---- plan_review: owner approval before execution --------------------------
-
-
-@pytest.mark.asyncio
-async def test_plan_review_waits_then_approval_starts_executing(tmp_path):
-    """plan_review spends zero tokens until approved; an approval flips it to
-    executing."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="plan_review"))
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-
-    waiting = await _tick(store, "g", planner, evaluator, engine, notifier)
-    assert waiting is Outcome.IDLE
-    assert planner.calls == 0
-
-    store.mark_plan_approved("g")
-    out = await _tick(store, "g", planner, evaluator, engine, notifier)
-    assert out is Outcome.ADVANCED
-    assert store.load_status("g").lifecycle == "executing"
-    assert any("approved" in m.lower() for m in notifier.sent)
-
-
 @pytest.mark.asyncio
 async def test_discovery_goes_straight_to_executing(tmp_path):
     """Scope alignment is owned by the OpenClaw waiter (scope_grill MCP tool) —
@@ -588,7 +565,7 @@ async def test_new_goal_opens_investigation(tmp_path):
     enters 'investigating' — it does NOT plan/act yet (research before acting)."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="new"))
+    store.save_status("g", GoalStatus(lifecycle="investigating"))
     planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
 
     out = await _tick(store, "g", planner, evaluator, engine, notifier)
@@ -785,7 +762,7 @@ async def test_investigation_prep_failure_blocks_without_cognition(tmp_path):
     planner tokens."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(phase="idle", lifecycle="new"))
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="investigating"))
     planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
 
     out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)

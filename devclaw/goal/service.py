@@ -217,7 +217,7 @@ class GoalService:
         # Outcome goals investigate (research → discovery brief) before executing;
         # stamp the starting lifecycle so the first tick opens that front-end.
         if goal_research.INVESTIGATE_ENABLED:
-            self._goal_store.save_status(goal_id, GoalStatus(lifecycle="new"))
+            self._goal_store.save_status(goal_id, GoalStatus(lifecycle="investigating"))
         self._goal_store.append_log(goal_id, "goal created")
         self.poke()  # advance it on the next loop turn without waiting a full interval
         result = self.get_goal(goal_id)
@@ -346,23 +346,6 @@ class GoalService:
             self._goal_store.save_status(goal_id, replace(s, phase="idle", actions_dispatched=0))
         self.poke()
         return {"goal_id": goal_id, "steered": True, "message": message}
-
-    def answer_goal(self, goal_id: str, answer: str) -> dict:
-        """Route an owner's reply (from Telegram) to a goal awaiting input. In
-        ``plan_review`` it approves the plan; the next tick (woken via poke)
-        advances the goal. Scope alignment is owned by the OpenClaw waiter via
-        scope_grill, so no grill routing happens here."""
-        if not self._goal_store.exists(goal_id):
-            raise KeyError(goal_id)
-        s = self._goal_store.load_status(goal_id)
-        lifecycle = s.lifecycle or "executing"
-        if lifecycle == "plan_review":
-            self._goal_store.mark_plan_approved(goal_id)
-            self._goal_store.append_log(goal_id, f"plan approved: {answer[:160]}")
-            self.poke()
-            return {"goal_id": goal_id, "routed_to": "plan_approval", "approved": True}
-        return {"goal_id": goal_id, "routed_to": None,
-                "error": f"goal is not awaiting input (lifecycle={lifecycle})"}
 
     async def evaluate_goal(self, goal_id: str) -> dict:
         """Force a direction evaluation NOW (artifact-grounded) and return the

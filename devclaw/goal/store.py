@@ -247,14 +247,6 @@ class GoalStore:
         path = self._dir(goal_id) / "spec.md"
         return path.read_text() if path.exists() else ""
 
-    def mark_plan_approved(self, goal_id: str) -> None:
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / ".plan_approved").write_text(self._now().isoformat(timespec="seconds"))
-
-    def plan_approved(self, goal_id: str) -> bool:
-        return (self._dir(goal_id) / ".plan_approved").exists()
-
     def recent_deliveries(self, goal_id: str, chars: int = 8000) -> str:
         """The tail of deliveries.md (bounded — the evaluator's grounding context)."""
         path = self._dir(goal_id) / "deliveries.md"

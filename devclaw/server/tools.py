@@ -593,21 +593,6 @@ async def steer_goal(goal_id: str, message: str) -> str:
 
 
 @mcp.tool
-async def answer_goal(goal_id: str, answer: str) -> str:
-    """Deliver an owner's reply to a goal that is waiting on them. When a goal is
-    in 'plan_review', any reply here approves the plan and execution begins. The
-    goal is poked to advance immediately. No-op (with an explanatory result) if
-    the goal isn't currently awaiting input. (Scope alignment is held entirely on
-    the waiter side via scope_grill — by the time a goal exists, scope is fixed.)"""
-    if not goal_id or not answer:
-        raise ToolError("answer_goal requires goal_id and answer")
-    try:
-        return json.dumps(goals.answer_goal(goal_id, answer), indent=2)
-    except KeyError:
-        raise ToolError(f"unknown goal_id: {goal_id}")
-
-
-@mcp.tool
 async def cancel_goal(goal_id: str) -> str:
     """Permanently stop a durable goal. Sets its phase to 'cancelled' (a terminal
     state — DevClaw will skip it on every future heartbeat) and tears down any

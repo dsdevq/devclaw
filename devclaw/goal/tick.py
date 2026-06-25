@@ -71,7 +71,6 @@ class Outcome(str, Enum):
     SKIP_CANCELLED = "skip_cancelled"
     ERROR = "error"
     RATE_LIMITED = "rate_limited"  # paused on a usage/quota limit — 0 tokens, auto-resumes
-    ASKED = "asked"          # emitted a plan for owner approval — awaiting the owner
 
 
 class NotifyLevel(int, Enum):
@@ -161,7 +160,7 @@ async def _block_on_prep_failure(
 
 def _progress_window_active(status: GoalStatus) -> bool:
     """Is this a goal the no-progress watchdog should measure? Only one that is
-    actively executing — not waiting on the owner (blocked / plan_review, which
+    actively executing — not waiting on the owner (the `blocked` phase, which
     already pinged), not done/cancelled (returned earlier). 'verifying' counts
     (the done-gate review is still work in flight)."""
     return (status.lifecycle or "executing") == "executing" and status.phase in (
@@ -240,7 +239,6 @@ class Phase(str, Enum):
     POLLING_DONE_GATE = "polling_done_gate"
     POLLING_ACTION = "polling_action"
     INVESTIGATING = "investigating"
-    PLAN_REVIEW = "plan_review"
     EXECUTING = "executing"
 
 
@@ -265,10 +263,8 @@ def _classify(status: GoalStatus) -> Phase:
     # crash-recovery edge that falls through to executing too (the discovery
     # never resolved; carry on with the bare backlog).
     lifecycle = status.lifecycle or "executing"
-    if lifecycle == "new":
+    if lifecycle == "investigating":
         return Phase.INVESTIGATING
-    if lifecycle == "plan_review":
-        return Phase.PLAN_REVIEW
     return Phase.EXECUTING
 
 
@@ -387,8 +383,6 @@ async def _tick_goal_impl(
             store=store, engine=engine, notifier=notifier,
             notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
         )
-    if phase is Phase.PLAN_REVIEW:
-        return await _handle_plan_review(goal_id, status, ctx)
     if phase is Phase.EXECUTING:
         return await _handle_executing(goal_id, goal, status, finished_detail, ctx)
 
@@ -788,27 +782,6 @@ async def _resolve_polling_action(
     # (duplicate-merge loop, dogfood 2026-06-21).
     ctx.store.save_status(goal_id, new_status)
     return new_status, finished_detail
-
-
-async def _handle_plan_review(
-    goal_id: str, status: GoalStatus, ctx: TickContext,
-) -> Outcome:
-    """Waiting for the owner's approval reply. If approved → advance to
-    EXECUTING; else idle at zero tokens until the answer lands."""
-    if ctx.store.plan_approved(goal_id):
-        ctx.store.save_status(
-            goal_id,
-            replace(status, lifecycle="executing", phase="idle", next="plan approved → executing"),
-        )
-        ctx.store.append_log(goal_id, "plan approved → executing")
-        await _notify(
-            ctx.notifier, NotifyLevel.OWNER,
-            f"✅ [{goal_id}] plan approved — starting work now",
-            summarize=ctx.summary_caller,
-        )
-        return Outcome.ADVANCED
-    ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
-    return Outcome.IDLE
 
 
 async def _handle_executing(

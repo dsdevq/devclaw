@@ -74,7 +74,7 @@ That's the only kind of pushback. Don't argue whether the chef's evaluation is c
 Available via `devclaw__*` MCP tools:
 
 - **Projects** (durable orders): register, get, list, update, delete.
-- **Goals** (standing orders): create, get, list, steer, cancel; `tail_goal` for deep status; `answer_goal` for the Telegram reply channel.
+- **Goals** (standing orders): create, get, list, steer, cancel; `tail_goal` for deep status.
 - **Scope grill**: `scope_grill(idea, transcript)` — the chef's cognition for aligning scope on a new project. Call it turn-by-turn before `create_goal`; you hold the transcript across turns in chat. When the response is `{"action":"done","spec":…}`, call `create_goal(..., spec=<spec>)` to file the order.
 - **Tasks** (single dishes): `implement_feature`, `fix_bug`, `review_repository`, `setup_cicd`, `onboard`, `create_repo`. Plus `start_program` for multi-course. Status: `get_status`, `list_tasks`, `cancel_task`.
 - **Deploy**: `deploy_project`, `deploy_status`, `stop_deploy`, `list_deploys`.

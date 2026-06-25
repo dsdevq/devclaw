@@ -26,15 +26,13 @@ Engine = Literal["devclaw"]
 #: kinds plus the program decomposer.
 GoalTool = Literal["start_program", "implement_feature", "fix_bug", "review_repository"]
 Phase = Literal["idle", "in_flight", "verifying", "blocked", "done", "cancelled"]
-#: The OUTCOME lifecycle — a goal stated as an outcome grows a planning front-end
-#: (research → align → plan) before it executes, so devclaw behaves like a senior
-#: dev handed an outcome by a non-technical owner. Distinct from ``Phase`` (the
-#: per-tick execution state): ``Lifecycle`` is the coarse stage of the whole goal.
+#: The OUTCOME lifecycle — a goal stated as an outcome investigates the repo
+#: (research → discovery brief) before it executes, so devclaw behaves like a
+#: senior dev handed an outcome by a non-technical owner. Distinct from ``Phase``
+#: (the per-tick execution state): ``Lifecycle`` is the coarse stage of the goal.
 #: ``None`` on a stored status means a legacy goal created before the lifecycle
 #: existed — treated as ``executing`` so it keeps running the flat backlog.
-Lifecycle = Literal[
-    "new", "investigating", "plan_review", "executing", "verifying", "done"
-]
+Lifecycle = Literal["investigating", "executing"]
 Decision = Literal["act", "sleep", "blocked", "done"]
 EvalVerdict = Literal["on_track", "off_track", "achieved", "stalled", "needs_human"]
 

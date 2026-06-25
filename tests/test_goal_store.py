@@ -117,11 +117,9 @@ def test_cadence_due(tmp_path):
     assert store.cadence_due(goal, GoalStatus(last_plan_at=just_now)) is True
 
 
-def test_spec_and_plan_approval_roundtrip(tmp_path):
+def test_spec_roundtrip(tmp_path):
     store = GoalStore(tmp_path)
     seed_goal(tmp_path, "g")
-    assert store.read_spec("g") == "" and store.plan_approved("g") is False
+    assert store.read_spec("g") == ""
     store.write_spec("g", "Build X")
     assert "Build X" in store.read_spec("g")
-    store.mark_plan_approved("g")
-    assert store.plan_approved("g") is True
