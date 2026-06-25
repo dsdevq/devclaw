@@ -334,6 +334,10 @@ def _evaluate_expect(expect: dict, tracer: Tracer, goal_dir: Optional[Path], ext
         got = len(extra.get("grill_questions") or [])
         if got != expect["grill_questions_eq"]:
             failures.append(f"grill_questions_eq: expected {expect['grill_questions_eq']}, got {got}")
+    if "grill_questions_max" in expect:
+        got = len(extra.get("grill_questions") or [])
+        if got > expect["grill_questions_max"]:
+            failures.append(f"grill_questions_max: expected ≤{expect['grill_questions_max']}, got {got}")
 
     return failures
 

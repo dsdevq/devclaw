@@ -49,6 +49,16 @@ def _all_scenarios() -> list[str]:
     return sorted(p.stem for p in SCENARIOS_DIR.glob("*.yaml"))
 
 
+def _is_stub_only(scenario_id: str) -> bool:
+    """A scenario flagged ``stub_only: true`` exercises a path that only the
+    fake cognition can reach (e.g. injecting a ``RAISE:`` magic string), so it
+    must be skipped under ``--cognition claude``."""
+    import yaml
+
+    raw = yaml.safe_load((SCENARIOS_DIR / f"{scenario_id}.yaml").read_text()) or {}
+    return bool(raw.get("stub_only"))
+
+
 async def _run_one(scenario_id: str, cognition: str, suite_dir: Path) -> dict:
     # Import inside to avoid the side effects (DEVCLAW_ENGINE env) bleeding
     # across scenarios; sandbox_e2e is designed for single-run-per-process,
@@ -124,7 +134,12 @@ async def _main() -> int:
     print()
 
     summaries: list[dict] = []
+    skipped: list[str] = []
     for sid in scenarios:
+        if args.cognition == "claude" and _is_stub_only(sid):
+            print(f"  → {sid} ... SKIP (stub_only)", flush=True)
+            skipped.append(sid)
+            continue
         print(f"  → {sid} ...", flush=True)
         summary = await _run_one(sid, args.cognition, suite_dir)
         summaries.append(summary)
@@ -135,12 +150,16 @@ async def _main() -> int:
         "started_at": suite_dir.name,
         "cognition": args.cognition,
         "scenarios": summaries,
+        "skipped_stub_only": skipped,
         "passed": all(s["passed"] for s in summaries),
         "n_passed": sum(1 for s in summaries if s["passed"]),
         "n_failed": sum(1 for s in summaries if not s["passed"]),
     }, indent=2))
 
-    return _print_report(summaries, suite_dir)
+    exit_code = _print_report(summaries, suite_dir)
+    if skipped:
+        print(f"  (skipped under --cognition claude: {', '.join(skipped)})")
+    return exit_code
 
 
 if __name__ == "__main__":

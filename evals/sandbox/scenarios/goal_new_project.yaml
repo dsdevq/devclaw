@@ -31,7 +31,12 @@ setup:
     cadence: 1d
     open_pr: false
 
-ticks: 4
+# Real cognition adds ~1-2 extra ticks vs the stub: an extra evaluator pass
+# during done-gate verification after the first scaffold dispatch. The stub
+# greenlights `done` immediately; real Sonnet correctly checks the deliveries
+# substrate first and re-plans. 6 ticks gives enough budget to reach the first
+# delivery under either cognition.
+ticks: 6
 
 expect:
   final_lifecycle: executing

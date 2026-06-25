@@ -95,6 +95,25 @@ DEVCLAW_REVIEW_MODEL=sonnet .venv/bin/python evals/validate_review_gate.py
 
 Each driver wires the engine exactly like the server does (`StateStore` + `TaskQueue(runner=run_sandcastle)`), so what it measures is what production behaves like. No mocks past the test boundary.
 
+## Production-readiness gate ladder
+
+"Production" for devclaw = the chef MCP server running in the `devclaw-mcp` container that the OpenClaw waiter connects to. Shipping = merging to `main` and bumping that container. Before shipping a non-trivial change, walk the ladder. Each gate states what it proves, its cost, and when to run it.
+
+| # | Gate | What it proves | Cost | Run when |
+|---|---|---|---|---|
+| L1 | `pytest -q` (390 unit) | The static contract: types, pure functions, prompt loading, store invariants. | seconds, free | every change |
+| L2 | `run_all.py` (stub e2e, 11 scenarios) | Orchestration regression: every runtime path (single-task, full lifecycle, grill, blocked planner, steered goal, failing verify, watchdog, quota pause, off-track done-gate). Stub cognition + stub engine. | ~30s, free | every change touching runtime path |
+| L3 | `run_all.py --cognition claude` | Real cognition makes sensible decisions on the same 11 scenarios. Catches prompt drift and decision-quality regressions. | ~2-3 min, OAuth quota | before merging anything that touches a prompt or cognition seam |
+| L4 | `measure_passrate.py` (5 lifekit-dashboard tasks) | The full pipeline (run_sandcastle → docker → OpenHands → claude → open_pr) actually ships verified PRs. The end-to-end smoke. | ~30-60 min, OAuth quota, 5 real PRs | pre-release, after any engine/delivery change |
+| L5 | `measure_quality_todo.py` (harder todo-fullstack tasks) | Deliverable quality holds on ambiguous/multi-file/pure-UI tasks where the gate alone can't tell good from bad. | ~60 min, OAuth quota, real PRs reviewed adversarially | periodic (monthly), after any quality-bar/preamble change |
+| L6 | `validate_review_gate.py` (3 real green + 2 synthetic bad diffs) | The pre-PR review gate discriminates: low false-positive on real green diffs, catches dead/no-test diffs. | ~5 min, OAuth quota | whenever review_diff/review prompt changes |
+| L7 | `e2e_trace.py --mode live` against one real goal | The live tick path (real cognition, real engine, real goal store) emits the trace shape the harness expects — no blind refactor regressions in the on-disk goal artifacts. | ~5 min + real engine dispatch, OAuth quota | pre-release smoke |
+| L8 | Field ops: monitor the deployed waiter+chef | Real users (one — you), real goals, real PRs. The only honest validation that nothing in this list missed something. | ongoing | always, with post-mortem on every surprise |
+
+L1+L2 are CI-friendly (free, deterministic). L3+ burn OAuth quota and L4/L5 dispatch real PRs to public repos — treat them as periodic measurement, not CI. When a gate fails, fix the root cause; don't bypass.
+
+A change isn't production-ready until L1-L4 are green on the branch and L7 (one real goal traced) shows no shape regression. L5/L6 are higher-frequency periodic gates; L8 is continuous.
+
 ## What's missing on purpose
 
 There's no harness for the build-from-scratch interview flow — the spec-kit elicitation (`build_project` / `answer_question` / `approve_spec`) and its `evals/run.py` golden-project harness were removed as drift (vault explicitly rejected the multi-pass spec-kit flow). Scope alignment now lives on the OpenClaw waiter via the `scope_grill` MCP tool; build-from-scratch is expressed as a normal goal with `done_when` (and an optional pre-grilled `spec`). Measure it through the durable goal layer instead.

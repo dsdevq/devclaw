@@ -6,27 +6,38 @@ description: >
   zero-token guardrail) until steering arrives — but this scenario only checks
   the FIRST tick that flips it to blocked.
 
+  The goal is intentionally a product/credential decision the planner cannot
+  reasonably default — picking a payment provider materially changes the spec
+  (Stripe vs Adyen vs Paddle imply different SDKs, fee structures, KYC flows,
+  account setup) AND requires an external account/keys the planner can't
+  provision. Stub cognition obviously returns the canned `blocked` response;
+  real cognition under the prompt's "block only when you genuinely need a
+  human decision (… external credential, product call)" should also block.
+
 mode: goal
 
 cognition:
   stub_responses:
     evaluator: |
       ## Current state
-      Repo has minimal scaffolding.
+      Repo has minimal scaffolding and no payments code.
       ## Gap to good
-      The done_when is ambiguous; can't move yet.
+      Provider choice is upstream of everything (SDK, fees, KYC, account).
       ## What good looks like
-      - Clear requirements
+      - A chosen payment provider with an account + keys in place
+      - End-to-end checkout against that provider
     goal_planner: |
-      {"decision": "blocked", "note": "ambiguous DB choice",
-       "question": "Which database should we use — Postgres or SQLite?"}
+      {"decision": "blocked", "note": "need provider choice + account",
+       "question": "Which payment provider should we integrate — Stripe, Adyen, or Paddle? Each needs a different account and API keys."}
 
 setup:
   goal:
-    objective: Add persistence to the example service.
-    done_when: Data is persisted.
+    objective: Add a third-party payment integration so customers can complete a paid checkout end-to-end.
+    done_when: A real customer can complete checkout through the chosen provider.
     backlog:
-      - Add persistence.
+      - Choose a payment provider that fits compliance + pricing.
+      - Set up the provider account and obtain API keys.
+      - Integrate the SDK and ship a paid checkout flow.
     cadence: 1d
     open_pr: false
 
@@ -35,7 +46,7 @@ ticks: 3
 expect:
   final_phase: blocked
   final_lifecycle: executing
-  blocked_on_contains: "Which database"
+  blocked_on_contains: "provider"
   outcomes_contain: [blocked]
   cognition_by_role_min:
     goal_planner: 1
@@ -43,4 +54,4 @@ expect:
     deliveries: 0
   notify_owner_contains:
     - "needs you"
-    - "Which database"
+    - "provider"

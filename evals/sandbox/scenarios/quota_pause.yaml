@@ -6,6 +6,13 @@ description: >
   it as QUOTA, set the global engine pause, and the tick must return
   RATE_LIMITED — zero subsequent cognition until the pause expires.
 
+# Uses the stub-only ``RAISE:`` magic string to inject a PlannerError; there's
+# no seam to make real cognition return a quota error end-to-end. Skipped under
+# ``--cognition claude``; the quota-classification + pause-and-resume logic is
+# also covered by unit tests (tests/test_limits.py, test_rate_limit_pause.py,
+# test_goal_rate_limit.py).
+stub_only: true
+
 mode: goal
 
 cognition:
