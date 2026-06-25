@@ -40,3 +40,4 @@ auth-profiles.json
 
 # Eval run artifacts (results, not source)
 evals/runs/
+.claude/
