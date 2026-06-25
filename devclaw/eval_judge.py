@@ -6,8 +6,8 @@ and bucket it into a controlled vocabulary of failure modes. Categorizing (not
 just free-text) is what lets you aggregate across N runs — "5/10 failed on
 `acceptance_gap`, 2 on `engine_failure`" tells you where to spend effort.
 
-Cognition is `claude` (same as the planner/grill); the prompt-building, response
-validation, and aggregation are pure, so this is unit-testable with a stub.
+Cognition is `claude` (same as the planner / scope grill); the prompt-building,
+response validation, and aggregation are pure, so this is unit-testable with a stub.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def build_judge_prompt(
     return "\n\n".join(
         [
             _JUDGE_RULES,
-            f"SPEC:\n{spec or '(no spec — grill/elicitation did not finalize)'}",
+            f"SPEC:\n{spec or '(no spec provided)'}",
             f"PROGRAM STATUS: {program.get('status', 'unknown')}",
             f"TASK DAG:\n{_tasks_digest(tasks)}",
             f"EVENT DIGEST:\n{events_digest(events)}",

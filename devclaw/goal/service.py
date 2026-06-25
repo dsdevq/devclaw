@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Optional
 
 from . import evaluator as goal_evaluator
-from . import grill as goal_grill
 from . import merge as goal_merge
 from . import planner as goal_planner
 from . import research as goal_research
@@ -93,7 +92,6 @@ class GoalService:
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
         self._summary_caller = summary_caller
-        self._grill_caller: Optional[ClaudeCaller] = None
         self._notifier: Notifier = notifier or (
             HttpNotifier(self._cfg.notify_url) if self._cfg.notify_url else NullNotifier()
         )
@@ -128,15 +126,6 @@ class GoalService:
         if not goal_merge.AUTOMERGE_ENABLED:
             return None
         return goal_merge.default_merger()
-
-    def _grill(self) -> "Optional[ClaudeCaller]":
-        """The grill cognition for the grilling phase. None unless
-        DEVCLAW_GOAL_GRILL=1 (the Telegram answer channel must be wired first)."""
-        if not goal_grill.GRILL_ENABLED:
-            return None
-        if self._grill_caller is None:
-            self._grill_caller = goal_grill.default_caller()
-        return self._grill_caller
 
     # ---- the heartbeat -----------------------------------------------------
 
@@ -193,7 +182,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(), grill_caller=self._grill(),
+            summary_caller=self._summary(), merger=self._merger(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
@@ -203,7 +192,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(), grill_caller=self._grill(),
+            summary_caller=self._summary(), merger=self._merger(),
         )
         return outcome.value
 
@@ -214,12 +203,17 @@ class GoalService:
         cadence: str = "1d", repo_url: Optional[str] = None,
         verify_cmd: Optional[str] = None, open_pr: bool = True,
         done_when: str = "", backlog: Optional[list[str]] = None,
+        spec: str = "",
     ) -> dict:
         goal = self._goal_store.create_goal(
             goal_id, objective=objective, workspace_dir=workspace_dir, cadence=cadence,
             repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
             done_when=done_when, backlog=backlog,
         )
+        # The waiter may have grilled scope before filing the order — persist the
+        # spec it landed on so the evaluator judges done against the shared contract.
+        if spec and spec.strip():
+            self._goal_store.write_spec(goal_id, spec)
         # Outcome goals investigate (research → discovery brief) before executing;
         # stamp the starting lifecycle so the first tick opens that front-end.
         if goal_research.INVESTIGATE_ENABLED:
@@ -273,10 +267,10 @@ class GoalService:
     ) -> dict:
         """The 'watch it run' surface — richer than get_goal, no SSH needed. On top
         of get_goal's phase/direction/log it returns the grounded deliveries tail
-        (what each action actually shipped), the investigating/grilling artifacts
-        (discovery brief + agreed spec), and the tail of the LIVE event stream from
-        whatever task/program is in flight (so you can see the agent acting in near
-        real time). Everything is bounded — read-only, never mutates the goal."""
+        (what each action actually shipped), the discovery brief + any waiter-
+        provided spec, and the tail of the LIVE event stream from whatever
+        task/program is in flight (so you can see the agent acting in near real
+        time). Everything is bounded — read-only, never mutates the goal."""
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
         g = self._goal_store.load_goal(goal_id)
@@ -354,18 +348,14 @@ class GoalService:
         return {"goal_id": goal_id, "steered": True, "message": message}
 
     def answer_goal(self, goal_id: str, answer: str) -> dict:
-        """Route an owner's reply (from Telegram) back to a goal awaiting input.
-        In ``grilling`` it answers the open grill question; in ``plan_review`` it
-        approves the plan. The next tick (woken via poke) advances the goal."""
+        """Route an owner's reply (from Telegram) to a goal awaiting input. In
+        ``plan_review`` it approves the plan; the next tick (woken via poke)
+        advances the goal. Scope alignment is owned by the OpenClaw waiter via
+        scope_grill, so no grill routing happens here."""
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
         s = self._goal_store.load_status(goal_id)
         lifecycle = s.lifecycle or "executing"
-        if lifecycle == "grilling":
-            recorded = self._goal_store.answer_pending(goal_id, answer)
-            self._goal_store.append_log(goal_id, f"grill answer: {answer[:160]}")
-            self.poke()
-            return {"goal_id": goal_id, "routed_to": "grill", "recorded": recorded}
         if lifecycle == "plan_review":
             self._goal_store.mark_plan_approved(goal_id)
             self._goal_store.append_log(goal_id, f"plan approved: {answer[:160]}")

@@ -75,8 +75,21 @@ Available via `devclaw__*` MCP tools:
 
 - **Projects** (durable orders): register, get, list, update, delete.
 - **Goals** (standing orders): create, get, list, steer, cancel; `tail_goal` for deep status; `answer_goal` for the Telegram reply channel.
+- **Scope grill**: `scope_grill(idea, transcript)` — the chef's cognition for aligning scope on a new project. Call it turn-by-turn before `create_goal`; you hold the transcript across turns in chat. When the response is `{"action":"done","spec":…}`, call `create_goal(..., spec=<spec>)` to file the order.
 - **Tasks** (single dishes): `implement_feature`, `fix_bug`, `review_repository`, `setup_cicd`, `onboard`, `create_repo`. Plus `start_program` for multi-course. Status: `get_status`, `list_tasks`, `cancel_task`.
 - **Deploy**: `deploy_project`, `deploy_status`, `stop_deploy`, `list_deploys`.
+
+## Scope grilling — when to use it
+
+When Denys asks for something new and the scope is ambiguous, **run a scope grill** before filing the goal:
+
+1. Call `devclaw__scope_grill({"idea": "<his ask, paraphrased>", "transcript": []})`.
+2. Relay the returned question + recommended answer in chat. Wait for his reply.
+3. Append `{"question": …, "recommended": …, "answer": "<his reply>"}` to the transcript and call `scope_grill` again.
+4. Loop until the response is `{"action": "done", "spec": "<markdown>"}`.
+5. File the order: `devclaw__create_goal(..., spec=<the spec>)`. Confirm in one sentence.
+
+If Denys is impatient or the ask is already concrete (one-line bugfix, "redeploy X", "show me Y"), skip the grill and call the right tool directly. The grill is for *new scopes*, not every interaction.
 
 ## End-of-interaction default
 

@@ -23,4 +23,4 @@ Output lands in `evals/runs/<harness>-<timestamp>.json` next to a one-line stder
 
 ## What's missing on purpose
 
-There's no harness for the build-from-scratch interview flow — the spec-kit elicitation (`build_project` / `answer_question` / `approve_spec`) and its `evals/run.py` golden-project harness were removed as drift (vault explicitly rejected the multi-pass spec-kit flow). Build-from-scratch is now expressed as a normal goal with `done_when`; measure it through the durable goal layer instead.
+There's no harness for the build-from-scratch interview flow — the spec-kit elicitation (`build_project` / `answer_question` / `approve_spec`) and its `evals/run.py` golden-project harness were removed as drift (vault explicitly rejected the multi-pass spec-kit flow). Scope alignment now lives on the OpenClaw waiter via the `scope_grill` MCP tool; build-from-scratch is expressed as a normal goal with `done_when` (and an optional pre-grilled `spec`). Measure it through the durable goal layer instead.

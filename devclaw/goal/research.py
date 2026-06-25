@@ -7,8 +7,8 @@ read-only analysis of the current repo, it synthesizes a **discovery brief**:
 
   - **Current state** — what the repo does now (grounded in the repo analysis).
   - **Gap to good** — where it falls short of the outcome.
-  - **Best-practice checklist** — what a good <thing> covers, so the later grill
-    and plan have a concrete bar to align against.
+  - **Best-practice checklist** — what a good <thing> covers, so the planner and
+    evaluator have a concrete bar to align against.
 
 Cognition only; the read-only repo analysis it consumes is dispatched by the
 engine (review_repository) and polled by the tick — this module just turns that

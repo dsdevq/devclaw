@@ -14,7 +14,6 @@ A clock is injected (``now``) so ticks are deterministic under test.
 
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,8 +217,8 @@ class GoalStore:
 
     def write_discovery(self, goal_id: str, brief: str) -> None:
         """Persist the ``investigating`` phase's discovery brief (current state ·
-        gap-to-good · best-practice checklist) as a durable artifact the grill and
-        the planner draw on. Overwritten if investigation re-runs."""
+        gap-to-good · best-practice checklist) as a durable artifact the planner
+        and evaluator draw on. Overwritten if investigation re-runs."""
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         ts = self._now().isoformat(timespec="seconds")
@@ -232,38 +231,13 @@ class GoalStore:
         path = self._dir(goal_id) / "discovery.md"
         return path.read_text() if path.exists() else ""
 
-    # ---- grilling phase: durable Q&A transcript + the resulting spec --------
-
-    def read_grill(self, goal_id: str) -> list[dict]:
-        """The grill transcript — a list of turns {question, recommended, answer?}.
-        The last turn may lack 'answer' (a question awaiting the owner's reply)."""
-        path = self._dir(goal_id) / "grill.json"
-        if not path.exists():
-            return []
-        try:
-            data = json.loads(path.read_text())
-            return data if isinstance(data, list) else []
-        except json.JSONDecodeError:
-            return []
-
-    def write_grill(self, goal_id: str, transcript: list[dict]) -> None:
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "grill.json").write_text(json.dumps(transcript, indent=2))
-
-    def answer_pending(self, goal_id: str, answer: str) -> bool:
-        """Record the owner's reply to the last (pending) grill question. Returns
-        True if there was a pending question to answer, False otherwise."""
-        transcript = self.read_grill(goal_id)
-        if not transcript or "answer" in transcript[-1]:
-            return False
-        transcript[-1]["answer"] = answer
-        self.write_grill(goal_id, transcript)
-        return True
+    # ---- scope spec (handed in by the waiter via create_goal) ---------------
 
     def write_spec(self, goal_id: str, spec: str) -> None:
-        """Persist the agreed spec (the grill's output) — what to build, what's
-        out, constraints — the durable contract the planner decomposes."""
+        """Persist the agreed scope spec — what to build, what's out, constraints.
+        Produced by the OpenClaw waiter's scope_grill conversation BEFORE the goal
+        is created, passed in through create_goal, and read by the evaluator so
+        done is judged against the shared contract."""
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         ts = self._now().isoformat(timespec="seconds")

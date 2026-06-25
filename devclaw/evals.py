@@ -106,12 +106,3 @@ def aggregate(cards: list[Scorecard]) -> dict:
         "avg_wall_ms": int(_mean([float(c.wall_ms) for c in cards])),
         "stuck_runs": sum(1 for c in cards if c.stuck),
     }
-
-
-def next_answer(scripted: list[str], turn_idx: int) -> str:
-    """The grill answer for turn ``turn_idx`` (0-based). Uses the scripted answer
-    if present, else defers to DevClaw's own recommendation — so a fixed script
-    can be short and the spec still converges."""
-    if 0 <= turn_idx < len(scripted):
-        return scripted[turn_idx]
-    return "Use your recommended answer."

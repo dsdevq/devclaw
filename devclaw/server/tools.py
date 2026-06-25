@@ -19,6 +19,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from .. import deploy as _deploy
+from .. import elicitation as _elicitation
 from .. import repo as _repo
 from ..project_registry import ProjectExists, project_rollup
 from ._state import _goal_get, goals, mcp, queue, registry, store
@@ -438,6 +439,46 @@ async def cancel_program(program_id: str) -> str:
     )
 
 
+# ===== scope grill (waiter-side conversation, chef-side craft) ===============
+# The OpenClaw devclaw waiter holds the Telegram conversation; this tool gives it
+# the chef's craft — *which* questions matter for a software scope and what 'good'
+# looks like. The waiter calls scope_grill each turn with the running transcript;
+# the chef returns the next question (with a recommended answer) or, when enough
+# is shared, the finalized spec. Stateless: the waiter owns the transcript and,
+# once 'done' lands, calls create_goal(spec=...) to file the order.
+
+
+@mcp.tool
+async def scope_grill(
+    idea: str,
+    transcript: Optional[list[dict]] = None,
+) -> str:
+    """Take one turn of a scope-alignment grill with the OpenClaw waiter. Given a
+    rough project ``idea`` and the ``transcript`` so far (a list of turns each
+    with question/recommended/answer), return either the next question to ask
+    the customer or the finalized spec when enough is shared.
+
+    The waiter is expected to keep the transcript across turns (it lives in the
+    Telegram chat), pass it back unchanged on each call, and append the user's
+    reply to the last turn before the next call. This is a stateless cognition
+    call — the chef stores nothing here. When the response is ``{"action":
+    "done", "spec": ...}``, the waiter calls ``create_goal(..., spec=<spec>)``
+    to file the order.
+
+    Response shape:
+      {"action": "ask", "question": "<next q>", "recommended": "<your default>"}
+      {"action": "done", "spec": "<full spec.md markdown>"}
+    """
+    if not idea or not idea.strip():
+        raise ToolError("scope_grill requires a non-empty idea")
+    transcript = transcript or []
+    try:
+        step = await _elicitation.next_step(idea, transcript)
+    except Exception as err:  # noqa: BLE001 — surface as a tool error, not a crash
+        raise ToolError(f"scope_grill failed: {err}")
+    return json.dumps(step, indent=2)
+
+
 # ===== goal layer (durable, steerable, evaluated goals) ======================
 # The folded-in goalclaw. A `program` is a bounded, one-shot DAG; a `goal` is an
 # open-ended standing intent that DevClaw drives across many heartbeats —
@@ -457,6 +498,7 @@ async def create_goal(
     repo_url: Optional[str] = None,
     verify_cmd: Optional[str] = None,
     open_pr: bool = True,
+    spec: str = "",
 ) -> str:
     """Register a DURABLE goal that DevClaw drives over time. Unlike start_program
     (a one-shot DAG that runs to completion), a goal persists: on each heartbeat
@@ -468,7 +510,10 @@ async def create_goal(
     goal_id: a short stable slug (the on-disk folder name). objective: the durable
     aim. done_when: the prose completion test the evaluator judges against. backlog:
     a starting work-list. workspace_dir: the repo checkout DevClaw keeps fresh per
-    action; repo_url clones it if absent. verify_cmd: the gate (e.g. 'dotnet test')."""
+    action; repo_url clones it if absent. verify_cmd: the gate (e.g. 'dotnet test').
+    spec: optional pre-aligned scope contract — when the OpenClaw waiter has
+    grilled the customer (via scope_grill) before filing the order, pass the
+    finalized spec.md here and the evaluator judges done against it."""
     if not goal_id or not objective or not workspace_dir:
         raise ToolError("create_goal requires goal_id, objective, workspace_dir")
     try:
@@ -477,6 +522,7 @@ async def create_goal(
                 goal_id, objective=objective, workspace_dir=workspace_dir,
                 done_when=done_when, backlog=backlog, cadence=cadence,
                 repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
+                spec=spec,
             ),
             indent=2,
         )
@@ -504,11 +550,11 @@ async def tail_goal(
 ) -> str:
     """Watch a goal run — the deep, read-only observability surface. Beyond
     get_goal's phase/direction it returns the grounded deliveries tail (what each
-    action actually shipped: agent summary + gate verdict + PR), the
-    investigating/grilling artifacts (discovery brief + agreed spec), and the tail
-    of the LIVE event stream from whatever task is in flight — so you can see the
-    engineer acting in near real time without SSHing to the box. Everything is
-    bounded; call repeatedly to follow progress."""
+    action actually shipped: agent summary + gate verdict + PR), the discovery
+    brief + any pre-aligned spec, and the tail of the LIVE event stream from
+    whatever task is in flight — so you can see the engineer acting in near real
+    time without SSHing to the box. Everything is bounded; call repeatedly to
+    follow progress."""
     if not goal_id:
         raise ToolError("tail_goal requires goal_id")
     try:
@@ -548,13 +594,11 @@ async def steer_goal(goal_id: str, message: str) -> str:
 
 @mcp.tool
 async def answer_goal(goal_id: str, answer: str) -> str:
-    """Deliver an owner's reply to a goal that is waiting on them. This is the
-    Telegram answer channel: when a goal is in its 'grilling' phase it asks scope
-    questions one at a time; route the owner's reply here to answer the open
-    question (the goal then asks the next one or finalizes the spec). When a goal
-    is in 'plan_review', any reply here approves the plan and execution begins.
-    The goal is poked to advance immediately. No-op (with an explanatory result)
-    if the goal isn't currently awaiting input."""
+    """Deliver an owner's reply to a goal that is waiting on them. When a goal is
+    in 'plan_review', any reply here approves the plan and execution begins. The
+    goal is poked to advance immediately. No-op (with an explanatory result) if
+    the goal isn't currently awaiting input. (Scope alignment is held entirely on
+    the waiter side via scope_grill — by the time a goal exists, scope is fixed.)"""
     if not goal_id or not answer:
         raise ToolError("answer_goal requires goal_id and answer")
     try:

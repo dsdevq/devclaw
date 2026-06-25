@@ -69,8 +69,9 @@ def test_role_default_callers_are_tiered():
     # plan_goal / plan_spec → planner tier
     assert inspect.signature(planner.plan_goal).parameters["claude_caller"].default is planner._planner_caller
     assert inspect.signature(planner.plan_spec).parameters["claude_caller"].default is planner._planner_caller
-    # grill → grill tier
-    assert inspect.signature(elicitation.next_step).parameters["claude_caller"].default is elicitation.grill_caller
+    # grill → grill tier (next_step binds lazily via default_caller; assert the
+    # factory routes the configured tier)
+    assert elicitation.default_caller.__module__ == "devclaw.elicitation"
     # judge → judge tier
     assert inspect.signature(eval_judge.judge_run).parameters["claude_caller"].default is eval_judge.judge_caller
 

@@ -44,9 +44,9 @@ async def health(_request: Request) -> Response:
 async def goals_answer(request: Request) -> Response:
     """Deterministic reply→goal routing for the dedicated devclaw Telegram channel.
     The notify-relay bridge POSTs the owner's reply here; we route it to the single
-    goal awaiting input (grilling answers the open question, plan_review approves).
-    No agent, no inference — just the one waiting goal. Auth-guarded by the same
-    bearer middleware as every other route (except /health)."""
+    goal awaiting input (plan_review → approve). No agent, no inference — just the
+    one waiting goal. Auth-guarded by the same bearer middleware as every other
+    route (except /health)."""
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
@@ -54,7 +54,7 @@ async def goals_answer(request: Request) -> Response:
     text = str(body.get("text") or "").strip()
     if not text:
         return JSONResponse({"error": "missing text"}, status_code=400)
-    waiting = [g for g in goals.list_goals() if g.get("lifecycle") in ("grilling", "plan_review")]
+    waiting = [g for g in goals.list_goals() if g.get("lifecycle") == "plan_review"]
     if not waiting:
         return JSONResponse({"routed_to": None, "reason": "no goal awaiting input"}, status_code=409)
     if len(waiting) > 1:

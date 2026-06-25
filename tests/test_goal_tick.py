@@ -31,13 +31,13 @@ def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
 
-async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None, grill_caller=None):
+async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None):
     return await tick_goal(
         goal_id, store=store, engine=engine,
         planner_caller=planner, evaluator_caller=evaluator, notifier=notifier,
         notify_url="http://relay", prepare_ws=fake_prepare,
         eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller,
-        merger=merger, grill_caller=grill_caller,
+        merger=merger,
     )
 
 
@@ -465,66 +465,7 @@ async def test_idle_tick_never_invokes_summarizer(tmp_path, monkeypatch):
     assert planner.calls == 0 and evaluator.calls == 0
 
 
-# ---- grilling: async, durable, quota-safe scope alignment ------------------
-
-ASK_DB = json.dumps({"action": "ask", "question": "Which database?", "recommended": "Postgres"})
-GRILL_DONE = json.dumps({"action": "done", "spec": "Build a usable dashboard with auth and a home page."})
-
-
-@pytest.mark.asyncio
-async def test_grill_asks_first_question(tmp_path):
-    """Entering grilling, the goal asks the first scope question (with a suggested
-    answer) and waits — recording it as a pending transcript turn."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="grilling"))
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-    grill = FakeClaude(ASK_DB)
-
-    out = await _tick(store, "g", planner, evaluator, engine, notifier, grill_caller=grill)
-
-    assert out is Outcome.ASKED
-    assert planner.calls == 0
-    t = store.read_grill("g")
-    assert len(t) == 1 and t[0]["question"] == "Which database?" and "answer" not in t[0]
-    assert any("Which database?" in m and "Postgres" in m for m in notifier.sent)
-
-
-@pytest.mark.asyncio
-async def test_grill_waits_zero_tokens_for_reply(tmp_path):
-    """A question is out and unanswered → the tick spends zero tokens (no grill
-    cognition) until the owner replies."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="grilling"))
-    store.write_grill("g", [{"question": "Which database?", "recommended": "Postgres"}])  # pending
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-    grill = FakeClaude(ASK_DB)
-
-    out = await _tick(store, "g", planner, evaluator, engine, notifier, grill_caller=grill)
-
-    assert out is Outcome.IDLE
-    assert grill.calls == 0 and planner.calls == 0          # the guardrail extends to the grill
-    assert notifier.sent == []
-
-
-@pytest.mark.asyncio
-async def test_grill_answer_finalizes_spec_into_plan_review(tmp_path):
-    """Once the open question is answered, the next tick runs the grill again —
-    here it finalizes: writes the spec and enters plan_review for approval."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="grilling"))
-    store.write_grill("g", [{"question": "Which database?", "recommended": "Postgres", "answer": "Postgres"}])
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-    grill = FakeClaude(GRILL_DONE)
-
-    out = await _tick(store, "g", planner, evaluator, engine, notifier, grill_caller=grill)
-
-    assert out is Outcome.ASKED                              # now awaiting plan approval
-    assert store.load_status("g").lifecycle == "plan_review"
-    assert "usable dashboard" in store.read_spec("g")
-    assert any("plan" in m.lower() for m in notifier.sent)
+# ---- plan_review: owner approval before execution --------------------------
 
 
 @pytest.mark.asyncio
@@ -548,10 +489,10 @@ async def test_plan_review_waits_then_approval_starts_executing(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_discovery_enters_grilling_when_grill_enabled(tmp_path, monkeypatch):
-    """With the grill on, a finished investigation flows into grilling (asking the
-    first question) instead of straight to executing."""
-    monkeypatch.setattr("devclaw.goal.tick._grill.GRILL_ENABLED", True)
+async def test_discovery_goes_straight_to_executing(tmp_path):
+    """Scope alignment is owned by the OpenClaw waiter (scope_grill MCP tool) —
+    when investigation finishes, the chef writes the discovery brief and steps
+    directly into executing, with no in-chef grill phase in between."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", GoalStatus(
@@ -561,14 +502,13 @@ async def test_discovery_enters_grilling_when_grill_enabled(tmp_path, monkeypatc
     planner = FakeClaude(ACT)
     researcher = FakeClaude("## Current state\nbare API")   # evaluator-tier = discovery synthesis
     engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="repo analysis"))
-    notifier, grill = RecordingNotifier(), FakeClaude(ASK_DB)
+    notifier = RecordingNotifier()
 
-    out = await _tick(store, "g", planner, researcher, engine, notifier, grill_caller=grill)
+    out = await _tick(store, "g", planner, researcher, engine, notifier)
 
-    assert out is Outcome.ASKED
-    assert store.load_status("g").lifecycle == "grilling"
+    assert out is Outcome.ADVANCED
+    assert store.load_status("g").lifecycle == "executing"
     assert store.read_discovery("g")                        # brief still written
-    assert any("Which database?" in m for m in notifier.sent)
 
 
 # ---- auto-merge on gate-green (hands-off; gated + best-effort) --------------

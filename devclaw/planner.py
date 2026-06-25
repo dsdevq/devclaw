@@ -28,8 +28,8 @@ MAX_TASKS_PER_PLAN = 20
 # (Opus) burns the Pro/Max quota fast and is slow; tier each role to the lightest
 # model that does its job. These are `claude --model` values (an alias like
 # 'sonnet'/'opus', or a full id). Planning is rare + high-leverage → Opus; the
-# grill is conversational → Sonnet (set in elicitation.py); the eval judge is
-# bounded classification → Haiku (set in eval_judge.py). The heavy coding path
+# scope grill is conversational → Sonnet (set in elicitation.py); the eval judge
+# is bounded classification → Haiku (set in eval_judge.py). The heavy coding path
 # (OpenHands) is tiered separately via DEVCLAW_EXEC_MODEL. An empty value →
 # the CLI's account default (no --model flag passed).
 PLANNER_MODEL = os.environ.get("DEVCLAW_PLANNER_MODEL", "opus") or None
@@ -209,9 +209,9 @@ def _build_claude_argv(prompt: str, model: str | None) -> list[str]:
 
 async def call_claude(prompt: str, model: str | None = None) -> str:
     """Spawn ``claude --print`` with the prompt and return its stdout. ``model``
-    picks the tier (alias or full id); None → account default. Injected into the
-    planners/grill/judge so tests can stub the subprocess; each role binds its
-    own model via :func:`claude_with_model`."""
+    picks the tier (alias or full id); None → account default. Injected into
+    cognition roles (planner / grill / judge / evaluator) so tests can stub the
+    subprocess; each role binds its own model via :func:`claude_with_model`."""
     env = dict(os.environ)
     # Belt + suspenders: never let an API key override the OAuth session.
     env.pop("ANTHROPIC_API_KEY", None)
@@ -253,7 +253,7 @@ async def call_claude(prompt: str, model: str | None = None) -> str:
 def claude_with_model(model: str | None) -> Callable[[str], Awaitable[str]]:
     """A one-argument ``claude`` caller bound to a model — the default cognition
     caller for a role, so each role shells out at its own tier while keeping the
-    1-arg ``claude_caller`` seam the planners/grill/judge inject for tests."""
+    1-arg ``claude_caller`` seam each cognition site injects for tests."""
 
     async def _caller(prompt: str) -> str:
         return await call_claude(prompt, model=model)
@@ -287,9 +287,9 @@ async def plan_goal(
 
 # ===== plan-from-spec ========================================================
 # The build-a-project-from-scratch path: decompose an *approved spec* (the
-# shared understanding produced by the elicitation grill) into a milestone-
-# ordered DAG. Richer than plan_goal — the model is grounded in the spec's
-# milestones, acceptance criteria, scope, and constraints.
+# shared scope contract handed in by the OpenClaw waiter after scope_grill) into
+# a milestone-ordered DAG. Richer than plan_goal — the model is grounded in the
+# spec's milestones, acceptance criteria, scope, and constraints.
 
 SPEC_SYSTEM_PROMPT = """You are DevClaw's planner. You are given an APPROVED
 project spec — a shared understanding of what to build and how. Decompose it

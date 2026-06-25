@@ -81,7 +81,6 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 | `DEVCLAW_GOAL_NO_PROGRESS_S` | `21600` | Wall-clock seconds an executing goal may go without a delivery before the watchdog pings the owner once. Zero-token check; complements the per-task timeout. `0` disables. |
 | `DEVCLAW_GOAL_NOTIFY_URL` | — | Notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough). |
 | `DEVCLAW_GOAL_INVESTIGATE` | `1` | Whether a new outcome goal investigates the repo before executing (one-shot discovery brief). |
-| `DEVCLAW_GOAL_GRILL` | `0` | Per-goal scope grill (one question at a time over Telegram, durable). Off by default — needs the answer channel + a live round-trip before it can drive real goals. |
 | `DEVCLAW_GOAL_AUTODEPLOY` | `1` | When a goal reaches `achieved`, auto-fire `deploy_project`. `0` disables. |
 | `DEVCLAW_GOAL_AUTOMERGE` | `0` | After a delivered PR's verify gate passes, auto-merge it with an owner ping. Off by default — best-effort + gated. |
 | `DEVCLAW_GOAL_MERGE_STRATEGY` | `squash` | `gh pr merge --<strategy>`. Valid: `squash` / `merge` / `rebase`. |
@@ -103,12 +102,11 @@ Cognition is tiered per role so autonomous runs don't burn Pro/Max quota on Opus
 | Var | Default | Role |
 |---|---|---|
 | `DEVCLAW_PLANNER_MODEL` | `opus` | Planner (`plan_goal`) — rare, high-leverage decomposition. |
-| `DEVCLAW_GRILL_MODEL` | `sonnet` | The one-question-at-a-time spec grill. |
+| `DEVCLAW_GRILL_MODEL` | `sonnet` | The `scope_grill` MCP tool — the chef's one-question-at-a-time cognition the OpenClaw waiter calls before filing a goal. |
 | `DEVCLAW_JUDGE_MODEL` | `haiku` | Failure-analysis judge. |
 | `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **The in-sandbox coding agent — the token/quota bulk.** Full id, not alias. Set `claude-opus-4-8` to opt a run up to Opus. |
 | `DEVCLAW_GOAL_PLANNER_MODEL` | `sonnet` | Goal layer's next-action planner (bounded JSON, light). |
 | `DEVCLAW_GOAL_EVAL_MODEL` | `sonnet` | Direction evaluator — bump to `opus` per hard direction call. |
-| `DEVCLAW_GOAL_GRILL_MODEL` | `sonnet` | Per-goal durable grill. |
 | `DEVCLAW_GOAL_SUMMARY_MODEL` | `haiku` | Plain-prose per-delivery summary. |
 | `DEVCLAW_REVIEW_MODEL` | `sonnet` | (Repeated in [Pre-PR review gate](#pre-pr-review-gate).) |
 
@@ -123,14 +121,14 @@ Cognition is tiered per role so autonomous runs don't burn Pro/Max quota on Opus
 | `DEVCLAW_DEPLOY_CPUS` | `1.0` | Per-deploy CPU limit. |
 | `DEVCLAW_DEPLOY_MAX` | `5` | Max concurrent durable deploys on the VPS. |
 
-## Grill (build-from-scratch interview)
+## Scope grill (waiter-side conversation, chef-side craft)
 
-The legacy elicitation-grill envs are still read by `devclaw/elicitation.py` for the durable per-goal grill (`DEVCLAW_GOAL_GRILL=1`).
+The `scope_grill` MCP tool gives the OpenClaw waiter the chef's cognition for aligning scope before filing a goal. The waiter holds the conversation; these envs tune the chef's side.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `DEVCLAW_MAX_GRILL_QUESTIONS` | `20` | Cap on grill questions before the spec is force-finalized. |
-| `DEVCLAW_GRILL_MODEL` | `sonnet` | (Distinct from `DEVCLAW_GOAL_GRILL_MODEL` — that's the per-goal durable grill; this is the legacy one-shot path's tier, still read for backward-compat.) |
+| `DEVCLAW_MAX_GRILL_QUESTIONS` | `20` | Hard cap on grill turns before the spec is force-finalized — safety net against an infinite interview. |
+| `DEVCLAW_GRILL_MODEL` | `sonnet` | Model tier for the grill cognition. Conversational + judgment, but not Opus-hard. (Listed under [Model tiering](#model-tiering-cognition-cost-lever) too.) |
 
 ## What's NOT here on purpose
 

@@ -183,7 +183,8 @@ async def evaluate(
 ) -> EvalResult:
     """Run the direction evaluation. ``claude_caller`` is injected so tests stub
     the LLM. Pass ``review_report`` + ``at_done_gate`` when judging a done proposal;
-    ``spec`` (the grilled contract) when one exists, so done is judged against it."""
+    ``spec`` (the waiter-provided scope contract) when one exists, so done is
+    judged against it."""
     prompt = build_prompt(
         goal, status, recent_log, deliveries,
         review_report=review_report, at_done_gate=at_done_gate, spec=spec,

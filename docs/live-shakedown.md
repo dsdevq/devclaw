@@ -152,32 +152,27 @@ should self-`--rm`; `docker rm -f` stragglers.)
 
 ---
 
-## 6. L4 — build a project from scratch (the grill)
+## 6. L4 — scope grill cognition (chef craft, waiter-orchestrated)
+
+The OpenClaw waiter on the VPS calls `scope_grill` turn-by-turn over the
+Telegram conversation. To dry-run the same cognition locally:
 
 ```bash
-mkdir -p /tmp/sc-l4
-python drive.py build_project \
-  '{"idea":"a tiny CLI that converts between JSON and YAML","workspace_dir":"/tmp/sc-l4"}'
-# → {"project_id":"…","status":"eliciting","question":"…","recommended":"…"}
+python drive.py scope_grill \
+  '{"idea":"a tiny CLI that converts between JSON and YAML","transcript":[]}'
+# → {"action":"ask","question":"…","recommended":"…"}
 ```
 
-Answer questions until it's `ready` — each answer returns the next question:
+Append the user's answer to the last turn and call again until the response is
+`{"action":"done","spec":"…"}` — then file the goal with the spec attached:
 
 ```bash
-python drive.py answer_question '{"project_id":"<id>","answer":"<your answer, or just: use your recommendation>"}'
-# … repeat … → {"status":"ready","spec":"# … spec markdown …"}
+python drive.py create_goal \
+  '{"goal_id":"jyq","objective":"ship the cli","workspace_dir":"/tmp/sc-l4","spec":"<the finalized spec>"}'
 ```
 
-Read the agreed spec + the interview on disk, then approve to start building:
-
-```bash
-cat $DEVCLAW_STATE/projects/<id>/spec.md
-python drive.py approve_spec '{"project_id":"<id>"}'   # → {"program_id":"…"}
-python drive.py get_project '{"project_id":"<id>"}'    # status: approved + the program
-```
-
-The build is now a normal program — watch it on the dashboard / `get_program`. It
-may run a while; that's the point. `get_program` shows tasks grouped by milestone.
+The build is now a durable goal — watch it on the dashboard / `get_goal` /
+`tail_goal`. It may run a while; that's the point.
 
 ---
 

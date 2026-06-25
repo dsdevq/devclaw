@@ -9,8 +9,7 @@ is achieving the objective. Modules:
   - ``store``     — durable on-disk storage (goal.yaml + STATUS.md + log.md + …)
   - ``planner``   — picks one next action per tick (one ``claude --print`` call)
   - ``evaluator`` — judges direction vs ``done_when``, writes corrections back
-  - ``research``  — investigates a repo before grilling (one-shot brief)
-  - ``grill``     — durable per-goal scope grill (off by default)
+  - ``research``  — investigates the repo on a new goal (one-shot discovery brief)
   - ``summary``   — plain-prose summary of an action for ``deliveries.md``
   - ``merge``     — auto-merge a PR once gates are green (off by default)
   - ``notify``    — notify hooks (HTTP webhook + null fallback)

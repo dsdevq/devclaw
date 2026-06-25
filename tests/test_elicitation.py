@@ -1,9 +1,9 @@
 """Elicitation primitives — step validation and next_step.
 
-The one-shot ``build_project`` interview flow (and its ProjectService/ProjectStore)
-was removed as vault-rejected spec-kit drift. The grill primitives stay because the
-durable per-goal grill (``goal_grill``, off by default until the Telegram answer
-channel is validated) still reuses them.
+The cognition that backs the ``scope_grill`` MCP tool. Stateless per call: the
+OpenClaw waiter (the customer-facing agent on the VPS) holds the transcript in
+the Telegram chat and calls scope_grill turn by turn. These tests pin the pure
+pieces so the cognition stays stub-testable without a live ``claude``.
 """
 
 import json

@@ -57,7 +57,6 @@ devclaw/
 │   ├── evaluator.py    #   direction evaluation, grounded in deliveries.md
 │   ├── store.py        #   on-disk mind: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
 │   ├── engine.py       #   in-process dispatch into the task queue
-│   ├── grill.py        #   per-goal scope grill (off by default)
 │   ├── research.py · merge.py · notify.py · summary.py · models.py
 ├── loom/               # reusable orchestration core:
 │   ├── limits.py       #   usage-/rate-limit failure classifier (pure)

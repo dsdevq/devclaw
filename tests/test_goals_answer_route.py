@@ -1,6 +1,7 @@
 """The /goals/answer route — deterministic reply→goal routing for the devclaw
-Telegram bridge. Routes to the single grilling/plan_review goal; 409 on
-none/ambiguous; 400 on empty."""
+Telegram bridge. Routes to the single plan_review goal; 409 on none/ambiguous;
+400 on empty. (Scope alignment lives on the OpenClaw waiter via scope_grill, so
+this route only sees plan_review approvals.)"""
 
 from __future__ import annotations
 
@@ -28,24 +29,16 @@ class _Goals:
 
     def answer_goal(self, gid, text):
         self.answered.append((gid, text))
-        return {"goal_id": gid, "routed_to": "grill", "recorded": True}
+        return {"goal_id": gid, "routed_to": "plan_approval", "approved": True}
 
 
 @pytest.mark.asyncio
-async def test_routes_to_single_waiting_goal(monkeypatch):
-    fg = _Goals([{"id": "g1", "lifecycle": "grilling"}, {"id": "g2", "lifecycle": "executing"}])
-    monkeypatch.setattr(server.http, "goals", fg)
-    resp = await server.goals_answer(_Req({"text": "Postgres"}))
-    assert resp.status_code == 200
-    assert fg.answered == [("g1", "Postgres")]
-
-
-@pytest.mark.asyncio
-async def test_plan_review_also_routes(monkeypatch):
-    fg = _Goals([{"id": "g1", "lifecycle": "plan_review"}])
+async def test_routes_to_single_plan_review_goal(monkeypatch):
+    fg = _Goals([{"id": "g1", "lifecycle": "plan_review"}, {"id": "g2", "lifecycle": "executing"}])
     monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "approved"}))
-    assert resp.status_code == 200 and fg.answered == [("g1", "approved")]
+    assert resp.status_code == 200
+    assert fg.answered == [("g1", "approved")]
 
 
 @pytest.mark.asyncio
@@ -58,7 +51,7 @@ async def test_409_when_none_waiting(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_409_when_multiple_waiting(monkeypatch):
-    fg = _Goals([{"id": "g1", "lifecycle": "grilling"}, {"id": "g2", "lifecycle": "plan_review"}])
+    fg = _Goals([{"id": "g1", "lifecycle": "plan_review"}, {"id": "g2", "lifecycle": "plan_review"}])
     monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "hi"}))
     assert resp.status_code == 409 and fg.answered == []
@@ -66,7 +59,7 @@ async def test_409_when_multiple_waiting(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_400_missing_text(monkeypatch):
-    fg = _Goals([{"id": "g1", "lifecycle": "grilling"}])
+    fg = _Goals([{"id": "g1", "lifecycle": "plan_review"}])
     monkeypatch.setattr(server.http, "goals", fg)
     resp = await server.goals_answer(_Req({"text": "   "}))
     assert resp.status_code == 400 and fg.answered == []

@@ -24,8 +24,8 @@ from typing import Awaitable, Callable, Optional
 from .planner import PlannerError, claude_with_model, extract_json
 
 #: Adversarial code review is judgment-heavy — Sonnet is the right tier (matches
-#: the grill; heavier than the Haiku classification judge, lighter than the Opus
-#: planner). Empty → account default.
+#: the scope grill; heavier than the Haiku classification judge, lighter than the
+#: Opus planner). Empty → account default.
 REVIEW_MODEL = os.environ.get("DEVCLAW_REVIEW_MODEL", "sonnet") or None
 #: default cognition caller for the review, bound to the review tier
 review_caller = claude_with_model(REVIEW_MODEL)

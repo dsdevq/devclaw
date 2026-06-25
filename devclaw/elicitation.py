@@ -1,20 +1,18 @@
-"""The elicitation grill — interrogate the user to a shared spec.
+"""The scope grill — interrogate to a shared spec.
 
-The front of build-a-project-from-scratch. Given a rough idea, DevClaw asks one
-question at a time (each with a recommended answer) and walks the design tree
-until it has a shared understanding, then emits a `spec.md`. Cognition runs in
-``claude`` (mechanism/cognition split: Python owns the loop + transcript; Claude
-decides the next question / when to finalize).
+Pure cognition: given a rough idea and the running transcript, decide the next
+question (with a recommended answer) or finalize a spec.md. Stateless — the
+caller (today: the ``scope_grill`` MCP tool, called turn-by-turn by the OpenClaw
+waiter) holds the transcript. The chef provides the *craft* (what to ask, what
+'enough' looks like); the waiter holds the conversation in Telegram.
 
 The interview methodology is adapted from Matt Pocock's MIT-licensed ``grill-me``
 skill (github.com/mattpocock/skills): interview relentlessly until shared
 understanding, walk each branch resolving dependencies one-by-one, recommend an
-answer per question, ask one at a time, and decide-instead-of-ask when the answer
-is obvious.
+answer per question, ask one at a time, and decide-instead-of-ask when the
+answer is obvious.
 
-This module is pure cognition + validation — no transport, no persistence — so
-it's unit-testable with a stubbed ``claude_caller``. The MCP tools and the
-filesystem ProjectStore wrap it.
+No transport, no persistence — unit-testable with a stubbed ``claude_caller``.
 """
 
 from __future__ import annotations
@@ -25,11 +23,9 @@ from typing import Awaitable, Callable
 
 from .planner import PlannerError, claude_with_model, extract_json
 
-#: the grill is conversational requirement-gathering — Sonnet is the right tier
-#: (frequent, quality-sensitive, but not Opus-hard). Empty → account default.
+#: conversational requirement-gathering — Sonnet is the right tier. Empty →
+#: account default. Read at call time so the env stays the single source.
 GRILL_MODEL = os.environ.get("DEVCLAW_GRILL_MODEL", "sonnet") or None
-#: default cognition caller for the grill, bound to the grill tier
-grill_caller = claude_with_model(GRILL_MODEL)
 
 #: hard cap so a grill can't loop forever — after this many answered turns the
 #: model is forced to finalize the spec from what it has.
@@ -115,14 +111,22 @@ def validate_step(parsed: object) -> dict:
     raise PlannerError(f"Grill action must be 'ask' or 'done', got {action!r}")
 
 
+def default_caller() -> Callable[[str], Awaitable[str]]:
+    """Production cognition caller bound to the grill tier (lazy, env-current)."""
+    return claude_with_model(GRILL_MODEL)
+
+
 async def next_step(
     idea: str,
     transcript: list[dict],
-    claude_caller: Callable[[str], Awaitable[str]] = grill_caller,
+    claude_caller: "Callable[[str], Awaitable[str]] | None" = None,
 ) -> dict:
     """Run one grill turn. Returns an 'ask' step (next question + recommendation)
     or a 'done' step (the finalized spec). Forces finalization once the question
-    cap is hit. ``claude_caller`` is injected so tests can stub the subprocess."""
+    cap is hit. ``claude_caller`` is injected so tests can stub the subprocess;
+    bound to the grill tier on first real use."""
+    if claude_caller is None:
+        claude_caller = default_caller()
     finalize = len(transcript) >= MAX_GRILL_QUESTIONS
     raw = await claude_caller(build_grill_prompt(idea, transcript, finalize=finalize))
     try:

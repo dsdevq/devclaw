@@ -28,7 +28,6 @@ from typing import Awaitable, Callable, Tuple, Union
 
 from . import evaluator as _evaluator
 from .. import deploy as _deploy
-from . import grill as _grill
 from . import merge as _merge
 from . import planner as _planner
 from . import research as _research
@@ -71,7 +70,7 @@ class Outcome(str, Enum):
     SKIP_CANCELLED = "skip_cancelled"
     ERROR = "error"
     RATE_LIMITED = "rate_limited"  # paused on a usage/quota limit — 0 tokens, auto-resumes
-    ASKED = "asked"          # emitted a grill question / plan for approval — awaiting the owner
+    ASKED = "asked"          # emitted a plan for owner approval — awaiting the owner
 
 
 class NotifyLevel(int, Enum):
@@ -160,8 +159,8 @@ async def _block_on_prep_failure(
 
 def _progress_window_active(status: GoalStatus) -> bool:
     """Is this a goal the no-progress watchdog should measure? Only one that is
-    actively executing — not waiting on the owner (blocked / grilling / plan_review,
-    which already pinged), not done/cancelled (returned earlier). 'verifying' counts
+    actively executing — not waiting on the owner (blocked / plan_review, which
+    already pinged), not done/cancelled (returned earlier). 'verifying' counts
     (the done-gate review is still work in flight)."""
     return (status.lifecycle or "executing") == "executing" and status.phase in (
         "idle", "in_flight", "verifying",
@@ -222,7 +221,6 @@ class TickContext:
     no_progress_s: int = NO_PROGRESS_S
     summary_caller: "ClaudeCaller | None" = None
     merger: "_merge.Merger | None" = None
-    grill_caller: "ClaudeCaller | None" = None
 
 
 class Phase(str, Enum):
@@ -240,7 +238,6 @@ class Phase(str, Enum):
     POLLING_DONE_GATE = "polling_done_gate"
     POLLING_ACTION = "polling_action"
     INVESTIGATING = "investigating"
-    GRILLING = "grilling"
     PLAN_REVIEW = "plan_review"
     EXECUTING = "executing"
 
@@ -268,8 +265,6 @@ def _classify(status: GoalStatus) -> Phase:
     lifecycle = status.lifecycle or "executing"
     if lifecycle == "new":
         return Phase.INVESTIGATING
-    if lifecycle == "grilling":
-        return Phase.GRILLING
     if lifecycle == "plan_review":
         return Phase.PLAN_REVIEW
     return Phase.EXECUTING
@@ -290,7 +285,6 @@ async def tick_goal(
     no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
-    grill_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """Run one heartbeat. Reads the goal's status, classifies it into a
     :class:`Phase`, dispatches to the matching handler.
@@ -309,7 +303,7 @@ async def tick_goal(
         planner_caller=planner_caller, evaluator_caller=evaluator_caller,
         notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
         eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
-        summary_caller=summary_caller, merger=merger, grill_caller=grill_caller,
+        summary_caller=summary_caller, merger=merger,
     )
 
     goal = store.load_goal(goal_id)
@@ -352,11 +346,6 @@ async def tick_goal(
             goal_id, goal, status,
             store=store, engine=engine, notifier=notifier,
             notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
-        )
-    if phase is Phase.GRILLING:
-        return await _run_grill(
-            goal_id, goal, status,
-            store=store, grill_caller=grill_caller, notifier=notifier, summarize=summary_caller,
         )
     if phase is Phase.PLAN_REVIEW:
         return await _handle_plan_review(goal_id, status, ctx)
@@ -566,12 +555,13 @@ async def _open_investigation(
 async def _resolve_discovery(
     goal_id: str, goal: Goal, status: GoalStatus, repo_analysis: str,
     *, store: GoalStore, research_caller: ClaudeCaller, notifier: Notifier,
-    summarize: "ClaudeCaller | None" = None, grill_caller: "ClaudeCaller | None" = None,
+    summarize: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """The investigating analysis finished — synthesize the discovery brief
-    (current state · gap-to-good · best-practice checklist) and persist it. Then,
-    if the grill is on, move into grilling (align on scope) primed with the brief;
-    otherwise tell the owner plainly and execute. Synthesis failure is non-fatal."""
+    (current state · gap-to-good · best-practice checklist) and persist it, then
+    transition to executing. Synthesis failure is non-fatal. (Scope alignment
+    happens outside the chef now — the OpenClaw waiter grills the owner via the
+    scope_grill MCP tool before create_goal is ever called.)"""
     try:
         brief = await _research.discovery_brief(goal, repo_analysis, caller=research_caller)
         store.write_discovery(goal_id, brief)
@@ -581,16 +571,6 @@ async def _resolve_discovery(
         store.append_log(goal_id, f"discovery synthesis failed ({exc}) — proceeding")
         synth_ok = False
 
-    # Grill on → align on scope (primed with the brief) before executing.
-    if _grill.GRILL_ENABLED and grill_caller is not None:
-        store.save_status(goal_id, replace(status, lifecycle="grilling", phase="idle"))
-        store.append_log(goal_id, "discovery done → grilling")
-        return await _run_grill(
-            goal_id, goal, store.load_status(goal_id),
-            store=store, grill_caller=grill_caller, notifier=notifier, summarize=summarize,
-        )
-
-    # Grill off → straight to executing (the brief still informs the planner).
     store.save_status(
         goal_id, replace(status, lifecycle="executing", phase="idle", next="discovery done → executing"),
     )
@@ -601,54 +581,6 @@ async def _resolve_discovery(
     )
     await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summarize)
     return Outcome.ADVANCED
-
-
-async def _run_grill(
-    goal_id: str, goal: Goal, status: GoalStatus,
-    *, store: GoalStore, grill_caller: "ClaudeCaller | None", notifier: Notifier,
-    summarize: "ClaudeCaller | None" = None,
-) -> Outcome:
-    """One grill turn over the durable transcript. Quota-safe: if the last question
-    is still awaiting the owner's reply, do nothing (zero tokens). Otherwise run the
-    elicitation cognition — ask the next question, or finalize the spec and move to
-    plan_review. A grill failure degrades to executing rather than wedging."""
-    transcript = store.read_grill(goal_id)
-    if transcript and "answer" not in transcript[-1]:
-        # a question is out; waiting for the owner — zero tokens
-        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
-        return Outcome.IDLE
-    if grill_caller is None:  # defensive — shouldn't reach here with grill on
-        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
-        return Outcome.SLEPT
-    try:
-        step = await _grill.next_step(_grill.grill_idea(goal, store.read_discovery(goal_id)), transcript, grill_caller)
-    except Exception as exc:  # noqa: BLE001 — never wedge a goal on a grill hiccup
-        store.append_log(goal_id, f"grill failed ({exc}) — proceeding to executing")
-        store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
-        await _notify(notifier, NotifyLevel.OWNER, f"🟢 [{goal_id}] starting work on \"{goal.objective}\"", summarize=summarize)
-        return Outcome.SLEPT
-
-    if step["action"] == "ask":
-        transcript.append({"question": step["question"], "recommended": step.get("recommended", "")})
-        store.write_grill(goal_id, transcript)
-        store.append_log(goal_id, f"grill Q{len(transcript)}: {step['question']}")
-        rec = f"\n(suggested: {step['recommended']})" if step.get("recommended") else ""
-        await _notify(
-            notifier, NotifyLevel.OWNER,
-            f"❓ [{goal_id}] {step['question']}{rec}", summarize=summarize,
-        )
-        return Outcome.ASKED
-
-    # action == "done" → spec agreed; present the plan for approval.
-    store.write_spec(goal_id, step["spec"])
-    store.save_status(goal_id, replace(status, lifecycle="plan_review", phase="idle", next="awaiting plan approval"))
-    store.append_log(goal_id, "grill done → spec written → plan_review")
-    await _notify(
-        notifier, NotifyLevel.OWNER,
-        f"📋 [{goal_id}] Here's the plan for \"{goal.objective}\":\n\n{step['spec']}\n\nReply to approve and I'll start.",
-        summarize=summarize,
-    )
-    return Outcome.ASKED
 
 
 async def _dispatch_action(
@@ -724,7 +656,7 @@ async def _resolve_polling_discovery(
     return await _resolve_discovery(
         goal_id, goal, new_status, discovery_detail,
         store=ctx.store, research_caller=ctx.evaluator_caller, notifier=ctx.notifier,
-        summarize=ctx.summary_caller, grill_caller=ctx.grill_caller,
+        summarize=ctx.summary_caller,
     )
 
 
@@ -936,7 +868,6 @@ async def tick_all(
     no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
-    grill_caller: "ClaudeCaller | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others, and a usage
     limit pauses the whole layer (0 tokens) rather than crashing per-goal."""
@@ -958,7 +889,7 @@ async def tick_all(
                 planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                 notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
                 eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
-                summary_caller=summary_caller, merger=merger, grill_caller=grill_caller,
+                summary_caller=summary_caller, merger=merger,
             )
         except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
             # the goal's OWN cognition (claude --print) hitting a limit pauses the
