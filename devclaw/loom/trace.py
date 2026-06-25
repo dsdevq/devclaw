@@ -80,8 +80,26 @@ class DispatchEvent:
     goal_id: str = ""
     tool: str = ""
     ref_id: str = ""
+    engine: str = ""           # stub | sandcastle | host | claude_sdk
     is_discovery: bool = False
     is_done_check: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class SubprocessEvent:
+    """One cross-boundary subprocess invocation — claude --print, docker run,
+    git push. Surfaces what would otherwise be invisible in the timeline."""
+
+    kind: str = "subprocess"
+    ts: str = field(default_factory=_now_iso)
+    cmd: str = ""              # short label: "claude --print", "docker run", "git push"
+    argv_head: str = ""        # the first ~120 chars of the actual argv for forensics
+    latency_ms: int = 0
+    exit_code: Optional[int] = None
+    error: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -204,8 +222,21 @@ class Tracer:
                     tags.append("discovery")
                 if e.get("is_done_check"):
                     tags.append("done-check")
+                engine = e.get("engine", "")
+                if engine:
+                    tags.append(f"engine={engine}")
                 tag = f" [{', '.join(tags)}]" if tags else ""
                 lines.append(f"- `[{ts}]` **dispatch** `{e.get('goal_id', '')}` → `{e.get('tool', '')}` ({e.get('ref_id', '')}){tag}")
+            elif kind == "subprocess":
+                err = e.get("error", "")
+                ec = e.get("exit_code")
+                lat = e.get("latency_ms", 0)
+                status = "ok" if (err == "" and (ec is None or ec == 0)) else f"FAILED exit={ec} {err[:80]}"
+                lines.append(
+                    f"- `[{ts}]` **subprocess** `{e.get('cmd', '')}` ({lat}ms, {status})"
+                )
+                if e.get("argv_head"):
+                    lines.append(f"    - argv: `{e['argv_head']}`")
             elif kind == "delivery":
                 gp = e.get("gate_passed")
                 gate = "✓" if gp is True else ("✗" if gp is False else "—")
@@ -261,13 +292,29 @@ def record_tick(*, goal_id: str, lifecycle: str, phase: str, outcome: str) -> No
     t.append(TickEvent(goal_id=goal_id, lifecycle=lifecycle, phase=phase, outcome=outcome))
 
 
-def record_dispatch(*, goal_id: str, tool: str, ref_id: str, is_discovery: bool = False, is_done_check: bool = False) -> None:
+def record_dispatch(
+    *, goal_id: str, tool: str, ref_id: str,
+    engine: str = "", is_discovery: bool = False, is_done_check: bool = False,
+) -> None:
     t = _current.get()
     if t is None:
         return
     t.append(DispatchEvent(
-        goal_id=goal_id, tool=tool, ref_id=ref_id,
+        goal_id=goal_id, tool=tool, ref_id=ref_id, engine=engine,
         is_discovery=is_discovery, is_done_check=is_done_check,
+    ))
+
+
+def record_subprocess(
+    *, cmd: str, argv_head: str = "", latency_ms: int = 0,
+    exit_code: Optional[int] = None, error: str = "",
+) -> None:
+    t = _current.get()
+    if t is None:
+        return
+    t.append(SubprocessEvent(
+        cmd=cmd, argv_head=argv_head[:120], latency_ms=latency_ms,
+        exit_code=exit_code, error=error[:200],
     ))
 
 

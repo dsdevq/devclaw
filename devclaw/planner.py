@@ -192,18 +192,25 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
 
+    argv = _build_claude_argv(prompt, model)
+    argv_head = f"{CLAUDE_BIN} --print" + (f" --model {model}" if model else "")
     started = _trace.now_ms()
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_build_claude_argv(prompt, model),
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
     except OSError as exc:
+        latency = _trace.now_ms() - started
         _trace.record_cognition(
             role=role, model=model or "", prompt=prompt, response="",
-            latency_ms=_trace.now_ms() - started, error=f"spawn failed: {exc}",
+            latency_ms=latency, error=f"spawn failed: {exc}",
+        )
+        _trace.record_subprocess(
+            cmd="claude --print", argv_head=argv_head, latency_ms=latency,
+            exit_code=None, error=f"spawn failed: {exc}",
         )
         raise PlannerError(f"Failed to spawn {CLAUDE_BIN}: {exc}") from exc
 
@@ -214,15 +221,24 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+        latency = _trace.now_ms() - started
         _trace.record_cognition(
             role=role, model=model or "", prompt=prompt, response="",
-            latency_ms=_trace.now_ms() - started, error="timeout",
+            latency_ms=latency, error="timeout",
+        )
+        _trace.record_subprocess(
+            cmd="claude --print", argv_head=argv_head, latency_ms=latency,
+            exit_code=None, error="timeout",
         )
         raise PlannerError(f"claude --print timed out after {PLANNER_TIMEOUT_MS}ms")
 
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace")
     latency = _trace.now_ms() - started
+    _trace.record_subprocess(
+        cmd="claude --print", argv_head=argv_head, latency_ms=latency,
+        exit_code=proc.returncode, error=(stderr[:200] if proc.returncode != 0 else ""),
+    )
     if proc.returncode != 0:
         # Include a stdout tail in the message: a Claude usage-limit ("You're out
         # of extra usage …") comes back on STDOUT with an EMPTY stderr, so a

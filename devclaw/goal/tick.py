@@ -530,7 +530,7 @@ async def _open_done_gate(
             await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate dispatch failed: {exc}")
             return Outcome.ERROR
         ref = replace(ref, is_done_check=True)
-        _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, is_done_check=True)
+        _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""), is_done_check=True)
         store.save_status(goal_id, replace(base, phase="verifying", in_flight=ref, next="verifying done"))
         store.append_log(goal_id, f"done proposed ({note}) → verifying via review {ref.id}")
         await _notify(notifier, NotifyLevel.TASK, f"🔎 [{goal_id}] looks complete — verifying against done_when")
@@ -577,7 +577,7 @@ async def _open_investigation(
         store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
         return Outcome.SLEPT
     ref = replace(ref, is_discovery=True)
-    _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, is_discovery=True)
+    _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""), is_discovery=True)
     store.save_status(goal_id, replace(status, lifecycle="investigating", phase="in_flight", in_flight=ref))
     store.append_log(goal_id, f"investigating → repo analysis {ref.id}")
     await _notify(
@@ -652,7 +652,7 @@ async def _dispatch_action(
         store.save_status(goal_id, replace(base, phase="idle", next=action.goal))
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] dispatch failed: {exc}")
         return Outcome.ERROR
-    _trace.record_dispatch(goal_id=goal_id, tool=action.tool, ref_id=ref.id)
+    _trace.record_dispatch(goal_id=goal_id, tool=action.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""))
     store.save_status(
         goal_id,
         replace(

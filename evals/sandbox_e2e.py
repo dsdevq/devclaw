@@ -345,6 +345,9 @@ def _wire_env(goals_dir: Path) -> None:
     os.environ["DEVCLAW_ENGINE"] = "stub"
     os.environ["DEVCLAW_GOALS_DIR"] = str(goals_dir)
     os.environ.setdefault("DEVCLAW_GOAL_PLAIN_SUMMARY", "0")  # skip the summary call for clean traces
+    # A scenario reaching 'achieved' would otherwise try a real Tailscale deploy
+    # via deploy.deploy_project — docker, port allocation, the works. Off in sandbox.
+    os.environ.setdefault("DEVCLAW_GOAL_AUTODEPLOY", "0")
 
 
 def _patch_for_sandbox() -> None:
@@ -392,7 +395,21 @@ async def _run_goal_mode(scenario: Scenario, env: dict) -> dict:
         GoalStore(goals_dir).write_spec(goal_id, scenario.goal["spec"])
 
     store = StateStore(str(state_db))
-    queue = TaskQueue(store)
+    # CRITICAL: wire the stub engine into the queue EXPLICITLY. The TaskQueue
+    # default is run_sandcastle — real docker — and DEVCLAW_ENGINE=stub is only
+    # honoured by server/_state.py, which the sandbox bypasses. A wrong default
+    # here silently runs scenarios against the production engine; the sanity
+    # check below also fails the run if the resolved engine isn't 'stub'.
+    from devclaw.engine.stub import stub_engine, stub_goal_planner
+    queue = TaskQueue(store, planner=stub_goal_planner, runner=stub_engine)
+    if queue.engine_kind != "stub":
+        raise SystemExit(
+            f"sandbox runner refused to start: queue.engine_kind={queue.engine_kind!r}, "
+            "expected 'stub'. The TaskQueue was constructed with a non-stub runner — "
+            "this would silently exercise the production engine."
+        )
+    record_note(f"engine: {queue.engine_kind}")
+
     cfg = GoalConfig(
         goals_dir=goals_dir, notify_url="",
         tick_seconds=900, eval_every=3, verify_done=False,

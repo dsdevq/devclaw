@@ -45,6 +45,13 @@ class InProcessEngine:
         self._queue = queue
         self._store = store
 
+    @property
+    def kind(self) -> str:
+        """Pass-through to the task queue's engine label ("stub" / "sandcastle"
+        / "host" / "claude_sdk"). Used by trace recorders so the timeline
+        shows which engine actually ran each dispatch."""
+        return getattr(self._queue, "engine_kind", "unknown")
+
     async def dispatch(self, action: Action, goal: Goal, notify_url: str) -> InFlight:
         ws = goal.workspace_dir
         nu = notify_url or None
