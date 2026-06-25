@@ -7,7 +7,7 @@ tests guard the mechanism the live driver depends on.
 
 from __future__ import annotations
 
-from devclaw.claude_sdk_engine import _build_docker_args, _prompt, _stream_output
+from devclaw.engine.claude_sdk import _build_docker_args, _prompt, _stream_output
 from devclaw.engine import EngineRequest
 
 

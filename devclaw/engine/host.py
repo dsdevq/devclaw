@@ -19,7 +19,7 @@ import os
 import sys
 from pathlib import Path
 
-from .engine import EngineRequest, EngineResult
+from . import EngineRequest, EngineResult
 from .runner_io import STREAM_LINE_LIMIT, consume_runner_output
 
 _REPO = Path(__file__).resolve().parents[1]

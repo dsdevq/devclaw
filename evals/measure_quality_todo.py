@@ -34,7 +34,7 @@ from pathlib import Path
 
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
-from devclaw.sandcastle_runner import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
+from devclaw.engine.sandcastle import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
 
 REPO_URL = os.environ.get("MEASURE_REPO_URL", "https://github.com/dsdevq/todo-fullstack-demo.git")
 # Backend pytest is the gate. Install deps first (idempotent) so a fresh sandbox

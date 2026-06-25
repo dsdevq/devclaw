@@ -41,7 +41,7 @@ from ..loom import trace as _trace
 from ..loom.limits import classify_failure, pause_seconds
 from ..planner import PlannerError
 from ..state_store import _now_ms
-from ..workspace import WorkspaceError, prepare_workspace
+from ..engine.workspace import WorkspaceError, prepare_workspace
 
 #: (workspace_dir, repo_url) -> default branch. Injected so tests pass a no-op.
 WorkspacePrep = Callable[[str, "str | None"], Awaitable[str]]

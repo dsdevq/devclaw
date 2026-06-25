@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from devclaw.engine import EngineRequest
-from devclaw.stub_engine import stub_engine, stub_goal_planner
+from devclaw.engine.stub import stub_engine, stub_goal_planner
 
 
 async def test_stub_engine_builds_jyq_for_golden_goal():

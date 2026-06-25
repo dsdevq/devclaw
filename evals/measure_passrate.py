@@ -31,7 +31,7 @@ from pathlib import Path
 # sandcastle_runner reads them at module import time.
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
-from devclaw.sandcastle_runner import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
+from devclaw.engine.sandcastle import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
 
 REPO_URL = os.environ.get("MEASURE_REPO_URL", "https://github.com/dsdevq/lifekit-dashboard.git")
 VERIFY_CMD = os.environ.get("MEASURE_VERIFY_CMD", "cd backend && dotnet test")

@@ -744,7 +744,7 @@ async def test_task_altitude_restores_the_firehose(tmp_path, monkeypatch):
 
 async def _failing_prepare(workspace_dir: str, repo_url: str | None = None) -> str:
     """A prep that always fails the way a bad/missing/private repo_url does."""
-    from devclaw.workspace import WorkspaceError
+    from devclaw.engine.workspace import WorkspaceError
 
     raise WorkspaceError("clone failed: remote: Repository not found.")
 

@@ -58,19 +58,30 @@ devclaw/
 │   ├── store.py        #   on-disk mind: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
 │   ├── engine.py       #   in-process dispatch into the task queue
 │   ├── research.py · merge.py · notify.py · summary.py · models.py
-├── loom/               # reusable orchestration core:
+├── engine/             # everything that executes the work:
+│   ├── __init__.py     #   the Engine protocol (one async callable)
+│   ├── sandcastle.py   #   docker run --rm per task; events stream from the runner (production)
+│   ├── claude_sdk.py   #   spike backend: claude --print inside the same sandbox
+│   ├── host.py         #   host-side runner (no sandbox; testing only)
+│   ├── stub.py         #   deterministic engine for tests + offline harness
+│   ├── runner_io.py    #   shared stdout/event-stream parser
+│   └── workspace.py    #   per-action pristine git checkout (devclaw owns it)
+├── prompts/            # every system prompt as a .md file (load_prompt(slug))
+├── loom/               # reusable orchestration core (engine-agnostic substrate):
 │   ├── limits.py       #   usage-/rate-limit failure classifier (pure)
-│   └── test_integrity.py # gate guard: flags deleted/weakened tests in a diff (pure)
+│   ├── test_integrity.py # gate guard: flags deleted/weakened tests in a diff (pure)
+│   └── trace.py        #   run-trace recorder (cognition, ticks, dispatches, deliveries)
 ├── planner.py          # spec / program planner (claude --print) → task DAG
+├── cognition.py        # the LLM seam — Cognition protocol + Claude/Stub impls
+├── elicitation.py      # scope-grill cognition (called via the scope_grill MCP tool)
 ├── state_store.py      # SQLite: programs, tasks, append-only events
 ├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
-├── sandcastle_runner.py# docker run --rm per task; events stream from the runner
 ├── delivery.py         # engineer-authored commit → branch → push → PR
 ├── review_gate.py      # pre-PR adversarial diff review (claude)
+├── eval_judge.py       # failure-mode classifier across eval runs
 ├── deploy.py           # durable Tailscale deploy hosting (reboot-surviving)
 ├── project_registry.py # control plane: repos → driving goals → live status rollup
-├── cli.py              # devclaw projects … (terminal face of the control plane)
-└── workspace.py        # per-action pristine git checkout (devclaw owns the checkout)
+└── cli.py              # devclaw projects … (terminal face of the control plane)
 openhands-runner/runner.py  # OpenHands SDK inside the sandbox; emits event/result lines
 .sandcastle/Dockerfile      # per-task sandbox image
 tests/                      # pytest — stubbed engine; no docker, no claude

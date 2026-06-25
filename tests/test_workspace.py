@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.workspace import WorkspaceError, prepare_workspace
+from devclaw.engine.workspace import WorkspaceError, prepare_workspace
 
 
 @pytest.mark.asyncio

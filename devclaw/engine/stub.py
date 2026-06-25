@@ -18,8 +18,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .engine import EngineEvent, EngineRequest, EngineResult
-from .planner import PlannedTask
+from . import EngineEvent, EngineRequest, EngineResult
+from ..planner import PlannedTask
 
 # ---- engine ----------------------------------------------------------------
 

@@ -30,7 +30,7 @@ import os
 import uuid
 from pathlib import Path
 
-from .engine import EngineRequest, EngineResult
+from . import EngineRequest, EngineResult
 from .runner_io import STREAM_LINE_LIMIT, consume_runner_output
 
 SANDBOX_IMAGE = os.environ.get("DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest")

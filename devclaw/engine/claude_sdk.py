@@ -6,7 +6,7 @@ substantially smaller engine (~150 lines vs OpenHands SDK + the
 ``openhands-runner/`` script + a pinned 1.24.0 dependency) hits the same
 5/5 build-from-scratch pass rate the production sandcastle engine does.
 
-Same sandbox posture as :mod:`devclaw.sandcastle_runner`:
+Same sandbox posture as :mod:`devclaw.engine.sandcastle`:
   - per-task ephemeral ``docker run --rm`` against ``devclaw-sandbox:latest``
   - workspace bind-mounted at ``/workspace``
   - curated allowlist under ``~/.claude`` read-only (auth in, nothing else)
@@ -35,9 +35,9 @@ import time
 import uuid
 from pathlib import Path
 
-from .engine import EngineEvent, EngineRequest, EngineResult
+from . import EngineEvent, EngineRequest, EngineResult
 from .runner_io import STREAM_LINE_LIMIT
-from .sandcastle_runner import (
+from .sandcastle import (
     CONTAINER_CLAUDE_DIR,
     CONTAINER_WORKSPACE,
     DOCKER_BIN,
@@ -69,7 +69,7 @@ _PROMPT_SLUGS = {
 
 
 def _prompt(req: EngineRequest) -> str:
-    from .prompts import load_prompt
+    from ..prompts import load_prompt
 
     slug = _PROMPT_SLUGS.get(req.kind, "sdk-implement-feature")
     return load_prompt(slug, workspace=CONTAINER_WORKSPACE, goal=req.goal)

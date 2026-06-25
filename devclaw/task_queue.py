@@ -46,7 +46,7 @@ from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .review_gate import format_feedback, review_diff
-from .sandcastle_runner import run_sandcastle
+from .engine.sandcastle import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)

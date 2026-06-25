@@ -14,7 +14,7 @@ import json
 import sys
 from typing import Callable, Optional
 
-from .engine import EngineEvent, EngineResult
+from . import EngineEvent, EngineResult
 
 #: StreamReader line-buffer limit for runner stdout. The runner emits one JSON
 #: object per line (``event:`` / ``result:``), and a single event can be large —

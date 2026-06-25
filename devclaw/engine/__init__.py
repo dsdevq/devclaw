@@ -3,7 +3,7 @@
 DevClaw's orchestration (task queue, planner, state store) drives an *Engine* —
 the thing that actually executes one coding task in isolation and streams back
 events. OpenHands-in-a-docker-sandbox is the only implementation today
-(:func:`devclaw.sandcastle_runner.run_sandcastle`), but the orchestration
+(:func:`devclaw.engine.sandcastle.run_sandcastle`), but the orchestration
 depends ONLY on this interface, never on OpenHands directly.
 
 That's the "orchestration ⊥ engine" decoupling from the architecture: the
@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, Union
 
-from .state_store import TaskKind
+from ..state_store import TaskKind
 
 
 @dataclass

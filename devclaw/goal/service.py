@@ -33,7 +33,7 @@ from .store import GoalStore
 from .tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
 from ..state_store import StateStore
 from ..task_queue import TaskQueue
-from ..workspace import prepare_workspace
+from ..engine.workspace import prepare_workspace
 
 
 _BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")

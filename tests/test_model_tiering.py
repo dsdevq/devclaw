@@ -13,7 +13,7 @@ import pytest
 
 from devclaw import eval_judge, elicitation
 from devclaw import planner
-from devclaw import sandcastle_runner
+from devclaw.engine import sandcastle as sandcastle_runner
 from devclaw.planner import _build_claude_argv, call_claude, claude_with_model
 
 
