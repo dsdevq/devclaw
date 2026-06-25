@@ -39,6 +39,16 @@ VERIFY_CMD = os.environ.get("MEASURE_VERIFY_CMD", "cd backend && dotnet test")
 WORKROOT = Path(os.environ.get("MEASURE_WORKROOT", str(Path.home() / "projects" / ".devclaw-measure")))
 REPORT_DIR = Path(__file__).resolve().parent / "runs"
 
+# If set, each task workspace is pinned to this SHA before dispatch — so a re-run
+# measures the model against the same starting state as the original 5/5
+# (2026-06-01). Without pinning, tasks whose tickets have since been merged to
+# main return measurement-broken numbers because the impl + tests already exist.
+# See ~/memory/projects/devclaw/plan.md → "Measurement direction — L8 telemetry
+# is the future, L4 has a sunset". For the 5/5 baseline use
+# c09bee5551cd9370b5807b9c3b228dd19fcadf22 (lifekit-dashboard main just before
+# PR #10 was merged).
+PIN_SHA = os.environ.get("MEASURE_PIN_SHA")
+
 # The basket — real lifekit-dashboard backend tickets, gate-verifiable via
 # `dotnet test`, comparable in size to the proven GET /api/decisions feature.
 # Every ticket tells the engineer to ADD tests for its change and NOT weaken the
@@ -108,13 +118,22 @@ async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
     if ws.exists():
         shutil.rmtree(ws)
     ws.parent.mkdir(parents=True, exist_ok=True)
-    print(f"\n=== [{task['id']}] cloning {REPO_URL} → {ws}", flush=True)
-    clone = subprocess.run(
-        ["git", "clone", "--depth", "1", REPO_URL, str(ws)],
-        capture_output=True, text=True,
-    )
+    pin_note = f" (pinned to {PIN_SHA[:8]})" if PIN_SHA else ""
+    print(f"\n=== [{task['id']}] cloning {REPO_URL} → {ws}{pin_note}", flush=True)
+    # Drop --depth 1 when pinning so we can checkout the historical SHA.
+    clone_cmd = ["git", "clone", REPO_URL, str(ws)] if PIN_SHA else \
+                ["git", "clone", "--depth", "1", REPO_URL, str(ws)]
+    clone = subprocess.run(clone_cmd, capture_output=True, text=True)
     if clone.returncode != 0:
         return {"id": task["id"], "status": "clone-failed", "error": clone.stderr[-500:]}
+
+    if PIN_SHA:
+        co = subprocess.run(
+            ["git", "-C", str(ws), "checkout", "-q", PIN_SHA],
+            capture_output=True, text=True,
+        )
+        if co.returncode != 0:
+            return {"id": task["id"], "status": "pin-failed", "error": co.stderr[-500:]}
 
     t0 = time.time()
     print(f"=== [{task['id']}] submitting {task['kind']} (gate=`{VERIFY_CMD}`, open_pr)", flush=True)
