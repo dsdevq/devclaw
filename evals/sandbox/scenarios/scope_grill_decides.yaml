@@ -1,0 +1,23 @@
+id: scope_grill_decides
+description: >
+  Grill methodology says "decide-instead-of-ask" when a question has an
+  obvious best-practice answer. This scenario tests the path where the chef's
+  first response is `done` — no questions, fold defaults into the spec.
+
+mode: grill
+
+cognition:
+  stub_responses:
+    grill: |
+      {"action": "done", "spec": "# obvious-cli — spec\n## Goal\nA hello-world CLI.\n## Scope\nin: print hello\nout: anything else.\n## Stack & arch\nPython single-file.\n## Milestones\nM1 print-and-ship.\n## Acceptance\nRunning the script prints 'hello' to stdout.\n## Constraints\nNo deps.\n## Open risks\nNone."}
+
+setup:
+  grill:
+    idea: A hello-world CLI in Python.
+    user_answers: []
+
+expect:
+  grill_questions_eq: 0
+  grill_final_action: done
+  cognition_by_role_eq:
+    grill: 1

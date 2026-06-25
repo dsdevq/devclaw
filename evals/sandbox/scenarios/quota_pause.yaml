@@ -1,0 +1,37 @@
+id: quota_pause
+description: >
+  Simulate a Pro/Max usage limit on the goal planner: the cognition call raises
+  ``PlannerError("You're out of extra usage")`` (the exact wording the live
+  Claude CLI returns on a quota hit). The chef's ``_maybe_pause`` must classify
+  it as QUOTA, set the global engine pause, and the tick must return
+  RATE_LIMITED — zero subsequent cognition until the pause expires.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      Stub.
+      ## Gap to good
+      Nothing.
+      ## What good looks like
+      - X
+    goal_planner: "RAISE:You're out of extra usage · resets 10pm (UTC)"
+
+setup:
+  goal:
+    objective: Ship a thing.
+    done_when: Thing exists.
+    backlog: ["the thing"]
+    cadence: 1d
+    open_pr: false
+
+# After investigation settles, the planner tries to plan + raises the
+# quota error. The next tick sees the pause and stays RATE_LIMITED.
+ticks: 4
+
+expect:
+  outcomes_contain: [rate_limited]
+  cognition_by_role_min:
+    goal_planner: 1

@@ -1,0 +1,28 @@
+id: scope_grill_happy
+description: >
+  The OpenClaw waiter's flow when the customer gives a vague idea: scope_grill
+  asks one clarifying question, gets an answer, and finalizes the spec on the
+  second turn. The runner feeds the canned user answer as if Denys had replied
+  in Telegram.
+
+mode: grill
+
+cognition:
+  stub_responses:
+    grill:
+      - |
+        {"action": "ask", "question": "Should the CLI handle YAML in addition to JSON?", "recommended": "Yes — both directions."}
+      - |
+        {"action": "done", "spec": "# tiny-cli — spec\n## Goal\nA CLI that converts between JSON and YAML.\n## Scope\nin: bidirectional convert\nout: schema validation\n## Stack & arch\nPython + PyYAML.\n## Milestones\nM1 scaffold, M2 convert.\n## Acceptance\nIdempotent JSON↔YAML roundtrip.\n## Constraints\nNo network, single binary.\n## Open risks\nLarge files."}
+
+setup:
+  grill:
+    idea: A tiny CLI that converts between JSON and YAML.
+    user_answers:
+      - "Yes — both directions, idempotent roundtrip."
+
+expect:
+  grill_questions_eq: 1
+  grill_final_action: done
+  cognition_by_role_eq:
+    grill: 2

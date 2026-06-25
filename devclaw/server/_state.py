@@ -45,7 +45,7 @@ _engine = os.environ.get("DEVCLAW_ENGINE", "")
 if _engine == "stub":
     # Harness-validation mode: deterministic stub engine + cognition, no docker,
     # no claude. Proves the plumbing around the agent; never use in production.
-    from ..stub_engine import stub_engine, stub_goal_planner
+    from ..engine.stub import stub_engine, stub_goal_planner
 
     sys.stderr.write(
         "⚠ DEVCLAW_ENGINE=stub — deterministic stub engine + cognition "
@@ -54,7 +54,7 @@ if _engine == "stub":
     queue = TaskQueue(store, planner=stub_goal_planner, runner=stub_engine)
 elif _engine == "host":
     # Real cognition + real OpenHands, but run on the HOST with NO sandbox.
-    from ..host_runner import run_host
+    from ..engine.host import run_host
 
     sys.stderr.write(
         "⚠ DEVCLAW_ENGINE=host — OpenHands runs on the HOST with NO sandbox "
@@ -65,7 +65,7 @@ elif _engine == "claude_sdk":
     # Spike alternative: claude --print directly inside the sandcastle container,
     # no OpenHands SDK. Same sandbox posture (auth allowlist, --rm, workspace
     # mount). Decide-after-data whether to make it the default.
-    from ..claude_sdk_engine import run_claude_sdk
+    from ..engine.claude_sdk import run_claude_sdk
 
     sys.stderr.write(
         "⚠ DEVCLAW_ENGINE=claude_sdk — claude --print engine in sandcastle "

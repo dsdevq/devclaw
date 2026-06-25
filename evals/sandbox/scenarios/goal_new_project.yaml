@@ -1,0 +1,44 @@
+id: goal_new_project
+description: >
+  Goal against a fresh-from-scratch project — same lifecycle as
+  goal_existing_project but the workspace is empty (no API code at all). The
+  evaluator's discovery brief reflects "nothing exists yet"; the planner picks
+  an explicit scaffold action first.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      Empty repo — only a README.
+      ## Gap to good
+      No service at all yet.
+      ## What good looks like
+      - A minimal FastAPI app with one /health route
+      - A test exercising the route
+    goal_planner: |
+      {"decision": "act", "note": "scaffold a tiny FastAPI app with /health",
+       "actions": [{"tool": "implement_feature", "goal": "scaffold a tiny FastAPI app exposing GET /health", "open_pr": false}]}
+
+setup:
+  goal:
+    objective: Build a tiny service from scratch with a /health endpoint.
+    done_when: 'GET /health returns 200 with {"ok": true}.'
+    backlog:
+      - Scaffold a tiny FastAPI app.
+      - Add a GET /health endpoint.
+    cadence: 1d
+    open_pr: false
+
+ticks: 4
+
+expect:
+  final_lifecycle: executing
+  outcomes_contain: [dispatched]
+  cognition_by_role_min:
+    evaluator: 1
+    goal_planner: 1
+  counts_min:
+    dispatches: 2     # discovery + scaffold
+    deliveries: 1

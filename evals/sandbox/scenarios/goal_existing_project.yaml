@@ -1,0 +1,46 @@
+id: goal_existing_project
+description: >
+  Full goal lifecycle against a repo that already exists in the sandbox
+  workspace. The chef runs discovery (review_repository dispatch), synthesizes
+  the brief (one evaluator call), then plans + dispatches a single
+  implement_feature action. The stub engine completes it; the planner sees the
+  delivered evidence and re-plans. Three ticks is enough to see investigation →
+  executing → first delivery.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      The repo has a README.md but no API code yet.
+      ## Gap to good
+      No /health endpoint exists; nothing to verify against.
+      ## What good looks like
+      - A GET /health that returns 200 with {"ok": true}
+      - A unit test covering the route
+    goal_planner: |
+      {"decision": "act", "note": "ship /health endpoint",
+       "actions": [{"tool": "implement_feature", "goal": "add GET /health returning 200 with {\"ok\": true}", "open_pr": false}]}
+
+setup:
+  goal:
+    objective: Add a /health endpoint to the example service.
+    done_when: 'GET /health returns 200 with {"ok": true} and a test covers it.'
+    backlog:
+      - 'Add a GET /health route that returns 200 with {"ok": true}.'
+      - Add a unit test asserting the status and body.
+    cadence: 1d
+    open_pr: false
+
+ticks: 4
+
+expect:
+  final_lifecycle: executing
+  outcomes_contain: [dispatched]
+  cognition_by_role_min:
+    evaluator: 1
+    goal_planner: 1
+  counts_min:
+    dispatches: 2     # one discovery + one implement_feature
+    deliveries: 1

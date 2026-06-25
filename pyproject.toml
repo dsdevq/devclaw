@@ -25,3 +25,8 @@ packages = ["devclaw"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# The stub engine writes placeholder test_*.py into per-run sandbox workspaces
+# under evals/runs/; if pytest auto-discovers those it tries to import them
+# (and fails on bare filenames not part of the suite). Pin collection to tests/.
+testpaths = ["tests"]
+norecursedirs = ["evals/runs", ".venv", "build", "*.egg-info"]
