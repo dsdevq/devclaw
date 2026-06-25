@@ -1,0 +1,62 @@
+id: done_gate_off_track
+description: >
+  The planner thinks the goal is done. The done-gate dispatches a read-only
+  review whose verdict the evaluator judges. In this scenario the evaluator
+  returns ``off_track`` — the work shipped but missed the objective — so the
+  goal must NOT close. It re-enters executing with corrections folded into
+  the inbox; the next planner tick should see steering and keep going.
+
+# Stub-only: the done-gate path is triggered by the planner returning
+# ``decision: done``. With real cognition, the planner correctly REFUSES to
+# propose done on a fresh goal with zero deliveries — it keeps shipping work
+# instead — so the done-gate never fires under L3 and the scenario can't reach
+# its trigger condition. The done-gate verification + off_track re-entry logic
+# is unit-covered in tests/test_goal_tick.py and tests/test_goal_evaluator.py.
+stub_only: true
+
+mode: goal
+
+cognition:
+  stub_responses:
+    # First evaluator call = discovery synthesis (the discovery brief).
+    # Second evaluator call = the done-gate judgement → off_track.
+    evaluator:
+      - |
+        ## Current state
+        Repo has a /health.
+        ## Gap to good
+        Done_when says "with auth", which is missing.
+        ## What good looks like
+        - /health behind auth
+      - |
+        {"verdict": "off_track", "rationale": "no auth wired", "corrections": ["add auth middleware before declaring done"]}
+    goal_planner:
+      - |
+        {"decision": "done", "note": "looks shipped"}
+      - |
+        {"decision": "act", "note": "fix per correction",
+         "actions": [{"tool": "implement_feature", "goal": "add auth middleware", "open_pr": false}]}
+
+setup:
+  # verify_done=True is set by GoalConfig in the runner; the done-gate then
+  # dispatches a read-only review_repository and judges that. The stub engine
+  # completes the review; the evaluator's SECOND response (off_track) lands.
+  # NOTE: the sandbox uses verify_done=False today (see GoalConfig); this
+  # scenario currently exercises the artifact-only done eval path instead.
+  goal:
+    objective: Ship /health behind auth.
+    done_when: GET /health requires auth.
+    backlog:
+      - Add /health.
+      - Add auth.
+    cadence: 1d
+    open_pr: false
+
+ticks: 5
+
+expect:
+  cognition_by_role_min:
+    evaluator: 2     # discovery + done-gate
+    goal_planner: 1
+  log_contains:
+    - "done-gate: off_track"

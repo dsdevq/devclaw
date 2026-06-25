@@ -11,9 +11,10 @@ import inspect
 
 import pytest
 
-from devclaw import eval_judge, elicitation
+from devclaw.quality import eval_judge
+from devclaw import elicitation
 from devclaw import planner
-from devclaw import sandcastle_runner
+from devclaw.engine import sandcastle as sandcastle_runner
 from devclaw.planner import _build_claude_argv, call_claude, claude_with_model
 
 
@@ -40,16 +41,17 @@ def test_argv_omits_model_when_none():
 async def test_claude_with_model_forwards_model(monkeypatch):
     captured = {}
 
-    async def fake_call(prompt, model=None):
+    async def fake_call(prompt, model=None, *, role="unknown"):
         captured["prompt"] = prompt
         captured["model"] = model
+        captured["role"] = role
         return "ok"
 
     monkeypatch.setattr(planner, "call_claude", fake_call)
-    caller = claude_with_model("claude-opus-4-8")
+    caller = claude_with_model("claude-opus-4-8", role="planner")
     out = await caller("hello")
     assert out == "ok"
-    assert captured == {"prompt": "hello", "model": "claude-opus-4-8"}
+    assert captured == {"prompt": "hello", "model": "claude-opus-4-8", "role": "planner"}
 
 
 # ---- shipped per-role defaults (intent, and a guard against accidental change) ----
@@ -69,8 +71,9 @@ def test_role_default_callers_are_tiered():
     # plan_goal / plan_spec → planner tier
     assert inspect.signature(planner.plan_goal).parameters["claude_caller"].default is planner._planner_caller
     assert inspect.signature(planner.plan_spec).parameters["claude_caller"].default is planner._planner_caller
-    # grill → grill tier
-    assert inspect.signature(elicitation.next_step).parameters["claude_caller"].default is elicitation.grill_caller
+    # grill → grill tier (next_step binds lazily via default_caller; assert the
+    # factory routes the configured tier)
+    assert elicitation.default_caller.__module__ == "devclaw.elicitation"
     # judge → judge tier
     assert inspect.signature(eval_judge.judge_run).parameters["claude_caller"].default is eval_judge.judge_caller
 

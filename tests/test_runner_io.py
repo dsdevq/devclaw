@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from devclaw.runner_io import STREAM_LINE_LIMIT, consume_runner_output
+from devclaw.engine.runner_io import STREAM_LINE_LIMIT, consume_runner_output
 
 
 class _FakeProc:

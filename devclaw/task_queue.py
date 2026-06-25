@@ -45,8 +45,8 @@ from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
-from .review_gate import format_feedback, review_diff
-from .sandcastle_runner import run_sandcastle
+from .quality import format_feedback, review_diff
+from .engine.sandcastle import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
@@ -145,6 +145,26 @@ def _integrity_failure(diff: str) -> Optional[str]:
 
 
 class TaskQueue:
+    @staticmethod
+    def _derive_engine_kind(runner: "RunnerFn") -> str:
+        """Map a runner function to a short label for the trace ("stub" /
+        "sandcastle" / "host" / "claude_sdk"). Falls back to the function's
+        qualified name so unknown custom runners are still identifiable."""
+        qualname = getattr(runner, "__qualname__", "") or getattr(runner, "__name__", "")
+        if "run_sandcastle" in qualname:
+            return "sandcastle"
+        if "run_host" in qualname:
+            return "host"
+        if "run_claude_sdk" in qualname:
+            return "claude_sdk"
+        if "stub_engine" in qualname or qualname.startswith("stub"):
+            return "stub"
+        return qualname or "unknown"
+
+    @property
+    def engine_kind(self) -> str:
+        return self._engine_kind
+
     def __init__(
         self,
         store: StateStore,
@@ -157,6 +177,10 @@ class TaskQueue:
         # Injectable for tests — default to the real planner / sandcastle runner.
         self._planner: PlannerFn = planner or (lambda g, w: plan_goal(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
+        # A short engine-kind label for trace events ("stub" / "sandcastle" /
+        # "host" / "claude_sdk") — derived from the runner's qualified name so
+        # silently mis-wired sandboxes can be spotted in the timeline.
+        self._engine_kind: str = self._derive_engine_kind(self._runner)
         # The pre-PR review gate's cognition (diff → verdict). Injectable so tests
         # stub the Claude call; defaults to the real review_diff (host-side claude).
         self._reviewer: Callable[..., Awaitable[dict]] = reviewer or review_diff

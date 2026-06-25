@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_models import GoalStatus, InFlight
-from devclaw.goal_service import GoalConfig, GoalService
-from devclaw.goal_store import GoalStore
-from devclaw.goal_tick import Outcome, tick_goal
+from devclaw.goal.models import GoalStatus, InFlight
+from devclaw.goal.service import GoalConfig, GoalService
+from devclaw.goal.store import GoalStore
+from devclaw.goal.tick import Outcome, tick_goal
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
 from tests.goal_fakes import Clock, FakeClaude, FakeEngine, RecordingNotifier, fake_prepare, seed_goal

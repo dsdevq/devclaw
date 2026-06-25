@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 
-from devclaw.review_gate import review_diff
+from devclaw.quality import review_diff
 
 REPO = "dsdevq/todo-fullstack-demo"
 

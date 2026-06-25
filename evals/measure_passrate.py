@@ -19,6 +19,7 @@ Run (env MUST be set before import — the runner reads the image/model at impor
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -31,7 +32,7 @@ from pathlib import Path
 # sandcastle_runner reads them at module import time.
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
-from devclaw.sandcastle_runner import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
+from devclaw.engine.sandcastle import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
 
 REPO_URL = os.environ.get("MEASURE_REPO_URL", "https://github.com/dsdevq/lifekit-dashboard.git")
 VERIFY_CMD = os.environ.get("MEASURE_VERIFY_CMD", "cd backend && dotnet test")
@@ -145,12 +146,26 @@ async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", help="Comma-separated subset of basket IDs to run (default: all)")
+    args = parser.parse_args()
+    basket = BASKET
+    if args.only:
+        wanted = {x.strip() for x in args.only.split(",") if x.strip()}
+        basket = [t for t in BASKET if t["id"] in wanted]
+        unknown = wanted - {t["id"] for t in BASKET}
+        if unknown:
+            raise SystemExit(f"unknown basket IDs: {sorted(unknown)}")
+        if not basket:
+            raise SystemExit("--only matched no basket tasks")
+
     print(f"image={SANDBOX_IMAGE} exec_model={EXEC_MODEL} repo={REPO_URL}", flush=True)
+    print(f"running {len(basket)} task(s): {[t['id'] for t in basket]}", flush=True)
     store = StateStore(str(WORKROOT / "measure.db"))
     queue = TaskQueue(store, runner=run_sandcastle)
 
     records = []
-    for task in BASKET:
+    for task in basket:
         records.append(await _run_one(queue, store, task))
 
     done = [r for r in records if r["status"] == "done"]

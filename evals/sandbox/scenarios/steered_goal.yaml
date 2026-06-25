@@ -1,0 +1,42 @@
+id: steered_goal
+description: >
+  A running goal that the owner steers via `steer_goal`. The next planner tick
+  must see the steering in its prompt (the planner's `recent steering` block)
+  and the inbox cursor must advance. We check that the planner's prompt at the
+  steered tick contains the steering text via the log.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      Bare API skeleton.
+      ## Gap to good
+      No /health yet.
+      ## What good looks like
+      - GET /health
+    goal_planner: |
+      {"decision": "act", "note": "ship next",
+       "actions": [{"tool": "implement_feature", "goal": "add GET /health", "open_pr": false}]}
+
+setup:
+  goal:
+    objective: Ship a /health endpoint.
+    done_when: GET /health returns 200.
+    backlog:
+      - Add /health.
+    cadence: 1d
+    open_pr: false
+
+ticks: 3
+steering:
+  - before_tick: 3
+    message: "pause /health work, fix the failing CI first"
+
+expect:
+  outcomes_contain: [dispatched]
+  log_contains:
+    - "steered: pause /health work"
+  cognition_by_role_min:
+    goal_planner: 1

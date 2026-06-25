@@ -1,0 +1,31 @@
+id: scope_grill_happy
+description: >
+  The OpenClaw waiter's flow when the customer gives a vague idea: scope_grill
+  asks one clarifying question, gets an answer, and finalizes the spec on the
+  second turn. The runner feeds the canned user answer as if Denys had replied
+  in Telegram.
+
+mode: grill
+
+cognition:
+  stub_responses:
+    grill:
+      - |
+        {"action": "ask", "question": "Should the CLI handle YAML in addition to JSON?", "recommended": "Yes — both directions."}
+      - |
+        {"action": "done", "spec": "# tiny-cli — spec\n## Goal\nA CLI that converts between JSON and YAML.\n## Scope\nin: bidirectional convert\nout: schema validation\n## Stack & arch\nPython + PyYAML.\n## Milestones\nM1 scaffold, M2 convert.\n## Acceptance\nIdempotent JSON↔YAML roundtrip.\n## Constraints\nNo network, single binary.\n## Open risks\nLarge files."}
+
+setup:
+  grill:
+    idea: A tiny CLI that converts between JSON and YAML.
+    user_answers:
+      - "Yes — both directions, idempotent roundtrip."
+
+expect:
+  # Loosened from `eq: 1` after L3 calibration — real cognition's question count
+  # is judgment-dependent (a JSON↔YAML CLI has ~1 ask worth its weight, but
+  # 0 or 2 are defensible too). The contract under test is that the loop
+  # works (ask → answer → done) and the count stays sane, not an exact number.
+  grill_questions_min: 0
+  grill_questions_max: 2
+  grill_final_action: done

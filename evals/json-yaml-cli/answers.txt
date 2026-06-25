@@ -1,3 +1,0 @@
-Python 3, standard library plus PyYAML only. No other dependencies.
-Just two subcommands: to-yaml and to-json. Each takes one file-path argument and prints the converted document to stdout. No config, no streaming, no extra formats, no pretty-print flags.
-Runnable as `python -m jyq` — a single `jyq/` package with `__main__.py`. Keep it minimal; no tests needed. Errors (bad path, malformed input) should print a message to stderr and exit non-zero.

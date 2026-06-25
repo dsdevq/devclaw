@@ -1,11 +1,10 @@
 """Stub engine + cognition tests (harness-validation mode)."""
 
-import json
 import tempfile
 from pathlib import Path
 
 from devclaw.engine import EngineRequest
-from devclaw.stub_engine import stub_engine, stub_grill, stub_goal_planner, stub_spec_planner
+from devclaw.engine.stub import stub_engine, stub_goal_planner
 
 
 async def test_stub_engine_builds_jyq_for_golden_goal():
@@ -29,17 +28,6 @@ async def test_stub_engine_placeholder_for_unknown_goal():
     assert not (Path(ws) / "jyq").exists()
 
 
-async def test_stub_grill_asks_then_finalizes():
-    # first turn: no transcript marker → asks
-    first = json.loads(await stub_grill("PROJECT IDEA:\nbuild jyq\n\nDecide:"))
-    assert first["action"] == "ask"
-    # second turn: transcript present → finalizes a spec
-    second = json.loads(await stub_grill("PROJECT IDEA:\nx\n\nINTERVIEW SO FAR:\n1. Q ...\n"))
-    assert second["action"] == "done" and "jyq" in second["spec"]
-
-
-async def test_stub_planners_return_dags():
-    spec_tasks = await stub_spec_planner("# spec", "/ws")
-    assert len(spec_tasks) == 1 and spec_tasks[0].milestone
-    goal_tasks = await stub_goal_planner("fix the thing", "/ws")
-    assert goal_tasks[0].goal == "fix the thing"
+async def test_stub_goal_planner_returns_one_task():
+    tasks = await stub_goal_planner("fix the thing", "/ws")
+    assert tasks[0].goal == "fix the thing"

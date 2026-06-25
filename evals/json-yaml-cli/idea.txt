@@ -1,8 +1,0 @@
-Build `jyq`, a small Python command-line tool that converts between JSON and YAML.
-
-Hard interface contract (the eval checks exactly this):
-- It must run as `python3 -m jyq` from the project root.
-- `python3 -m jyq to-yaml <path-to.json>` reads the JSON file and prints YAML to stdout.
-- `python3 -m jyq to-json <path-to.yaml>` reads the YAML file and prints JSON to stdout.
-- Use the standard library plus PyYAML only. No other dependencies.
-- Keep it minimal: a single `jyq/` package with an `__main__.py`. No tests required from you — just a working CLI that round-trips JSON → YAML → JSON without data loss.

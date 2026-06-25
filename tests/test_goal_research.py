@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_models import Goal
-from devclaw.goal_research import GoalResearchError, discovery_brief
+from devclaw.goal.models import Goal
+from devclaw.goal.research import GoalResearchError, discovery_brief
 
 
 def _goal(**kw) -> Goal:

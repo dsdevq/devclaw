@@ -1,0 +1,36 @@
+id: stuck_no_progress
+description: >
+  An executing goal that has gone too long without a delivery fires the
+  no-progress watchdog ONCE at OWNER altitude. The runner advances the goal's
+  ``last_progress_at`` backwards by more than ``DEVCLAW_GOAL_NO_PROGRESS_S``
+  (default 6h) and re-ticks; the next tick should emit a "no progress in ~Nh"
+  owner notification without consuming cognition.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      Stub.
+      ## Gap to good
+      Nothing shipped.
+      ## What good looks like
+      - Progress
+    goal_planner: |
+      {"decision": "sleep", "note": "no work to do"}
+
+setup:
+  goal:
+    objective: Ship a backlog item.
+    done_when: Item delivered.
+    backlog: ["thing"]
+    cadence: 1d
+    open_pr: false
+
+ticks: 2                # tick 1 = dispatch discovery, tick 2 = resolve → executing
+advance_clock_s: 25200   # 7 hours — > NO_PROGRESS_S (default 21600); fires on the post-advance tick
+
+expect:
+  notify_owner_contains:
+    - "no progress in"

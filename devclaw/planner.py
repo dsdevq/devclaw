@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from .loom import trace as _trace
 from .state_store import TaskKind
 
 PLANNER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_PLANNER_TIMEOUT_MS", "90000"))
@@ -28,8 +29,8 @@ MAX_TASKS_PER_PLAN = 20
 # (Opus) burns the Pro/Max quota fast and is slow; tier each role to the lightest
 # model that does its job. These are `claude --model` values (an alias like
 # 'sonnet'/'opus', or a full id). Planning is rare + high-leverage → Opus; the
-# grill is conversational → Sonnet (set in elicitation.py); the eval judge is
-# bounded classification → Haiku (set in eval_judge.py). The heavy coding path
+# scope grill is conversational → Sonnet (set in elicitation.py); the eval judge
+# is bounded classification → Haiku (set in eval_judge.py). The heavy coding path
 # (OpenHands) is tiered separately via DEVCLAW_EXEC_MODEL. An empty value →
 # the CLI's account default (no --model flag passed).
 PLANNER_MODEL = os.environ.get("DEVCLAW_PLANNER_MODEL", "opus") or None
@@ -55,43 +56,15 @@ class PlannerError(Exception):
         self.raw = raw
 
 
-SYSTEM_PROMPT = """You are DevClaw's planner. Decompose a single coding goal
-into a directed acyclic graph (DAG) of smaller tasks that can each be executed
-by an autonomous coding agent in one run.
-
-Rules:
-- Each task is bounded: an agent should finish it in one session.
-- Prefer fewer, larger tasks over many tiny ones. Aim for 1-6 tasks. Use more
-  only when the goal is genuinely large.
-- If the goal is small (e.g. "fix a typo", "add a config flag"), return ONE task.
-- Use "depends_on" for tasks that genuinely cannot start until another finishes
-  (e.g. "frontend uses the API contract from task 1"). Don't invent fake deps.
-- Independent tasks should have empty depends_on so they can run in parallel.
-- Task "kind" must be one of: implement_feature, fix_bug, review_repository.
-  Default to implement_feature unless the goal explicitly says fix a bug or
-  review code without changing it.
-
-Respond with STRICT JSON ONLY - no prose, no markdown fences. Schema:
-
-{
-  "tasks": [
-    {
-      "key": "<short stable id, e.g. 't1', 'scaffold'>",
-      "goal": "<concrete instruction for the agent>",
-      "kind": "implement_feature" | "fix_bug" | "review_repository",
-      "depends_on": ["<key of another task in this plan>", ...]
-    }
-  ]
-}"""
-
-
 def build_planner_prompt(goal: str, workspace_dir: str) -> str:
-    return f"""{SYSTEM_PROMPT}
+    from .prompts import load_prompt
 
-Workspace: {workspace_dir}
-Goal: {goal}
-
-Return the JSON now."""
+    return (
+        f"{load_prompt('plan-goal')}\n\n"
+        f"Workspace: {workspace_dir}\n"
+        f"Goal: {goal}\n\n"
+        "Return the JSON now."
+    )
 
 
 def extract_json(text: str) -> str:
@@ -207,24 +180,38 @@ def _build_claude_argv(prompt: str, model: str | None) -> list[str]:
     return argv
 
 
-async def call_claude(prompt: str, model: str | None = None) -> str:
+async def call_claude(prompt: str, model: str | None = None, *, role: str = "unknown") -> str:
     """Spawn ``claude --print`` with the prompt and return its stdout. ``model``
-    picks the tier (alias or full id); None → account default. Injected into the
-    planners/grill/judge so tests can stub the subprocess; each role binds its
-    own model via :func:`claude_with_model`."""
+    picks the tier (alias or full id); None → account default. ``role`` labels
+    the cognition site (planner / evaluator / grill / judge / summary / review /
+    research) for the trace recorder. Injected into cognition roles so tests can
+    stub the subprocess; each role binds its own model+role via
+    :func:`claude_with_model`."""
     env = dict(os.environ)
     # Belt + suspenders: never let an API key override the OAuth session.
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
 
+    argv = _build_claude_argv(prompt, model)
+    argv_head = f"{CLAUDE_BIN} --print" + (f" --model {model}" if model else "")
+    started = _trace.now_ms()
     try:
         proc = await asyncio.create_subprocess_exec(
-            *_build_claude_argv(prompt, model),
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
     except OSError as exc:
+        latency = _trace.now_ms() - started
+        _trace.record_cognition(
+            role=role, model=model or "", prompt=prompt, response="",
+            latency_ms=latency, error=f"spawn failed: {exc}",
+        )
+        _trace.record_subprocess(
+            cmd="claude --print", argv_head=argv_head, latency_ms=latency,
+            exit_code=None, error=f"spawn failed: {exc}",
+        )
         raise PlannerError(f"Failed to spawn {CLAUDE_BIN}: {exc}") from exc
 
     try:
@@ -234,35 +221,56 @@ async def call_claude(prompt: str, model: str | None = None) -> str:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+        latency = _trace.now_ms() - started
+        _trace.record_cognition(
+            role=role, model=model or "", prompt=prompt, response="",
+            latency_ms=latency, error="timeout",
+        )
+        _trace.record_subprocess(
+            cmd="claude --print", argv_head=argv_head, latency_ms=latency,
+            exit_code=None, error="timeout",
+        )
         raise PlannerError(f"claude --print timed out after {PLANNER_TIMEOUT_MS}ms")
 
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace")
+    latency = _trace.now_ms() - started
+    _trace.record_subprocess(
+        cmd="claude --print", argv_head=argv_head, latency_ms=latency,
+        exit_code=proc.returncode, error=(stderr[:200] if proc.returncode != 0 else ""),
+    )
     if proc.returncode != 0:
         # Include a stdout tail in the message: a Claude usage-limit ("You're out
         # of extra usage …") comes back on STDOUT with an EMPTY stderr, so a
         # stderr-only error is unclassifiable and the quota guard can't pause on it.
+        _trace.record_cognition(
+            role=role, model=model or "", prompt=prompt, response=stdout,
+            latency_ms=latency, error=f"exit={proc.returncode}; stderr={stderr[:200]}",
+        )
         raise PlannerError(
             f"claude --print exited {proc.returncode}. stderr:\n{stderr}\n"
             f"stdout:\n{stdout[-500:]}",
             stdout,
         )
+    _trace.record_cognition(
+        role=role, model=model or "", prompt=prompt, response=stdout, latency_ms=latency,
+    )
     return stdout
 
 
-def claude_with_model(model: str | None) -> Callable[[str], Awaitable[str]]:
-    """A one-argument ``claude`` caller bound to a model — the default cognition
-    caller for a role, so each role shells out at its own tier while keeping the
-    1-arg ``claude_caller`` seam the planners/grill/judge inject for tests."""
+def claude_with_model(model: str | None, *, role: str = "unknown") -> Callable[[str], Awaitable[str]]:
+    """A one-argument cognition caller bound to a model + role label. Routes
+    through the configured :class:`~devclaw.cognition.Cognition` (claude by
+    default; ``DEVCLAW_COGNITION=stub`` for offline harnesses). Backend-swap
+    happens at that seam — this factory keeps its historical name + signature
+    so every caller (planner, evaluator, grill, judge, …) stays untouched."""
+    from .cognition import bind
 
-    async def _caller(prompt: str) -> str:
-        return await call_claude(prompt, model=model)
-
-    return _caller
+    return bind(model, role=role)
 
 
 #: planning (plan_goal + plan_spec) runs at the planner tier
-_planner_caller = claude_with_model(PLANNER_MODEL)
+_planner_caller = claude_with_model(PLANNER_MODEL, role="planner")
 
 
 def _parse_plan(raw: str) -> list[PlannedTask]:
@@ -287,56 +295,19 @@ async def plan_goal(
 
 # ===== plan-from-spec ========================================================
 # The build-a-project-from-scratch path: decompose an *approved spec* (the
-# shared understanding produced by the elicitation grill) into a milestone-
-# ordered DAG. Richer than plan_goal — the model is grounded in the spec's
-# milestones, acceptance criteria, scope, and constraints.
-
-SPEC_SYSTEM_PROMPT = """You are DevClaw's planner. You are given an APPROVED
-project spec — a shared understanding of what to build and how. Decompose it
-into a directed acyclic graph (DAG) of tasks that, executed in dependency order,
-build the project to the spec.
-
-Rules:
-- Walk the spec's milestones in order. Each task serves exactly one milestone;
-  set "milestone" to that milestone's name.
-- Each task is bounded: an autonomous coding agent finishes it in one run. Each
-  task's "goal" is a concrete, self-contained instruction grounded in the spec
-  (reference the relevant acceptance criteria so the work is checkable).
-- Respect SCOPE: do not add tasks for anything the spec lists as out-of-scope.
-- Respect CONSTRAINTS (stack, deps, hosting, non-negotiables) from the spec.
-- Use "depends_on" only for genuine ordering (a task needs another's output —
-  e.g. scaffolding before features, an API contract before its frontend). Tasks
-  in the same milestone with no real dependency should run in parallel (empty
-  depends_on).
-- Prefer fewer, larger tasks over many tiny ones. A typical milestone is 1-4
-  tasks. Don't pad.
-- Task "kind" must be one of: implement_feature, fix_bug, review_repository.
-  Default to implement_feature.
-
-Respond with STRICT JSON ONLY - no prose, no markdown fences. Schema:
-
-{
-  "tasks": [
-    {
-      "key": "<short stable id, e.g. 'm1-scaffold'>",
-      "goal": "<concrete instruction for the agent, grounded in the spec>",
-      "kind": "implement_feature" | "fix_bug" | "review_repository",
-      "milestone": "<the milestone name this task serves>",
-      "depends_on": ["<key of another task in this plan>", ...]
-    }
-  ]
-}"""
-
+# shared scope contract handed in by the OpenClaw waiter after scope_grill) into
+# a milestone-ordered DAG. Richer than plan_goal — the model is grounded in the
+# spec's milestones, acceptance criteria, scope, and constraints.
 
 def build_spec_planner_prompt(spec: str, workspace_dir: str) -> str:
-    return f"""{SPEC_SYSTEM_PROMPT}
+    from .prompts import load_prompt
 
-Workspace: {workspace_dir}
-
-APPROVED SPEC:
-{spec}
-
-Return the JSON now."""
+    return (
+        f"{load_prompt('plan-spec')}\n\n"
+        f"Workspace: {workspace_dir}\n\n"
+        f"APPROVED SPEC:\n{spec}\n\n"
+        "Return the JSON now."
+    )
 
 
 async def plan_spec(

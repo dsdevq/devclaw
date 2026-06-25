@@ -11,10 +11,11 @@ Driven with stub runners + a stub reviewer (no docker, no claude).
 
 import pytest
 
-from devclaw import review_gate, task_queue
+from devclaw import task_queue
+from devclaw import quality as review_gate
 from devclaw.engine import EngineRequest
 from devclaw.planner import PlannerError
-from devclaw.review_gate import (
+from devclaw.quality import (
     build_review_prompt,
     format_feedback,
     validate_review,

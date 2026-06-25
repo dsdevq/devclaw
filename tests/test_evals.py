@@ -1,6 +1,6 @@
 """Eval scoring tests — the deterministic core the live harness relies on."""
 
-from devclaw.evals import aggregate, next_answer, score
+from devclaw.quality.evals import aggregate, score
 
 
 def _task(status, milestone=None):
@@ -59,11 +59,3 @@ def test_aggregate_pass_rate_and_completion():
 
 def test_aggregate_empty():
     assert aggregate([])["acceptance_pass_rate"] == 0.0
-
-
-def test_next_answer_scripted_then_default():
-    scripted = ["use python", "two subcommands"]
-    assert next_answer(scripted, 0) == "use python"
-    assert next_answer(scripted, 1) == "two subcommands"
-    assert next_answer(scripted, 2) == "Use your recommended answer."
-    assert next_answer([], 0) == "Use your recommended answer."

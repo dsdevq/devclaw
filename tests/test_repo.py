@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw import repo
+from devclaw.delivery import repo
 
 
 def test_slug_repo_name_makes_valid_names():

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_merge import merge_pr
+from devclaw.goal.merge import merge_pr
 
 
 @pytest.mark.asyncio

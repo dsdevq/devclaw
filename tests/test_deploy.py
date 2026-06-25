@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw import deploy
+from devclaw.delivery import deploy
 
 
 def test_deploy_name_slugifies():

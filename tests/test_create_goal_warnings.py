@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_service import GoalConfig, GoalService
+from devclaw.goal.service import GoalConfig, GoalService
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
 
@@ -76,3 +76,18 @@ def test_common_bare_tools_all_warn(svc, cmd):
     )
     assert "warnings" in result, f"expected warning for verify_cmd={cmd!r}"
     assert cmd in result["warnings"][0]
+
+
+def test_spec_param_is_persisted(svc):
+    """When the OpenClaw waiter has grilled scope before filing the order, it
+    passes the finalized spec via create_goal — the service persists it so the
+    evaluator can judge done against the shared contract."""
+    spec_text = "# my-app — spec\n## Goal\nA tiny CLI.\n## Scope\nin: foo\nout: bar"
+    svc.create_goal("g-spec", objective="ship cli", workspace_dir="/ws", spec=spec_text)
+    persisted = svc._goal_store.read_spec("g-spec")
+    assert "Goal" in persisted and "A tiny CLI." in persisted
+
+
+def test_no_spec_param_writes_nothing(svc):
+    svc.create_goal("g-nospec", objective="ship cli", workspace_dir="/ws")
+    assert svc._goal_store.read_spec("g-nospec") == ""

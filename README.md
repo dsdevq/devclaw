@@ -1,43 +1,42 @@
 # devclaw
 
-> **DevClaw is the software-development project manager: it owns durable goals, drives them to verified PRs, and evaluates whether the work is going the right direction — autonomously, with no API key.**
+> **DevClaw is the chef. The waiter — an OpenClaw agent — takes orders; devclaw cooks.**
 
-DevClaw sits in front of [OpenHands](https://github.com/All-Hands-AI/OpenHands) (the engineer) as the PM. Two altitudes:
-
-- **Task / program** (one-shot): hand it a bounded goal over MCP (`implement_feature`, `fix_bug`, `review_repository`) or a larger one to decompose (`start_program`); it plans, runs OpenHands inside a per-task ephemeral Docker sandbox, gate-verifies, and delivers a reviewable PR.
-- **Goal** (durable): hand it a standing objective (`create_goal`); it persists, and across a heartbeat it plans the single next action, dispatches it into the task layer, records what actually shipped, and **evaluates direction** — only closing the goal when a grounded review confirms `done_when` is met. You steer it any time (`steer_goal`) and ask what's going on (`get_goal` / `evaluate_goal`). *(This is the folded-in goalclaw — one service to talk to for software.)*
+DevClaw owns the **craft of software development as a service**: durable goals, planning, decomposition, sandbox execution (via OpenHands), pre-PR review, gate verification, durable Tailscale deploys, and grounded direction evaluation. It sits behind MCP and is called by an **OpenClaw waiter agent** that translates Denys's chat into structured tool calls — devclaw doesn't talk to the user, it cooks.
 
 Cognition is always `claude` over a Pro/Max OAuth session — **no `ANTHROPIC_API_KEY`, no metered billing** for autonomous runs.
 
-It is **not** a chatbot and **not** a rebuild of OpenHands. OpenHands owns the hard part (the agent loop, tool use, code edits, git). DevClaw owns everything *around* it: the interface, durable goals + direction evaluation, goal/task decomposition, state, isolation, and observability.
+It is **not** a chatbot and **not** a rebuild of OpenHands. OpenHands owns the agent loop (tool use, code edits, git). DevClaw owns everything *around* it: durable goals + direction evaluation, decomposition, state, isolation, observability, delivery, and deploy.
 
 ```
-MCP client (OpenClaw / Claude Code / any MCP host)
-  │   create_goal · steer_goal · get_goal       (durable goal layer)
-  │   implement_feature / fix_bug / start_program …  (one-shot task layer)
+Denys
+  │  (chat / voice / Telegram)
   ▼
-DevClaw  (Python)
-  ├── goal layer     durable goals → heartbeat tick → next-action plan +
-  │                  direction evaluation → dispatch (in-process) → done-gate review
-  ├── MCP server     FastMCP — stdio + streamable-HTTP, dashboard + SSE
-  ├── planner        Goal → task DAG (single-task passthrough for small goals)
-  ├── state store    SQLite — programs, tasks, append-only events
-  └── sandcastle     `docker run --rm` per task — RO ~/.claude mount, destroyed on exit
+OpenClaw waiter agent          ← translates chat ↔ MCP, doesn't decide
+  │
+  ▼
+DevClaw (the chef — this repo, FastMCP)
+  ├── goal/    durable goals → heartbeat tick → plan + dispatch + evaluate
+  ├── server/  FastMCP stdio + streamable-HTTP, dashboard + SSE, auth
+  ├── loom/    reusable orchestration core (failure classification, test integrity)
+  ├── planner.py · review_gate.py · delivery.py · deploy.py · …
+  └── sandcastle_runner — `docker run --rm` per task; RO ~/.claude mount; destroyed on exit
         │
         ▼
-  OpenHands (Python SDK)  ── agent loop, runs `claude` via ACP (Pro OAuth)
+  OpenHands (Python SDK) — agent loop, runs `claude` via ACP (Pro OAuth)
 ```
 
 ## The split
 
 | Concern | Owner |
 |---|---|
+| Conversation with Denys | **OpenClaw waiter agent** (system prompt + tool calls) |
 | Agent loop, sandbox coding, git | **OpenHands** |
-| Goal → tasks decomposition | DevClaw planner |
+| Goal → tasks decomposition, direction eval, review gate | DevClaw |
 | Task/program state | DevClaw state store (SQLite) |
 | Per-task isolation | DevClaw sandcastle runner (`docker run`) |
-| Progress + notification | DevClaw event stream + `notify_url` callbacks |
-| Interface to clients | DevClaw MCP server |
+| Durable hosting / handoff | DevClaw deploy (Tailscale, reboot-surviving) |
+| Interface to the waiter | DevClaw FastMCP server |
 
 The full rationale — including why OpenHands and sandbox isolation are **orthogonal** layers (the agent vs. the box it runs in), and why this calls `docker run` directly instead of depending on `@ai-hero/sandcastle` — lives in [`docs/architecture-v2.md`](./docs/architecture-v2.md).
 
@@ -45,53 +44,70 @@ The full rationale — including why OpenHands and sandbox isolation are **ortho
 
 ```
 devclaw/
-├── server.py            # FastMCP server — task + goal + project tools, thin dashboard/SSE routes, bearer-auth
-├── dashboard.py         # pure HTML renderers (programs/goals/projects pages) — presentation, no wiring
-├── planner.py           # Goal → task DAG (shells out to `claude --print`)
-├── state_store.py       # SQLite: programs, tasks, append-only events
-├── task_queue.py        # async task lifecycle (asyncio) + concurrency + on-settle hook
-├── sandcastle_runner.py # `docker run --rm` per task; streams events from the runner
-├── project_registry.py  # the control plane's source of truth: repos → driving goals → live status
-├── cli.py               # `devclaw projects …` — the terminal face of the control plane
-├── preview.py           # live preview hosting on the VPS (resource-capped, LRU-evicted)
-├── deploy.py            # durable deploy hosting (reboot-surviving, stable Tailscale URL)
-│   # --- loom: the reusable orchestration core (neutral name, extraction seam) ---
-├── loom/__init__.py     # curated public surface: classify_failure · scan_diff · Goal · GoalStore · …
-├── loom/limits.py       # usage-limit / rate-limit failure classifier (pure)
-├── loom/test_integrity.py # gate guard: flags deleted/weakened tests in a diff (pure)
-│   # --- the goal layer (folded-in goalclaw) ---
-├── goal_service.py      # wires the layer: heartbeat loop, in-proc wake, the create/get/steer/eval surface
-├── goal_tick.py         # one heartbeat: cheap check → plan → evaluate → dispatch → done-gate
-├── goal_planner.py      # next-action cognition (goal+state → one action), JSON-validated
-├── goal_evaluator.py    # direction evaluation (is this achieving the objective?), grounded in deliveries
-├── goal_engine.py       # in-process dispatch into the task queue (replaces goalclaw's HTTP MCP client)
-├── goal_store.py        # durable mind on disk: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
-├── goal_models.py       # Goal / GoalStatus / Action / PlanResult / EvalResult
-└── workspace.py         # per-action pristine git checkout (devclaw owns the checkout)
-openhands-runner/
-├── runner.py            # OpenHands SDK invocation; emits event/result lines on stdout
-└── requirements.txt     # openhands-sdk
-.sandcastle/Dockerfile   # per-task sandbox image
-tests/                   # pytest — planner, state store, queue/DAG (stubbed; no docker)
-docs/architecture-v2.md  # the architectural contract — read before touching the runner/store/sandbox
+├── server/             # MCP server (FastMCP) — split by job:
+│   ├── __init__.py     #   re-exports + load-order
+│   ├── _state.py       #   FastMCP instance + long-lived services + env
+│   ├── tools.py        #   every @mcp.tool decorator (the chef's menu)
+│   ├── http.py         #   every @mcp.custom_route (dashboard, SSE, /goals/answer)
+│   └── lifecycle.py    #   main() + serve loops + bearer-token auth middleware
+├── goal/               # the durable goal layer (folded-in goalclaw):
+│   ├── service.py      #   GoalService — the facade the server wires up
+│   ├── tick.py         #   one heartbeat: check → plan → evaluate → dispatch → done-gate
+│   ├── planner.py      #   next-action cognition (one claude --print per tick past the gate)
+│   ├── evaluator.py    #   direction evaluation, grounded in deliveries.md
+│   ├── store.py        #   on-disk mind: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
+│   ├── engine.py       #   in-process dispatch into the task queue
+│   ├── research.py · merge.py · notify.py · summary.py · models.py
+├── engine/             # everything that EXECUTES the work:
+│   ├── __init__.py     #   the Engine protocol (one async callable)
+│   ├── sandcastle.py   #   docker run --rm per task; events stream from the runner (production)
+│   ├── claude_sdk.py   #   spike backend: claude --print inside the same sandbox
+│   ├── host.py         #   host-side runner (no sandbox; testing only)
+│   ├── stub.py         #   deterministic engine for tests + offline harness
+│   ├── runner_io.py    #   shared stdout/event-stream parser
+│   └── workspace.py    #   per-action pristine git checkout (devclaw owns it)
+├── delivery/           # how shipped changes REACH the owner:
+│   ├── __init__.py     #   engineer-authored commit → branch → push → PR
+│   ├── deploy.py       #   durable Tailscale deploy hosting (reboot-surviving)
+│   └── repo.py         #   gh repo creation (for create_repo)
+├── quality/            # gates that judge the work past the green test gate:
+│   ├── __init__.py     #   pre-PR adversarial diff review (claude)
+│   ├── eval_judge.py   #   failure-mode classifier across eval runs
+│   └── evals.py        #   eval scoring (pure, used by harnesses)
+├── prompts/            # every system prompt as a .md file (load_prompt(slug))
+├── loom/               # reusable orchestration core (engine-agnostic substrate):
+│   ├── limits.py       #   usage-/rate-limit failure classifier (pure)
+│   ├── test_integrity.py # gate guard: flags deleted/weakened tests in a diff (pure)
+│   └── trace.py        #   run-trace recorder (cognition, ticks, dispatches, deliveries)
+├── planner.py          # spec / program planner (claude --print) → task DAG
+├── cognition.py        # the LLM seam — Cognition protocol + Claude/Stub impls
+├── elicitation.py      # scope-grill cognition (called via the scope_grill MCP tool)
+├── state_store.py      # SQLite: programs, tasks, append-only events
+├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
+├── project_registry.py # control plane: repos → driving goals → live status rollup
+└── cli.py              # devclaw projects … (terminal face of the control plane)
+openhands-runner/runner.py  # OpenHands SDK inside the sandbox; emits event/result lines
+.sandcastle/Dockerfile      # per-task sandbox image
+tests/                      # pytest — stubbed engine; no docker, no claude
+docs/architecture-v2.md     # architectural contract — read before touching the runner/store/sandbox
 ```
 
-DevClaw is all Python. The only language boundary left is the process boundary: `openhands-runner/runner.py` runs the (Python-only) OpenHands SDK *inside* the sandbox container, isolated from the long-running host process — it talks to the host over a line-delimited JSON protocol on stdout.
+DevClaw is all Python. The only language boundary left is the process boundary: `openhands-runner/runner.py` runs the OpenHands SDK *inside* the sandbox container, isolated from the long-running host process — it talks to the host over a line-delimited JSON protocol on stdout.
 
-## MCP tools
+## MCP tools (the chef's menu)
 
 | Tool | Does |
 |---|---|
 | `implement_feature(workspace_dir, goal, …)` | Run a single feature task |
 | `fix_bug(workspace_dir, description, …)` | Run a single bug-fix task |
 | `review_repository(workspace_dir, …)` | Read-only review (no writes — invariant runtime-checked) |
-| `onboard(workspace_dir, …)` | Analyze a repo and write a draft `AGENTS.md` (comprehension only) for you to review |
+| `onboard(workspace_dir, …)` | Analyze a repo and write a draft `AGENTS.md` (comprehension only) |
+| `setup_cicd(workspace_dir)` | Commit a self-hosted GitHub Actions workflow if none exists |
+| `create_repo(name, …)` | Stand up a fresh GitHub repo for a from-scratch goal |
 | `start_program(workspace_dir, goal, …)` | Decompose a large goal into a task DAG and run it |
-| `get_program(program_id)` / `list_programs()` | Program status + the task DAG |
-| `get_status(task_id)` | One task's status / result / PR |
-| `list_tasks(...)` | Task history, filterable |
-| `get_events(...)` | Replayable event feed (also a live SSE stream over HTTP) |
-| `cancel_task(task_id)` / `cancel_program(program_id)` | Abort in-flight work — tears down the sandbox, marks it `cancelled` (terminal; not retried or recovered) |
+| `get_program(program_id)` / `list_programs()` | Program status + task DAG |
+| `get_status(task_id)` / `list_tasks(...)` / `get_events(...)` | Task history + replayable event feed (live SSE over HTTP) |
+| `cancel_task(task_id)` / `cancel_program(program_id)` | Abort in-flight work — tears down the sandbox |
 
 Async by default: a tool call returns a `task_id` immediately and the work runs in the background. Pass a `notify_url` to get a callback on completion/block instead of polling.
 
@@ -104,11 +120,10 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 | `create_goal(goal_id, objective, workspace_dir, done_when, backlog, …)` | Register a durable goal DevClaw drives over time |
 | `get_goal(goal_id)` | Objective, phase, what's in flight, the latest direction verdict, recent log |
 | `list_goals()` | All goals + phase + direction |
-| `steer_goal(goal_id, message)` | Correct/redirect — recorded as steering, honored on the next tick (poked immediately); unblocks a blocked goal |
-| `evaluate_goal(goal_id)` | Force a direction evaluation now — "is this going the right way?" — judged against `done_when`, grounded in what shipped |
-| `tail_goal(goal_id, …)` | Watch a goal — the deep read-only feed: the grounded deliveries tail (what each action actually shipped) + recent events |
-| `answer_goal(goal_id, answer)` | Reply to a goal that's waiting on you (the Telegram answer channel for scope questions / escalations) |
-| `cancel_goal(goal_id)` | Permanently stop a goal — terminal `cancelled`, tears down any in-flight action, skipped on every future heartbeat |
+| `steer_goal(goal_id, message)` | Correct/redirect — recorded as steering, honored on the next tick |
+| `tail_goal(goal_id, …)` | Deep read-only feed: deliveries tail (what each action actually shipped) + recent events |
+| `answer_goal(goal_id, answer)` | Reply to a goal waiting on the owner (Telegram answer channel for scope questions) |
+| `cancel_goal(goal_id)` | Permanently stop a goal — terminal `cancelled`, tears down any in-flight action |
 
 **How a goal is driven (per heartbeat):**
 1. **Cheap check** (0 tokens) — poll the in-flight action via a local SQLite read.
@@ -119,32 +134,18 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 
 The zero-token idle guard is load-bearing: an idle goal and an in-flight-still-running goal cost **0 `claude` calls** (the heartbeat is mechanism; cognition runs only when there's real work).
 
-### Build a project from scratch
-
-For a whole project (not one task), DevClaw **grills you to a shared spec first**, then builds it:
-
-| Tool | Does |
-|---|---|
-| `build_project(idea, workspace_dir)` | Start a project; returns a `project_id` + the first question |
-| `answer_question(project_id, answer)` | Answer the current question → the next one, or `status: ready` + the spec |
-| `get_project(project_id)` | Full state — idea, transcript, spec, the running program |
-| `approve_spec(project_id)` | Approve the spec → plan it into a milestone DAG → start the build (returns `program_id`) |
-| `steer(project_id, message)` | Redirect a *running* build — folds direction into not-yet-started tasks (running/done untouched) |
-
-The grill (one question at a time, each with a recommended answer) adapts [Matt Pocock's MIT `grill-me`](https://github.com/mattpocock/skills); the build runs as a program you can watch with `get_program` / the dashboard. The agreed spec + interview transcript are written to `$DEVCLAW_STATE/projects/<id>/` for the human record.
-
 ### The project registry (control plane)
 
-The single source of truth for **"which repos is devclaw working on, and what's the status of each"** — one entity above the tasks/programs/goals primitives, drivable from chat, API, *and* CLI. A `Project` is a thin record (repo · workspace · preview url · status · the goal(s) driving it); it links goals **by id** and joins their live status on read, so it never caches "phase" and never rots. (Distinct from `build_project` above — that's the one-shot interview; this is the durable portfolio.)
+The single source of truth for **"which repos is devclaw working on, and what's the status of each"** — one entity above the tasks/programs/goals primitives, drivable from chat, API, *and* CLI. A `Project` is a thin record (repo · workspace · status · the goal(s) driving it); it links goals **by id** and joins their live status on read, so it never caches phase and never rots.
 
 | Tool | Does |
 |---|---|
-| `register_project(project_id, name, …)` | Register a repo in the portfolio (slug id; optional repo_url / workspace_dir / preview_url) |
-| `list_projects(status?)` | Every project + a live rollup: each linked goal's phase/direction + derived `health` (working/blocked/done/idle/archived) |
+| `register_project(project_id, name, …)` | Register a repo in the portfolio (slug id; optional repo_url / workspace_dir) |
+| `list_projects(status?)` | Every project + a live rollup: each linked goal's phase/direction + derived health |
 | `project_status(project_id)` | Full status of one project (facts + live goal status) |
-| `update_project(project_id, …)` | Update facts — record a preview URL, pause/archive, fix repo/workspace |
+| `update_project(project_id, …)` | Update facts — pause/archive, fix repo/workspace |
 | `link_goal(project_id, goal_id, unlink?)` | Attach/detach a durable goal (by id; status joined live) |
-| `delete_project(project_id)` | Hard-delete a project record (goals untouched; prefer `update_project(status='archived')` to retire one with a paper trail) |
+| `delete_project(project_id)` | Hard-delete a project record (goals untouched) |
 
 Same control plane from a terminal (talks to the same stores; no server needed):
 
@@ -157,45 +158,38 @@ devclaw projects link todo-fullstack-demo todo-quality-audit
 
 …and a portfolio view at **`/projects`** on the HTTP dashboard.
 
-### Preview hosting & provisioning
+### Durable deploy hosting
 
-A from-scratch goal needs somewhere to live and, when it builds, something you can click:
+The handoff for an `achieved` goal: a running product the owner opens, not a diff to read.
 
 | Tool | Does |
 |---|---|
-| `create_repo(name, private?, description?)` | Stand up a fresh GitHub repo under the configured account so a from-scratch goal has a home |
-| `setup_cicd(workspace_dir)` | Add a standard self-hosted GitHub Actions CI workflow if the repo has none (detects the stack: dotnet / python / node / go) |
-| `start_preview(workspace_dir, slug, port?)` | Run a built app as a live preview on the VPS → clickable frontend + API `/docs` URLs, so the owner can *open* the result |
-| `preview_status(slug)` / `list_previews()` | Status of one preview (exists / running / ready + URLs) / list them all |
-| `stop_preview(slug)` | Stop a preview and free its VPS resources |
-| `deploy_project(workspace_dir, slug)` | **Durable** deploy of a built app → a *stable* Tailscale `https://<node>.<tailnet>.ts.net:<port>/` URL that survives reboots, so the owner is handed a running product. Auto-fires when a goal reaches `achieved`. |
-| `deploy_status(slug)` / `list_deploys()` | Status of one durable deploy (exists / running / ready + stable URL) / list them all |
+| `deploy_project(workspace_dir, slug)` | Durable deploy → stable Tailscale `https://<node>.<tailnet>.ts.net:<port>/` URL that survives reboots. Auto-fires when a goal reaches `achieved`. |
+| `deploy_status(slug)` / `list_deploys()` | Status of one deploy (exists / running / ready + stable URL) / list them all |
 | `stop_deploy(slug)` | Stop a deploy, tear down its Tailscale serve, free its VPS resources |
 
-Previews run under per-preview memory/CPU caps with max-N **LRU eviction** so they can't overwhelm the VPS.
-
-**Preview vs deploy** — a *preview* is a verify-time artifact (ephemeral, `--restart no`, SSH-tunnel, auto-reaped); a *deploy* is the **handoff** (durable, `--restart unless-stopped`, stable per-slug URL over Tailscale, auto-deployed on goal completion). Same convention-based launcher; different lifecycle. Tailscale wiring is best-effort + graceful-degradation: `deploy_project` attempts `tailscale serve` and, if devclaw's container can't reach tailscaled, returns the one-time serve command (which then persists across reboots). Mounting the tailscaled socket into the devclaw-mcp container makes it fully automatic with no code change.
+Tailscale wiring is best-effort + graceful-degradation: `deploy_project` attempts `tailscale serve` and, if devclaw's container can't reach tailscaled, returns the one-time serve command (which then persists across reboots). Mounting the tailscaled socket into the devclaw-mcp container makes it fully automatic with no code change.
 
 ### Reliability & quality
 
-Built to run unattended, and to ship code you'd actually merge:
+Built to run unattended, and to ship code worth merging:
 
-- **Survives usage limits.** A quota / rate-limit pause is *classified*, not treated as a failure: the task is requeued and a single account-wide `paused_until` gates **both** the task queue and the goal heartbeat, which auto-resume when the cap resets — zero tokens while paused, the owner pinged once. Auth errors are surfaced, never slept on.
+- **Survives usage limits.** A quota / rate-limit pause is *classified*, not treated as a failure: the task is requeued and a single account-wide `paused_until` gates **both** the task queue and the goal heartbeat, which auto-resume when the cap resets — zero tokens while paused, the owner pinged once.
 - **No-progress watchdog.** An executing goal that ships nothing for `DEVCLAW_GOAL_NO_PROGRESS_S` (default 6h) pings the owner once — a zero-token wall-clock check that complements the per-task timeout.
-- **In-house quality gate (no third-party QC).** The engineer is briefed to *audit before extending* — assume even fine-looking code may be poor — and the verify gate runs a **test-integrity** check that fails the gate on deleted / skipped / weakened tests, closing the "go green by gutting the tests" path.
-- **Pre-PR review gate — green means *reviewed*.** A green gate proves behaviour, not quality; it can't see a dead-code line or a frontend change it never exercises. So after the gate + test-integrity pass and **before** the PR opens, a separate `claude` pass *reads the diff* against the ticket + quality bar and returns `approve` / `request_changes`. A `request_changes` verdict feeds its located issues back through the same retry loop as a gate failure (then escalates), so the change a spectator-PO finally sees has been read, not just run. Fails open and `DEVCLAW_REVIEW_GATE=0` disables it.
+- **In-house quality gate (no third-party QC).** The engineer is briefed to *audit before extending*, and the verify gate runs a **test-integrity** check that fails the gate on deleted / skipped / weakened tests, closing the "go green by gutting the tests" path.
+- **Pre-PR review gate — green means *reviewed*.** A green gate proves behaviour, not quality; it can't see a dead-code line or a frontend change it never exercises. So after the gate + test-integrity pass and **before** the PR opens, a separate `claude` pass *reads the diff* against the ticket + quality bar and returns `approve` / `request_changes`. A `request_changes` verdict feeds its located issues back through the same retry loop as a gate failure (then escalates).
 
 ## Auth (the design constraint)
 
-DevClaw inherits a `claude` OAuth session — it never uses an API key. `ANTHROPIC_API_KEY` is **actively refused** at both the host (planner) and sandbox layers so a stray key can't silently switch autonomous runs onto metered billing. All you need is a logged-in `claude` CLI: the planner shells out to it, and the per-task sandbox bind-mounts `~/.claude` **read-only** (auth works; nothing else from the host is mounted, and the container is destroyed on exit so no state escapes).
+DevClaw inherits a `claude` OAuth session — it never uses an API key. `ANTHROPIC_API_KEY` is **actively refused** at both the host (planner) and sandbox layers so a stray key can't silently switch autonomous runs onto metered billing. All you need is a logged-in `claude` CLI: the planner shells out to it, and the per-task sandbox bind-mounts an explicit allowlist under `~/.claude` **read-only** (the credential token + `.claude.json` identity by default; nothing else).
 
 ## Run it
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e .                       # the host orchestrator (FastMCP + httpx)
-pip install -r openhands-runner/requirements.txt   # only needed inside the sandbox image
-npm install -g @agentclientprotocol/claude-agent-acp   # ACP adapter (one-time, global)
+pip install -e .
+pip install -r openhands-runner/requirements.txt   # only inside the sandbox image
+npm install -g @agentclientprotocol/claude-agent-acp
 
 DEVCLAW_TRANSPORT=stdio devclaw-mcp        # local dev (MCP over stdio)
 # or HTTP for a long-running service:
@@ -213,67 +207,38 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 | `host` | OpenHands **on the host** (no container) | ⚠ **none** — agent has full filesystem access | dev/CI/validation where docker is unavailable |
 | `stub` | deterministic stub (no OpenHands, no claude) | n/a | harness validation (`evals/`) |
 
-### Useful env
+### Environment variables
+
+Copy [`.env.example`](./.env.example) to `.env` (gitignored) and uncomment what you need — devclaw loads it on startup, and shell/systemd env always wins over it. Every var organized by purpose (transport, state, sandbox, goals, model tiering, deploy, review gate) lives in [`docs/env-vars.md`](./docs/env-vars.md). The most common ones to know:
 
 | Var | Default | Purpose |
 |---|---|---|
 | `DEVCLAW_TRANSPORT` | `stdio` | `stdio` or `http` |
 | `DEVCLAW_PORT` | `8000` | HTTP port |
-| `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address (set `127.0.0.1` to restrict to loopback) |
-| `DEVCLAW_TOKEN` | — | When set, the HTTP transport requires it on every route except `/health` — via `Authorization: Bearer <token>` or a `?token=` query param. Unset = no auth (local dev). |
 | `DEVCLAW_DB` | `./devclaw.db` | SQLite path for state |
-| `DEVCLAW_STATE` | `./.devclaw-state` | dir for build-from-scratch project files (idea/transcript/spec) |
-| `DEVCLAW_MAX_GRILL_QUESTIONS` | `20` | cap on grill questions before the spec is force-finalized |
-| `DEVCLAW_MAX_CONCURRENT` | `4` | global cap on concurrently-running tasks (backpressure) |
-| `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | per-program concurrency cap |
-| `DEVCLAW_TICK_SECONDS` | `10` | task-queue heartbeat interval — advances DAGs and resumes recovered work from DB state |
-| `DEVCLAW_SQLITE_BUSY_TIMEOUT_MS` | `5000` | how long a blocked SQLite writer waits for the lock before raising `database is locked`. The server and the `devclaw` CLI each open a connection to the same db file; with the default `0` a CLI write while the server holds the lock fails instantly — this lets it queue and succeed. |
-| `DEVCLAW_GOALS_DIR` | `~/memory/goals` | root holding one folder per durable goal (`<id>/goal.yaml` …) |
-| `DEVCLAW_GOAL_TICK_SECONDS` | `900` | goal heartbeat interval — also woken in-process the moment a task settles |
-| `DEVCLAW_GOAL_EVAL_EVERY` | `3` | deliveries between periodic direction evaluations (`0` → evaluate only at the done-gate) |
-| `DEVCLAW_GOAL_NO_PROGRESS_S` | `21600` | wall-clock seconds an executing goal may go without a delivery before the no-progress watchdog pings the owner once (zero tokens; `0` disables). Complements the per-task timeout. |
-| `DEVCLAW_GOAL_VERIFY_DONE` | `1` | when set, a planner `done` proposal dispatches a read-only review of the repo vs `done_when` and the evaluator must confirm `achieved` before the goal closes (`0` → trust an artifact-only done eval) |
-| `DEVCLAW_GOAL_NOTIFY_URL` | — | notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough) |
-| `DEVCLAW_TASK_TIMEOUT_S` | `1800` | per-task wall-clock cap — a run exceeding it is cancelled (its sandbox torn down) and the task marked `failed`, so a hung agent fails cleanly instead of burning quota. `<=0` disables. |
-| `DEVCLAW_MAX_RETRIES` | `1` | re-runs of a task that fails its verify gate (or errors), each with the failure fed back into the goal, before escalating. `0` disables. Timeouts are never retried. |
-| `DEVCLAW_REVIEW_GATE` | `1` | the pre-PR adversarial review gate: after the gate + test-integrity pass, a `claude` pass reads the diff and can send it back through the retry loop (`request_changes`) before the PR opens. `0` disables (escape hatch + quota lever — one `claude` call per successful code task). |
-| `DEVCLAW_REVIEW_MODEL` | `sonnet` | model tier for the review-gate `claude` pass (alias or full id; empty → account default). |
-| `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery (or use a logged-in `gh`). Separate from the Claude OAuth pillar — this is git access, not cognition billing. |
-| `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | wall-clock cap for the verify-gate command (the `verify_cmd` run after the agent finishes); on expiry the gate fails the task. |
-| `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | per-task sandbox image (see `.sandcastle/Dockerfile`) |
-| `DEVCLAW_CLAUDE_BIN` | `claude` | the `claude` binary the planner drives |
-| `DEVCLAW_HOST_CLAUDE_DIR` | `~/.claude` | host path bind-mounted read-only into each sandbox |
-| `DEVCLAW_SANDBOX_CLAUDE_ALLOWLIST` | `.credentials.json,.claude.json` | comma-separated entries **under** `~/.claude` bound (read-only) into each sandbox. Default = the OAuth **identity pair**: the credential token plus `.claude.json` (account identity — the ACP agentic loop hangs without it). The rest of the host `~/.claude` (skills, plugins + their MCP servers, the global `CLAUDE.md`, `projects/` history) is deliberately **not** projected into the agent. Add entries only with intent — they must exist on the host. |
+| `DEVCLAW_GOALS_DIR` | `~/memory/goals` | one folder per durable goal |
+| `DEVCLAW_ENGINE` | *(unset)* | engine mode: unset = OpenHands sandbox, `host` / `stub` / `claude_sdk` |
+| `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | the in-sandbox coding agent's model (full id) |
+| `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery |
 
-### Model tiering
-
-Cognition is tiered per role so an autonomous run doesn't burn the Pro/Max quota on Opus where a lighter model does the job (no API key = the limit is your session quota, not a bill). Host roles take a `claude --model` value (alias like `sonnet`/`opus`); the exec engine takes a full model id. Set any to empty to fall back to the account default.
-
-| Var | Default | Role |
-|---|---|---|
-| `DEVCLAW_PLANNER_MODEL` | `opus` | planner (`plan_goal`/`plan_spec`) — rare, high-leverage decomposition |
-| `DEVCLAW_GRILL_MODEL` | `sonnet` | the build-from-scratch elicitation grill |
-| `DEVCLAW_JUDGE_MODEL` | `haiku` | the eval failure-analysis judge |
-| `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **the OpenHands coding agent — the token/quota bulk.** Set `claude-opus-4-8` to opt a run up to Opus. |
-| `DEVCLAW_GOAL_PLANNER_MODEL` | `sonnet` | the goal layer's next-action planner (light, bounded JSON) |
-| `DEVCLAW_GOAL_EVAL_MODEL` | `sonnet` | the direction evaluator (judging delivered work vs intent — bump to `opus` per goal for hard direction calls) |
+For the full table (~60 vars), see [`docs/env-vars.md`](./docs/env-vars.md).
 
 ## Tests
 
 ```bash
 pip install -e ".[dev]"
-pytest          # planner + state store + queue/DAG + grill, all stubbed — no docker, no claude
+pytest          # planner + state store + queue/DAG + goal layer, all stubbed — no docker, no claude
 ```
 
 To validate the **real** pipeline (a logged-in `claude` driving OpenHands in a docker sandbox), follow the layered runbook in [`docs/live-shakedown.md`](./docs/live-shakedown.md).
 
 ## Status
 
-DevClaw is the live runtime. It was rewritten from TypeScript to all-Python (FastMCP) — the host orchestration now matches the language of the OpenHands SDK it drives, so there's a single toolchain. The original v1 (a LangGraph orchestrator + markdown skills driven by cron) was retired earlier and lives only in git history.
+DevClaw is the live runtime. As of mid-2026 it serves as the chef behind an OpenClaw waiter agent — the spec-kit elicitation flow (`build_project` / `answer_question` / `approve_spec`) and the preview hosting module were removed (drift; vault-rejected), and the durable goal layer + Tailscale deploys carry the load.
 
 ## What this is NOT
 
-- **Not a chatbot.** It's a backend service other agents call.
+- **Not a chatbot.** It's a backend service the OpenClaw waiter calls.
 - **Not a general assistant.** It executes software-development goals, nothing else.
 - **Not a rebuild of OpenHands.** OpenHands is the execution engine; DevClaw is the orchestration above it.
 

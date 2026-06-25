@@ -1,0 +1,57 @@
+id: blocked_planner
+description: >
+  The goal planner returns `decision=blocked` with a clarifying question. The
+  chef must pin phase=blocked + blocked_on, ping the owner once, and NOT
+  dispatch any action. A blocked goal subsequently stays idle on cadence (the
+  zero-token guardrail) until steering arrives — but this scenario only checks
+  the FIRST tick that flips it to blocked.
+
+  The goal is intentionally a product/credential decision the planner cannot
+  reasonably default — picking a payment provider materially changes the spec
+  (Stripe vs Adyen vs Paddle imply different SDKs, fee structures, KYC flows,
+  account setup) AND requires an external account/keys the planner can't
+  provision. Stub cognition obviously returns the canned `blocked` response;
+  real cognition under the prompt's "block only when you genuinely need a
+  human decision (… external credential, product call)" should also block.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      Repo has minimal scaffolding and no payments code.
+      ## Gap to good
+      Provider choice is upstream of everything (SDK, fees, KYC, account).
+      ## What good looks like
+      - A chosen payment provider with an account + keys in place
+      - End-to-end checkout against that provider
+    goal_planner: |
+      {"decision": "blocked", "note": "need provider choice + account",
+       "question": "Which payment provider should we integrate — Stripe, Adyen, or Paddle? Each needs a different account and API keys."}
+
+setup:
+  goal:
+    objective: Add a third-party payment integration so customers can complete a paid checkout end-to-end.
+    done_when: A real customer can complete checkout through the chosen provider.
+    backlog:
+      - Choose a payment provider that fits compliance + pricing.
+      - Set up the provider account and obtain API keys.
+      - Integrate the SDK and ship a paid checkout flow.
+    cadence: 1d
+    open_pr: false
+
+ticks: 3
+
+expect:
+  final_phase: blocked
+  final_lifecycle: executing
+  blocked_on_contains: "provider"
+  outcomes_contain: [blocked]
+  cognition_by_role_min:
+    goal_planner: 1
+  counts_eq:
+    deliveries: 0
+  notify_owner_contains:
+    - "needs you"
+    - "provider"

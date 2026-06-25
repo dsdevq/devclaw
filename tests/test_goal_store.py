@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from devclaw.goal_models import GoalStatus, InFlight
-from devclaw.goal_store import GoalStore, parse_duration
+from devclaw.goal.models import GoalStatus, InFlight
+from devclaw.goal.store import GoalStore, parse_duration
 from tests.goal_fakes import Clock, seed_goal
 
 
@@ -117,22 +117,9 @@ def test_cadence_due(tmp_path):
     assert store.cadence_due(goal, GoalStatus(last_plan_at=just_now)) is True
 
 
-def test_grill_transcript_answer_roundtrip(tmp_path):
+def test_spec_roundtrip(tmp_path):
     store = GoalStore(tmp_path)
     seed_goal(tmp_path, "g")
-    assert store.read_grill("g") == []
-    store.write_grill("g", [{"question": "DB?", "recommended": "Postgres"}])
-    # answering the pending question records it; a second answer has nothing pending
-    assert store.answer_pending("g", "Postgres") is True
-    assert store.read_grill("g")[-1]["answer"] == "Postgres"
-    assert store.answer_pending("g", "again") is False
-
-
-def test_spec_and_plan_approval_roundtrip(tmp_path):
-    store = GoalStore(tmp_path)
-    seed_goal(tmp_path, "g")
-    assert store.read_spec("g") == "" and store.plan_approved("g") is False
+    assert store.read_spec("g") == ""
     store.write_spec("g", "Build X")
     assert "Build X" in store.read_spec("g")
-    store.mark_plan_approved("g")
-    assert store.plan_approved("g") is True

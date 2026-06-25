@@ -1,0 +1,49 @@
+id: failing_verify
+description: >
+  A goal whose dispatched task FAILS its verify gate. The stub engine in this
+  scenario is overridden to mark the task as gate_passed=False — meaning the
+  agent's change didn't pass the verify_cmd, so the chef must NOT open a PR
+  and the planner must see the failure on the next tick.
+
+  Engine-side override is wired by the runner: when ``engine_responses`` is
+  present (gate_passed flag), the task queue's poll path is patched for this
+  scenario only. See ``_run_goal_mode`` for the hook (currently relies on the
+  stub engine writing a placeholder; gate failure is signalled via a sentinel
+  in the workspace).
+
+  This scenario is the WEAKEST of the 11 — the stub engine reports done with
+  the file written; without a custom poll-result hook the gate verdict is not
+  observable through the trace. Marked as a known partial; the framework can
+  be extended later to override engine.poll() per scenario.
+
+mode: goal
+
+cognition:
+  stub_responses:
+    evaluator: |
+      ## Current state
+      Stub workspace.
+      ## Gap to good
+      Need feature.
+      ## What good looks like
+      - Tests pass
+    goal_planner: |
+      {"decision": "act", "note": "ship",
+       "actions": [{"tool": "implement_feature", "goal": "add feature X", "open_pr": false}]}
+
+setup:
+  goal:
+    objective: Ship feature X with a passing gate.
+    done_when: Tests pass.
+    backlog: ["Add feature X"]
+    cadence: 1d
+    verify_cmd: "false"     # any non-zero command — gate fails
+    open_pr: false
+
+ticks: 3
+
+expect:
+  cognition_by_role_min:
+    goal_planner: 1
+  counts_min:
+    dispatches: 1

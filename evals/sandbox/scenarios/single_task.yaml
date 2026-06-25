@@ -1,0 +1,19 @@
+id: single_task
+description: >
+  Direct MCP `implement_feature` call — no goal layer, just a single task
+  submitted through the chef's menu. Exercises the task-queue → engine path
+  without any planning cognition. The stub engine "implements" by writing a
+  placeholder file; the task settles with status=done. The trace should show
+  one mcp call and the canned result.
+
+mode: mcp
+
+setup:
+  mcp_call:
+    tool: implement_feature
+    args:
+      goal: 'Add a /health endpoint that returns 200 OK with {"ok": true}.'
+
+expect:
+  mcp_result_contains:
+    status: pending

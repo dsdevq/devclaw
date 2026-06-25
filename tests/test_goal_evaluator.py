@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from devclaw.goal_evaluator import GoalEvalError, build_prompt, evaluate, extract_json, validate
-from devclaw.goal_models import Goal, GoalStatus
+from devclaw.goal.evaluator import GoalEvalError, build_prompt, evaluate, extract_json, validate
+from devclaw.goal.models import Goal, GoalStatus
 
 
 def test_extract_and_bad_verdict():

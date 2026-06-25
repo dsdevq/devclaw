@@ -9,7 +9,7 @@ leak can't silently come back, and assert it stays unit-testable (pure arg build
 no docker).
 """
 
-from devclaw import sandcastle_runner as sc
+from devclaw.engine import sandcastle as sc
 
 
 CLAUDE_DIR = "/home/me/.claude"

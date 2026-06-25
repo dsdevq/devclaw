@@ -14,9 +14,9 @@ import json
 
 import pytest
 
-from devclaw.goal_models import GoalStatus, InFlight, PollResult
-from devclaw.goal_store import GoalStore
-from devclaw.goal_tick import Outcome, tick_goal
+from devclaw.goal.models import GoalStatus, InFlight, PollResult
+from devclaw.goal.store import GoalStore
+from devclaw.goal.tick import Outcome, tick_goal
 from tests.goal_fakes import Clock, FakeClaude, FakeEngine, RecordingNotifier, fake_prepare, seed_goal
 
 ACT = json.dumps(
@@ -31,13 +31,13 @@ def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
 
-async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None, grill_caller=None):
+async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None):
     return await tick_goal(
         goal_id, store=store, engine=engine,
         planner_caller=planner, evaluator_caller=evaluator, notifier=notifier,
         notify_url="http://relay", prepare_ws=fake_prepare,
         eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller,
-        merger=merger, grill_caller=grill_caller,
+        merger=merger,
     )
 
 
@@ -233,7 +233,7 @@ async def test_planner_blocked_notifies(tmp_path):
 def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
     """steer_goal must zero actions_dispatched when unblocking so the dispatch
     cap doesn't re-fire on the very next tick after the human resolves the block."""
-    from devclaw.goal_service import GoalConfig, GoalService
+    from devclaw.goal.service import GoalConfig, GoalService
     from devclaw.state_store import StateStore
     from devclaw.task_queue import TaskQueue
 
@@ -465,93 +465,11 @@ async def test_idle_tick_never_invokes_summarizer(tmp_path, monkeypatch):
     assert planner.calls == 0 and evaluator.calls == 0
 
 
-# ---- grilling: async, durable, quota-safe scope alignment ------------------
-
-ASK_DB = json.dumps({"action": "ask", "question": "Which database?", "recommended": "Postgres"})
-GRILL_DONE = json.dumps({"action": "done", "spec": "Build a usable dashboard with auth and a home page."})
-
-
 @pytest.mark.asyncio
-async def test_grill_asks_first_question(tmp_path):
-    """Entering grilling, the goal asks the first scope question (with a suggested
-    answer) and waits — recording it as a pending transcript turn."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="grilling"))
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-    grill = FakeClaude(ASK_DB)
-
-    out = await _tick(store, "g", planner, evaluator, engine, notifier, grill_caller=grill)
-
-    assert out is Outcome.ASKED
-    assert planner.calls == 0
-    t = store.read_grill("g")
-    assert len(t) == 1 and t[0]["question"] == "Which database?" and "answer" not in t[0]
-    assert any("Which database?" in m and "Postgres" in m for m in notifier.sent)
-
-
-@pytest.mark.asyncio
-async def test_grill_waits_zero_tokens_for_reply(tmp_path):
-    """A question is out and unanswered → the tick spends zero tokens (no grill
-    cognition) until the owner replies."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="grilling"))
-    store.write_grill("g", [{"question": "Which database?", "recommended": "Postgres"}])  # pending
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-    grill = FakeClaude(ASK_DB)
-
-    out = await _tick(store, "g", planner, evaluator, engine, notifier, grill_caller=grill)
-
-    assert out is Outcome.IDLE
-    assert grill.calls == 0 and planner.calls == 0          # the guardrail extends to the grill
-    assert notifier.sent == []
-
-
-@pytest.mark.asyncio
-async def test_grill_answer_finalizes_spec_into_plan_review(tmp_path):
-    """Once the open question is answered, the next tick runs the grill again —
-    here it finalizes: writes the spec and enters plan_review for approval."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="grilling"))
-    store.write_grill("g", [{"question": "Which database?", "recommended": "Postgres", "answer": "Postgres"}])
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-    grill = FakeClaude(GRILL_DONE)
-
-    out = await _tick(store, "g", planner, evaluator, engine, notifier, grill_caller=grill)
-
-    assert out is Outcome.ASKED                              # now awaiting plan approval
-    assert store.load_status("g").lifecycle == "plan_review"
-    assert "usable dashboard" in store.read_spec("g")
-    assert any("plan" in m.lower() for m in notifier.sent)
-
-
-@pytest.mark.asyncio
-async def test_plan_review_waits_then_approval_starts_executing(tmp_path):
-    """plan_review spends zero tokens until approved; an approval flips it to
-    executing."""
-    store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="plan_review"))
-    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
-
-    waiting = await _tick(store, "g", planner, evaluator, engine, notifier)
-    assert waiting is Outcome.IDLE
-    assert planner.calls == 0
-
-    store.mark_plan_approved("g")
-    out = await _tick(store, "g", planner, evaluator, engine, notifier)
-    assert out is Outcome.ADVANCED
-    assert store.load_status("g").lifecycle == "executing"
-    assert any("approved" in m.lower() for m in notifier.sent)
-
-
-@pytest.mark.asyncio
-async def test_discovery_enters_grilling_when_grill_enabled(tmp_path, monkeypatch):
-    """With the grill on, a finished investigation flows into grilling (asking the
-    first question) instead of straight to executing."""
-    monkeypatch.setattr("devclaw.goal_tick._grill.GRILL_ENABLED", True)
+async def test_discovery_goes_straight_to_executing(tmp_path):
+    """Scope alignment is owned by the OpenClaw waiter (scope_grill MCP tool) —
+    when investigation finishes, the chef writes the discovery brief and steps
+    directly into executing, with no in-chef grill phase in between."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", GoalStatus(
@@ -561,14 +479,13 @@ async def test_discovery_enters_grilling_when_grill_enabled(tmp_path, monkeypatc
     planner = FakeClaude(ACT)
     researcher = FakeClaude("## Current state\nbare API")   # evaluator-tier = discovery synthesis
     engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="repo analysis"))
-    notifier, grill = RecordingNotifier(), FakeClaude(ASK_DB)
+    notifier = RecordingNotifier()
 
-    out = await _tick(store, "g", planner, researcher, engine, notifier, grill_caller=grill)
+    out = await _tick(store, "g", planner, researcher, engine, notifier)
 
-    assert out is Outcome.ASKED
-    assert store.load_status("g").lifecycle == "grilling"
+    assert out is Outcome.ADVANCED
+    assert store.load_status("g").lifecycle == "executing"
     assert store.read_discovery("g")                        # brief still written
-    assert any("Which database?" in m for m in notifier.sent)
 
 
 # ---- auto-merge on gate-green (hands-off; gated + best-effort) --------------
@@ -585,7 +502,7 @@ def _delivery_status():
 async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
     """A delivered change whose verify gate passed is merged by devclaw, with a
     plain owner ping — when DEVCLAW_GOAL_AUTOMERGE is on."""
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", _delivery_status())
@@ -605,7 +522,7 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_failed_gate_is_not_auto_merged(tmp_path, monkeypatch):
     """A PR whose gate did NOT pass must never be auto-merged."""
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", _delivery_status())
@@ -648,7 +565,7 @@ async def test_new_goal_opens_investigation(tmp_path):
     enters 'investigating' — it does NOT plan/act yet (research before acting)."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(lifecycle="new"))
+    store.save_status("g", GoalStatus(lifecycle="investigating"))
     planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
 
     out = await _tick(store, "g", planner, evaluator, engine, notifier)
@@ -804,7 +721,7 @@ async def test_task_altitude_restores_the_firehose(tmp_path, monkeypatch):
 
 async def _failing_prepare(workspace_dir: str, repo_url: str | None = None) -> str:
     """A prep that always fails the way a bad/missing/private repo_url does."""
-    from devclaw.workspace import WorkspaceError
+    from devclaw.engine.workspace import WorkspaceError
 
     raise WorkspaceError("clone failed: remote: Repository not found.")
 
@@ -845,7 +762,7 @@ async def test_investigation_prep_failure_blocks_without_cognition(tmp_path):
     planner tokens."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
-    store.save_status("g", GoalStatus(phase="idle", lifecycle="new"))
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="investigating"))
     planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
 
     out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)
@@ -895,7 +812,7 @@ class RaisingClaude:
 
 @pytest.mark.asyncio
 async def test_consumed_action_is_persisted_before_a_planner_crash(tmp_path, monkeypatch):
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     # The bug: in_flight=None was computed in memory but NOT saved before the
     # next-action planner ran; the planner crashing on a usage limit aborted the
     # tick with the stale pointer on disk, so the next tick re-shipped/re-announced
@@ -952,7 +869,7 @@ async def test_planner_session_limit_is_caught_not_escaped(tmp_path):
 
 @pytest.mark.asyncio
 async def test_ship_notification_is_concise_not_the_full_prompt(tmp_path, monkeypatch):
-    monkeypatch.setattr("devclaw.goal_tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
     # The notification must not paste the action's full instruction prompt (which
     # is what happened when the plain-language summarizer was quota-blocked and
     # fell back to raw text). With summary_caller=None the raw text is sent — and

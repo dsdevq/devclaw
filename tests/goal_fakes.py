@@ -4,24 +4,31 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from devclaw.goal_models import Action, Goal, InFlight, PollResult
+from devclaw.goal.models import Action, Goal, InFlight, PollResult
+from devclaw.loom import trace as _trace
 
 
 class FakeClaude:
     """A claude_caller that returns a canned response and counts calls.
 
     The call count IS the quota assertion — an idle tick must leave it at 0.
-    Used for both the planner caller and the evaluator caller.
+    Used for both the planner caller and the evaluator caller. Records into the
+    active tracer (if one is set) under the given ``role`` so the trace harness
+    sees the same shape it would in live mode.
     """
 
-    def __init__(self, response: str = "{}") -> None:
+    def __init__(self, response: str = "{}", *, role: str = "fake") -> None:
         self.response = response
         self.calls = 0
         self.last_prompt = ""
+        self.role = role
 
     async def __call__(self, prompt: str) -> str:
         self.calls += 1
         self.last_prompt = prompt
+        _trace.record_cognition(
+            role=self.role, model="(stub)", prompt=prompt, response=self.response, latency_ms=0,
+        )
         return self.response
 
 
