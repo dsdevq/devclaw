@@ -271,14 +271,14 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
 
 
 def claude_with_model(model: str | None, *, role: str = "unknown") -> Callable[[str], Awaitable[str]]:
-    """A one-argument ``claude`` caller bound to a model + role label — the
-    default cognition caller for a role, so each role shells out at its own tier
-    AND records into the trace under its own name."""
+    """A one-argument cognition caller bound to a model + role label. Routes
+    through the configured :class:`~devclaw.cognition.Cognition` (claude by
+    default; ``DEVCLAW_COGNITION=stub`` for offline harnesses). Backend-swap
+    happens at that seam — this factory keeps its historical name + signature
+    so every caller (planner, evaluator, grill, judge, …) stays untouched."""
+    from .cognition import bind
 
-    async def _caller(prompt: str) -> str:
-        return await call_claude(prompt, model=model, role=role)
-
-    return _caller
+    return bind(model, role=role)
 
 
 #: planning (plan_goal + plan_spec) runs at the planner tier

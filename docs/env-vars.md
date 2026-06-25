@@ -121,6 +121,12 @@ Cognition is tiered per role so autonomous runs don't burn Pro/Max quota on Opus
 | `DEVCLAW_DEPLOY_CPUS` | `1.0` | Per-deploy CPU limit. |
 | `DEVCLAW_DEPLOY_MAX` | `5` | Max concurrent durable deploys on the VPS. |
 
+## Cognition backend (the LLM seam)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `DEVCLAW_COGNITION` | `claude` | Which `Cognition` impl every role's `default_caller` routes through. `claude` → `claude --print` over Pro/Max OAuth (production). `stub` → deterministic canned responses (offline harnesses + eval scaffolding). Unknown values fail loud at first use. Future backends (HTTP, local model, recorded fixture) drop into this seam without touching role modules. |
+
 ## Scope grill (waiter-side conversation, chef-side craft)
 
 The `scope_grill` MCP tool gives the OpenClaw waiter the chef's cognition for aligning scope before filing a goal. The waiter holds the conversation; these envs tune the chef's side.
