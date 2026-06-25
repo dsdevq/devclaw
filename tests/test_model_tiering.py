@@ -40,16 +40,17 @@ def test_argv_omits_model_when_none():
 async def test_claude_with_model_forwards_model(monkeypatch):
     captured = {}
 
-    async def fake_call(prompt, model=None):
+    async def fake_call(prompt, model=None, *, role="unknown"):
         captured["prompt"] = prompt
         captured["model"] = model
+        captured["role"] = role
         return "ok"
 
     monkeypatch.setattr(planner, "call_claude", fake_call)
-    caller = claude_with_model("claude-opus-4-8")
+    caller = claude_with_model("claude-opus-4-8", role="planner")
     out = await caller("hello")
     assert out == "ok"
-    assert captured == {"prompt": "hello", "model": "claude-opus-4-8"}
+    assert captured == {"prompt": "hello", "model": "claude-opus-4-8", "role": "planner"}
 
 
 # ---- shipped per-role defaults (intent, and a guard against accidental change) ----

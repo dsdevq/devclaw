@@ -113,7 +113,7 @@ def validate_step(parsed: object) -> dict:
 
 def default_caller() -> Callable[[str], Awaitable[str]]:
     """Production cognition caller bound to the grill tier (lazy, env-current)."""
-    return claude_with_model(GRILL_MODEL)
+    return claude_with_model(GRILL_MODEL, role="grill")
 
 
 async def next_step(

@@ -58,4 +58,4 @@ def default_caller() -> ClaudeCaller:
     inject a fake) never touch the subprocess."""
     from ..planner import claude_with_model
 
-    return claude_with_model(GOAL_SUMMARY_MODEL)
+    return claude_with_model(GOAL_SUMMARY_MODEL, role="summary")

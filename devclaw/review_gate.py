@@ -28,7 +28,7 @@ from .planner import PlannerError, claude_with_model, extract_json
 #: Opus planner). Empty → account default.
 REVIEW_MODEL = os.environ.get("DEVCLAW_REVIEW_MODEL", "sonnet") or None
 #: default cognition caller for the review, bound to the review tier
-review_caller = claude_with_model(REVIEW_MODEL)
+review_caller = claude_with_model(REVIEW_MODEL, role="review")
 
 #: cap the diff we send so a huge change can't blow the prompt / quota. Tail-kept
 #: would lose the header, so we head-keep (the start of the diff, where the

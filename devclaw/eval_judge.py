@@ -23,7 +23,7 @@ from .planner import PlannerError, claude_with_model, extract_json
 #: classification, so Haiku is the right tier. Empty → account default.
 JUDGE_MODEL = os.environ.get("DEVCLAW_JUDGE_MODEL", "haiku") or None
 #: default cognition caller for the judge, bound to the judge tier
-judge_caller = claude_with_model(JUDGE_MODEL)
+judge_caller = claude_with_model(JUDGE_MODEL, role="judge")
 
 #: controlled failure-mode vocabulary — keep stable so verdicts aggregate.
 CATEGORIES = (

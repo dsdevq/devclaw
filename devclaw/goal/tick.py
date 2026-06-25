@@ -37,6 +37,7 @@ from .models import Action, EvalResult, Goal, GoalStatus
 from .notify import Notifier
 from .planner import ClaudeCaller
 from .store import GoalStore
+from ..loom import trace as _trace
 from ..loom.limits import classify_failure, pause_seconds
 from ..planner import PlannerError
 from ..state_store import _now_ms
@@ -122,6 +123,7 @@ async def _notify(
         return
     if summarize is not None and level >= NotifyLevel.OWNER:
         text = await _goal_summary.plain_summary(text, caller=summarize)
+    _trace.record_notify(level=level.name, text=text)
     await notifier.send(text)
 
 
@@ -271,6 +273,44 @@ def _classify(status: GoalStatus) -> Phase:
 
 
 async def tick_goal(
+    goal_id: str,
+    *,
+    store: GoalStore,
+    engine: GoalEngine,
+    planner_caller: ClaudeCaller,
+    evaluator_caller: ClaudeCaller,
+    notifier: Notifier,
+    notify_url: str = "",
+    prepare_ws: WorkspacePrep = prepare_workspace,
+    eval_every: int = EVAL_EVERY,
+    verify_done: bool = VERIFY_DONE,
+    no_progress_s: int = NO_PROGRESS_S,
+    summary_caller: "ClaudeCaller | None" = None,
+    merger: "_merge.Merger | None" = None,
+) -> Outcome:
+    """Run one heartbeat and record a single ``tick`` trace event with the
+    incoming (lifecycle, phase) and outgoing outcome — the only place the trace
+    sees a tick. All the cognition / dispatch / delivery / notify events fired
+    during the body land between this tick and the next."""
+    status_before = store.load_status(goal_id)
+    phase_before = _classify(status_before)
+    lifecycle_before = status_before.lifecycle or "executing"
+    outcome = await _tick_goal_impl(
+        goal_id,
+        store=store, engine=engine,
+        planner_caller=planner_caller, evaluator_caller=evaluator_caller,
+        notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
+        eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+        summary_caller=summary_caller, merger=merger,
+    )
+    _trace.record_tick(
+        goal_id=goal_id, lifecycle=lifecycle_before,
+        phase=phase_before.value, outcome=outcome.value,
+    )
+    return outcome
+
+
+async def _tick_goal_impl(
     goal_id: str,
     *,
     store: GoalStore,
@@ -496,6 +536,7 @@ async def _open_done_gate(
             await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate dispatch failed: {exc}")
             return Outcome.ERROR
         ref = replace(ref, is_done_check=True)
+        _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, is_done_check=True)
         store.save_status(goal_id, replace(base, phase="verifying", in_flight=ref, next="verifying done"))
         store.append_log(goal_id, f"done proposed ({note}) → verifying via review {ref.id}")
         await _notify(notifier, NotifyLevel.TASK, f"🔎 [{goal_id}] looks complete — verifying against done_when")
@@ -542,6 +583,7 @@ async def _open_investigation(
         store.save_status(goal_id, replace(status, lifecycle="executing", phase="idle"))
         return Outcome.SLEPT
     ref = replace(ref, is_discovery=True)
+    _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, is_discovery=True)
     store.save_status(goal_id, replace(status, lifecycle="investigating", phase="in_flight", in_flight=ref))
     store.append_log(goal_id, f"investigating → repo analysis {ref.id}")
     await _notify(
@@ -616,6 +658,7 @@ async def _dispatch_action(
         store.save_status(goal_id, replace(base, phase="idle", next=action.goal))
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] dispatch failed: {exc}")
         return Outcome.ERROR
+    _trace.record_dispatch(goal_id=goal_id, tool=action.tool, ref_id=ref.id)
     store.save_status(
         goal_id,
         replace(
@@ -707,6 +750,10 @@ async def _resolve_polling_action(
 
     ctx.store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
     ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "")
+    _trace.record_delivery(
+        goal_id=goal_id, action_label=_action_label(ref),
+        gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
+    )
     finished_detail = f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}\n{poll.detail}"
 
     delivered = 1 if poll.status == "done" else 0

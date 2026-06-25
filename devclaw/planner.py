@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
+from .loom import trace as _trace
 from .state_store import TaskKind
 
 PLANNER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_PLANNER_TIMEOUT_MS", "90000"))
@@ -207,16 +208,19 @@ def _build_claude_argv(prompt: str, model: str | None) -> list[str]:
     return argv
 
 
-async def call_claude(prompt: str, model: str | None = None) -> str:
+async def call_claude(prompt: str, model: str | None = None, *, role: str = "unknown") -> str:
     """Spawn ``claude --print`` with the prompt and return its stdout. ``model``
-    picks the tier (alias or full id); None → account default. Injected into
-    cognition roles (planner / grill / judge / evaluator) so tests can stub the
-    subprocess; each role binds its own model via :func:`claude_with_model`."""
+    picks the tier (alias or full id); None → account default. ``role`` labels
+    the cognition site (planner / evaluator / grill / judge / summary / review /
+    research) for the trace recorder. Injected into cognition roles so tests can
+    stub the subprocess; each role binds its own model+role via
+    :func:`claude_with_model`."""
     env = dict(os.environ)
     # Belt + suspenders: never let an API key override the OAuth session.
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
 
+    started = _trace.now_ms()
     try:
         proc = await asyncio.create_subprocess_exec(
             *_build_claude_argv(prompt, model),
@@ -225,6 +229,10 @@ async def call_claude(prompt: str, model: str | None = None) -> str:
             env=env,
         )
     except OSError as exc:
+        _trace.record_cognition(
+            role=role, model=model or "", prompt=prompt, response="",
+            latency_ms=_trace.now_ms() - started, error=f"spawn failed: {exc}",
+        )
         raise PlannerError(f"Failed to spawn {CLAUDE_BIN}: {exc}") from exc
 
     try:
@@ -234,35 +242,47 @@ async def call_claude(prompt: str, model: str | None = None) -> str:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+        _trace.record_cognition(
+            role=role, model=model or "", prompt=prompt, response="",
+            latency_ms=_trace.now_ms() - started, error="timeout",
+        )
         raise PlannerError(f"claude --print timed out after {PLANNER_TIMEOUT_MS}ms")
 
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace")
+    latency = _trace.now_ms() - started
     if proc.returncode != 0:
         # Include a stdout tail in the message: a Claude usage-limit ("You're out
         # of extra usage …") comes back on STDOUT with an EMPTY stderr, so a
         # stderr-only error is unclassifiable and the quota guard can't pause on it.
+        _trace.record_cognition(
+            role=role, model=model or "", prompt=prompt, response=stdout,
+            latency_ms=latency, error=f"exit={proc.returncode}; stderr={stderr[:200]}",
+        )
         raise PlannerError(
             f"claude --print exited {proc.returncode}. stderr:\n{stderr}\n"
             f"stdout:\n{stdout[-500:]}",
             stdout,
         )
+    _trace.record_cognition(
+        role=role, model=model or "", prompt=prompt, response=stdout, latency_ms=latency,
+    )
     return stdout
 
 
-def claude_with_model(model: str | None) -> Callable[[str], Awaitable[str]]:
-    """A one-argument ``claude`` caller bound to a model — the default cognition
-    caller for a role, so each role shells out at its own tier while keeping the
-    1-arg ``claude_caller`` seam each cognition site injects for tests."""
+def claude_with_model(model: str | None, *, role: str = "unknown") -> Callable[[str], Awaitable[str]]:
+    """A one-argument ``claude`` caller bound to a model + role label — the
+    default cognition caller for a role, so each role shells out at its own tier
+    AND records into the trace under its own name."""
 
     async def _caller(prompt: str) -> str:
-        return await call_claude(prompt, model=model)
+        return await call_claude(prompt, model=model, role=role)
 
     return _caller
 
 
 #: planning (plan_goal + plan_spec) runs at the planner tier
-_planner_caller = claude_with_model(PLANNER_MODEL)
+_planner_caller = claude_with_model(PLANNER_MODEL, role="planner")
 
 
 def _parse_plan(raw: str) -> list[PlannedTask]:
