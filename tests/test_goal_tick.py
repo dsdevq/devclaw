@@ -613,6 +613,67 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_checklist_mode_dispatch_is_not_auto_merged(tmp_path, monkeypatch):
+    """Pillar 2 invariant: when the settled action carries checklist
+    addresses, its PR is the SHARED goal-branch PR every item keeps pushing
+    to. Auto-merging it now would delete the goal branch and force item N+1
+    to re-fork from main — the 2026-06-26 finance-sentry-mcp-v4 regression.
+    Auto-merge is skipped in that case; the done-gate is the single review
+    moment for the cumulative work."""
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    # In-flight ref carries checklist addresses (set by the dispatch hook).
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight(
+            "devclaw", "implement_feature", "t1", "task", "add /health",
+            addresses=["scaffold"],  # ← Pillar 1 marker
+        ),
+    ))
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="ok",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger()
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    # Merger never invoked — the PR is the shared goal-branch PR.
+    assert merger.merged == []
+    # No "merged" owner ping either.
+    assert not any("merged" in m.lower() for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_legacy_dispatch_without_addresses_still_auto_merges(tmp_path, monkeypatch):
+    """Backwards-compat: legacy backlog-mode goals (no addresses on the
+    in-flight ref) keep the existing auto-merge behaviour. Only Pillar 1
+    checklist dispatches skip the merge."""
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight(
+            "devclaw", "implement_feature", "t1", "task", "add /health",
+            addresses=[],  # ← legacy mode, no checklist
+        ),
+    ))
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="ok",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger()
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    assert merger.merged == ["https://github.com/o/r/pull/9"]
+
+
+@pytest.mark.asyncio
 async def test_failed_gate_is_not_auto_merged(tmp_path, monkeypatch):
     """A PR whose gate did NOT pass must never be auto-merged."""
     monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
