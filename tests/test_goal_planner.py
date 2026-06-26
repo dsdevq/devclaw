@@ -22,6 +22,131 @@ def test_build_prompt_omits_discovery_section_when_absent():
     assert "Discovery brief" not in p
 
 
+# ---- checklist mode (Pillar 1) --------------------------------------------
+
+
+from devclaw.goal.models import Checklist, ChecklistItem  # noqa: E402
+
+
+def _cl(*items: ChecklistItem, open_questions=None, notes=None) -> Checklist:
+    return Checklist(
+        items=list(items),
+        open_questions=list(open_questions or []),
+        notes=list(notes or []),
+    )
+
+
+def test_build_prompt_omits_checklist_section_when_absent():
+    p = build_prompt(_goal(), GoalStatus(), "", "", "")
+    # the goal-planner.md system prompt mentions "Checklist" in its mode
+    # description — substring matches that copy. Check for the rendered
+    # section's load-bearing string instead (the tally line).
+    assert "items total:" not in p
+
+
+def test_build_prompt_omits_checklist_section_when_empty():
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", checklist=_cl())
+    assert "items total:" not in p
+
+
+def test_build_prompt_renders_ready_items_in_checklist_mode():
+    cl = _cl(
+        ChecklistItem(
+            id="scaffold", requirement="Create the csproj.",
+            evidence_target="backend/src/Foo.csproj",
+        ),
+        ChecklistItem(
+            id="wire-x", requirement="Wire the X tool.",
+            evidence_target="backend/src/Tools/X.cs",
+            depends_on=["scaffold"],  # NOT ready yet — scaffold isn't done
+        ),
+    )
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", checklist=cl)
+    assert "Checklist (ready items)" in p
+    # scaffold is ready (no deps), wire-x is NOT ready (dep on scaffold)
+    assert "scaffold: Create the csproj." in p
+    assert "wire-x" not in p
+    # the tally is rendered
+    assert "items total: 2" in p
+
+
+def test_build_prompt_includes_open_questions_and_notes_when_present():
+    cl = _cl(
+        ChecklistItem(id="a", requirement="r", evidence_target="t"),
+        open_questions=["Is X one tool or two?"],
+        notes=["Contract test files overlap — serialize."],
+    )
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", checklist=cl)
+    assert "open questions" in p
+    assert "Is X one tool or two?" in p
+    assert "notes from the decomposer" in p
+    assert "Contract test files overlap" in p
+
+
+def test_build_prompt_warns_when_no_ready_items_but_not_all_done():
+    # Every not_started item is blocked on something — planner should see
+    # the explicit hint to propose done if everything else is shipped.
+    cl = _cl(
+        ChecklistItem(id="a", requirement="r", evidence_target="t", status="in_flight"),
+        ChecklistItem(id="b", requirement="r", evidence_target="t", depends_on=["a"]),
+    )
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", checklist=cl)
+    assert "(none — every not_started item has unmet dependencies" in p
+
+
+def test_validate_act_with_addresses_field():
+    res = validate({
+        "decision": "act",
+        "note": "wire accounts",
+        "actions": [{
+            "tool": "implement_feature",
+            "goal": "wire accounts tool to GetAccountsQuery",
+            "open_pr": True,
+            "addresses": ["wire-accounts"],
+        }],
+    })
+    assert res.decision == "act"
+    assert res.actions[0].addresses == ["wire-accounts"]
+
+
+def test_validate_act_addresses_dedup_and_strip():
+    res = validate({
+        "decision": "act",
+        "note": "n",
+        "actions": [{
+            "tool": "implement_feature",
+            "goal": "do it",
+            "open_pr": True,
+            "addresses": ["wire-a", " wire-a ", "wire-b", "", "wire-a"],
+        }],
+    })
+    assert res.actions[0].addresses == ["wire-a", "wire-b"]
+
+
+def test_validate_act_addresses_absent_defaults_to_empty():
+    # Legacy backlog-mode actions don't emit addresses — must still parse.
+    res = validate({
+        "decision": "act",
+        "note": "n",
+        "actions": [{"tool": "implement_feature", "goal": "do it", "open_pr": True}],
+    })
+    assert res.actions[0].addresses == []
+
+
+def test_validate_act_addresses_garbage_ignored():
+    # A model that returns a non-list addresses field is treated as empty,
+    # not as a parse error — falls back to legacy behaviour.
+    res = validate({
+        "decision": "act",
+        "note": "n",
+        "actions": [{
+            "tool": "implement_feature", "goal": "do it",
+            "open_pr": True, "addresses": "not-a-list",
+        }],
+    })
+    assert res.actions[0].addresses == []
+
+
 def test_extract_json_plain():
     assert extract_json('{"decision":"sleep"}') == '{"decision":"sleep"}'
 

@@ -78,6 +78,10 @@ class InFlight:
     #: ``investigating`` lifecycle phase (its terminal result feeds the discovery
     #: synthesis, not the planner or the done-gate evaluator).
     is_discovery: bool = False
+    #: checklist item ids this in-flight action serves (Pillar 1). The settle
+    #: hook reads these back and updates the checklist (status + evidence) on
+    #: terminal poll. Empty in legacy backlog-mode goals.
+    addresses: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -116,13 +120,18 @@ class GoalStatus:
 
 @dataclass(frozen=True)
 class Action:
-    """One engine call the planner chose."""
+    """One engine call the planner chose. ``addresses`` carries the checklist
+    item ids this action serves when the goal is in checklist-mode (Pillar 1) —
+    the dispatch hook flips those items to ``in_flight`` and the settle hook
+    fills their ``evidence`` + flips them to ``done`` on success. Empty for
+    legacy backlog-mode goals."""
 
     engine: Engine
     tool: GoalTool
     goal: str
     verify_cmd: Optional[str] = None
     open_pr: bool = True
+    addresses: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

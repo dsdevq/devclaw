@@ -26,6 +26,8 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Awaitable, Callable, Tuple, Union
 
+from . import checklist as _checklist
+from . import decomposer as _decomposer
 from . import evaluator as _evaluator
 from ..delivery import deploy as _deploy
 from . import merge as _merge
@@ -33,7 +35,7 @@ from . import planner as _planner
 from . import research as _research
 from . import summary as _goal_summary
 from .engine import GoalEngine
-from .models import Action, EvalResult, Goal, GoalStatus
+from .models import Action, Checklist, EvalResult, Goal, GoalStatus, PollResult
 from .notify import Notifier
 from .planner import ClaudeCaller
 from .store import GoalStore
@@ -56,6 +58,12 @@ NO_PROGRESS_S = int(os.environ.get("DEVCLAW_GOAL_NO_PROGRESS_S", "21600"))
 #: when True, a planner "done" proposal dispatches a read-only review of the repo
 #: against done_when and the evaluator judges THAT before the goal closes.
 VERIFY_DONE = os.environ.get("DEVCLAW_GOAL_VERIFY_DONE", "1") not in ("0", "false", "")
+#: when True, the investigating phase dispatches the decomposer after the
+#: discovery brief is written — emitting an atomic checklist that the per-tick
+#: planner picks actions from instead of the free-form backlog. Pillar 1 of the
+#: planning-engine rework; default OFF so legacy goals are unaffected until the
+#: operator opts in (per-goal env or stack-wide).
+DECOMPOSE_ENABLED = os.environ.get("DEVCLAW_GOAL_DECOMPOSE", "0") not in ("0", "false", "")
 
 
 def _done_gate_review_brief(goal: "Goal") -> str:
@@ -284,8 +292,13 @@ class TickContext:
     eval_every: int = EVAL_EVERY
     verify_done: bool = VERIFY_DONE
     no_progress_s: int = NO_PROGRESS_S
+    decompose_enabled: bool = DECOMPOSE_ENABLED
     summary_caller: "ClaudeCaller | None" = None
     merger: "_merge.Merger | None" = None
+    #: Pillar 1 cognition caller for the decomposer. None → reuse
+    #: ``planner_caller`` (both default to opus); explicit injection lets tests
+    #: stub the decomposer without touching the planner stub.
+    decomposer_caller: "ClaudeCaller | None" = None
 
 
 class Phase(str, Enum):
@@ -345,8 +358,10 @@ async def tick_goal(
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
     no_progress_s: int = NO_PROGRESS_S,
+    decompose_enabled: bool = DECOMPOSE_ENABLED,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
+    decomposer_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """Run one heartbeat and record a single ``tick`` trace event with the
     incoming (lifecycle, phase) and outgoing outcome — the only place the trace
@@ -361,7 +376,9 @@ async def tick_goal(
         planner_caller=planner_caller, evaluator_caller=evaluator_caller,
         notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
         eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+        decompose_enabled=decompose_enabled,
         summary_caller=summary_caller, merger=merger,
+        decomposer_caller=decomposer_caller,
     )
     _trace.record_tick(
         goal_id=goal_id, lifecycle=lifecycle_before,
@@ -383,8 +400,10 @@ async def _tick_goal_impl(
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
     no_progress_s: int = NO_PROGRESS_S,
+    decompose_enabled: bool = DECOMPOSE_ENABLED,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
+    decomposer_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """Run one heartbeat. Reads the goal's status, classifies it into a
     :class:`Phase`, dispatches to the matching handler.
@@ -403,7 +422,9 @@ async def _tick_goal_impl(
         planner_caller=planner_caller, evaluator_caller=evaluator_caller,
         notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
         eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+        decompose_enabled=decompose_enabled,
         summary_caller=summary_caller, merger=merger,
+        decomposer_caller=decomposer_caller,
     )
 
     goal = store.load_goal(goal_id)
@@ -652,12 +673,15 @@ async def _resolve_discovery(
     goal_id: str, goal: Goal, status: GoalStatus, repo_analysis: str,
     *, store: GoalStore, research_caller: ClaudeCaller, notifier: Notifier,
     summarize: "ClaudeCaller | None" = None,
+    decompose_enabled: bool = False,
+    decomposer_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """The investigating analysis finished — synthesize the discovery brief
-    (current state · gap-to-good · best-practice checklist) and persist it, then
-    transition to executing. Synthesis failure is non-fatal. (Scope alignment
-    happens outside the chef now — the OpenClaw waiter grills the owner via the
-    scope_grill MCP tool before create_goal is ever called.)"""
+    (current state · gap-to-good · best-practice checklist) and persist it,
+    optionally run the decomposer to emit a structured per-tool checklist
+    (Pillar 1), then transition to executing. Synthesis and decomposition are
+    each non-fatal — a failure in either falls back to backlog-driven mode."""
+    brief = ""
     try:
         brief = await _research.discovery_brief(goal, repo_analysis, caller=research_caller)
         store.write_discovery(goal_id, brief)
@@ -667,16 +691,109 @@ async def _resolve_discovery(
         store.append_log(goal_id, f"discovery synthesis failed ({exc}) — proceeding")
         synth_ok = False
 
+    decompose_ok = False
+    if decompose_enabled and goal.done_when:
+        caller = decomposer_caller or research_caller
+        try:
+            cl = await _decomposer.decompose(
+                goal,
+                claude_caller=caller,
+                discovery_brief=brief,
+                repo_digest=repo_analysis,
+            )
+            store.write_checklist(goal_id, cl)
+            store.append_log(
+                goal_id,
+                f"decomposer emitted checklist: {len(cl.items)} items, "
+                f"{len(cl.open_questions)} open question(s)",
+            )
+            decompose_ok = True
+        except Exception as exc:  # noqa: BLE001 — decomposition must not wedge the goal
+            store.append_log(
+                goal_id,
+                f"decomposition failed ({exc}) — falling back to backlog mode",
+            )
+
     store.save_status(
         goal_id, replace(status, lifecycle="executing", phase="idle", next="discovery done → executing"),
     )
-    msg = (
-        f"🔍 [{goal_id}] I looked at what's there for \"{goal.objective}\" — "
-        f"I've written up what it does today and what 'better' looks like. Starting work now."
-        if synth_ok else f"🔍 [{goal_id}] starting work on \"{goal.objective}\""
-    )
+    if decompose_ok:
+        msg = (
+            f"🔍 [{goal_id}] I looked at \"{goal.objective}\" — written what's there + "
+            f"a structured plan ({len(store.read_checklist(goal_id).items)} items). Starting work."
+        )
+    elif synth_ok:
+        msg = (
+            f"🔍 [{goal_id}] I looked at what's there for \"{goal.objective}\" — "
+            f"I've written up what it does today and what 'better' looks like. Starting work now."
+        )
+    else:
+        msg = f"🔍 [{goal_id}] starting work on \"{goal.objective}\""
     await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summarize)
     return Outcome.ADVANCED
+
+
+def _flag_items_in_flight(store: GoalStore, goal_id: str, item_ids: list[str]) -> None:
+    """When a dispatched action carries ``addresses``, mark those checklist
+    items ``in_flight`` so the planner's ``ready_items`` filter excludes them
+    on the next tick (no re-pick of the same item before settle). No-op when
+    no checklist exists or the action has no addresses."""
+    if not item_ids:
+        return
+    current = store.read_checklist(goal_id)
+    if current is None:
+        return
+    updated = current
+    for item_id in item_ids:
+        try:
+            updated = _checklist.update_item(updated, item_id, status="in_flight")
+        except KeyError:
+            # planner cited an unknown id — log + skip; the planner's next
+            # round will pick a real one from ready_items
+            store.append_log(
+                goal_id,
+                f"checklist warn: action addresses unknown item {item_id!r}",
+            )
+    store.write_checklist(goal_id, updated)
+
+
+def _settle_addressed_items(
+    store: GoalStore, goal_id: str, addresses: list[str], poll: PollResult,
+) -> None:
+    """Settle the checklist items an action was addressing. Successful task
+    (poll.status == 'done' AND gate_passed in {None, True}) flips items to
+    ``done`` with grounded evidence (PR url + gate verdict); a failed task
+    flips them back to ``not_started`` so the planner can re-pick them next
+    tick (sharper instruction, different angle, or eventually block + ask).
+    The per-item gate (review_gate) verifies the diff against
+    ``evidence_target`` separately — session 4."""
+    if not addresses:
+        return
+    current = store.read_checklist(goal_id)
+    if current is None:
+        return
+    success = poll.status == "done" and (poll.gate_passed is None or poll.gate_passed)
+    if success:
+        ev_parts: list[str] = []
+        if poll.pr_url:
+            ev_parts.append(f"PR {poll.pr_url}")
+        if poll.gate_passed is not None:
+            ev_parts.append("gate=passed" if poll.gate_passed else "gate=FAILED")
+        evidence = " · ".join(ev_parts) or "settled (no PR or gate)"
+        new_status = "done"
+    else:
+        # leave evidence None — the item is back in the pick-pool, not yet proven
+        evidence = None
+        new_status = "not_started"
+    updated = current
+    for item_id in addresses:
+        try:
+            updated = _checklist.update_item(
+                updated, item_id, status=new_status, evidence=evidence,
+            )
+        except KeyError:
+            continue
+    store.write_checklist(goal_id, updated)
 
 
 async def _dispatch_action(
@@ -712,6 +829,10 @@ async def _dispatch_action(
         store.save_status(goal_id, replace(base, phase="idle", next=action.goal))
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] dispatch failed: {exc}")
         return Outcome.ERROR
+    # Carry the action's checklist addresses onto the in-flight ref so the
+    # settle hook can update the right items without re-reading the plan.
+    if action.addresses:
+        ref = replace(ref, addresses=list(action.addresses))
     _trace.record_dispatch(goal_id=goal_id, tool=action.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""))
     store.save_status(
         goal_id,
@@ -720,6 +841,9 @@ async def _dispatch_action(
             actions_dispatched=base.actions_dispatched + 1,
         ),
     )
+    # Checklist mode: flip addressed items to in_flight so the planner doesn't
+    # re-pick them next tick before this one settles. No-op in legacy mode.
+    _flag_items_in_flight(store, goal_id, list(action.addresses))
     store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}")
     await _notify(notifier, NotifyLevel.TASK, f"🚀 [{goal_id}] {action.tool}: {action.goal}  ({ref.id})")
     return Outcome.DISPATCHED
@@ -754,6 +878,8 @@ async def _resolve_polling_discovery(
         goal_id, goal, new_status, discovery_detail,
         store=ctx.store, research_caller=ctx.evaluator_caller, notifier=ctx.notifier,
         summarize=ctx.summary_caller,
+        decompose_enabled=ctx.decompose_enabled,
+        decomposer_caller=ctx.decomposer_caller,
     )
 
 
@@ -804,6 +930,11 @@ async def _resolve_polling_action(
 
     ctx.store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
     ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "")
+    # Checklist mode: settle the items this action was addressing — success
+    # flips them to done with grounded evidence (PR + gate), failure flips
+    # them back to not_started so the planner can re-pick them.
+    if getattr(ref, "addresses", None):
+        _settle_addressed_items(ctx.store, goal_id, list(ref.addresses), poll)
     _trace.record_delivery(
         goal_id=goal_id, action_label=_action_label(ref),
         gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
@@ -875,11 +1006,13 @@ async def _handle_executing(
             return blocked
         steering = ctx.store.unread_steering(goal_id, status)  # re-read
 
-    # Plan one next action.
+    # Plan one next action. Pass the checklist if one exists — the planner
+    # then runs in checklist mode and picks one ready item.
     try:
         result = await _planner.plan(
             goal, status, ctx.store.recent_log(goal_id), steering, finished_detail,
             claude_caller=ctx.planner_caller, discovery=ctx.store.read_discovery(goal_id),
+            checklist=ctx.store.read_checklist(goal_id),
         )
     except (_planner.GoalPlannerError, PlannerError) as exc:
         # A usage/rate limit at the PLANNER must pause the layer, not be logged
