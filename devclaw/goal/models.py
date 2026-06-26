@@ -138,6 +138,61 @@ class PlanResult:
     note: str = ""
 
 
+#: An item's lifecycle inside the checklist. ``not_started`` is the
+#: planner's pick-pool; ``in_flight`` is dispatched and not yet settled;
+#: ``done`` is verified with non-null evidence; ``blocked`` waits on a human
+#: decision; ``mis_specified`` is the executor's "this item doesn't match the
+#: code I'm seeing" signal — surfaces as a steer event for the owner.
+ItemStatus = Literal["not_started", "in_flight", "done", "blocked", "mis_specified"]
+#: model-tier hint per item (defaults to the global executor tier when absent)
+ItemModelTier = Literal["haiku", "sonnet", "opus"]
+
+
+@dataclass(frozen=True)
+class ChecklistItem:
+    """One atomic unit of work the decomposer emitted. Each item is one
+    focused commit's worth — small enough that ONE agent finishes it in one
+    sandbox cycle. The whole point is per-item verifiability: the `evidence`
+    string is what the gate confirms exists in the diff/repo before flipping
+    `status` to `done`. See ``devclaw/prompts/decomposer.md`` for the
+    schema contract this matches."""
+
+    id: str
+    requirement: str
+    evidence_target: str
+    addresses_files: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+    status: ItemStatus = "not_started"
+    #: filled by the executor on settle — concrete proof the item was met
+    #: (file:line + symbol/test names). Null until the gate verifies the diff.
+    evidence: Optional[str] = None
+    #: rough focused-agent-time estimate; the scheduler reads this to budget
+    #: per-tick dispatch. None → scheduler picks a default.
+    effort_minutes: Optional[int] = None
+    #: per-item model tier hint; None → the global executor tier
+    #: (DEVCLAW_EXEC_MODEL) is used.
+    model_tier: Optional[ItemModelTier] = None
+    #: free-form one-liner from the decomposer for the executor; prefix
+    #: ``legit_stub: `` marks the item as a deliberate not_yet_available
+    #: stub rather than work-to-do.
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class Checklist:
+    """The full decomposer output for one goal — the durable structured plan
+    the planner picks actions from, the gate verifies against, and the owner
+    edits via steer. Stored under ``<goal_id>/checklist.yaml`` alongside
+    ``STATUS.md`` etc., mutable across ticks."""
+
+    items: list[ChecklistItem] = field(default_factory=list)
+    #: questions for the owner the decomposer couldn't decide from the digest
+    open_questions: list[str] = field(default_factory=list)
+    #: free-form observations for the per-tick planner (file overlaps,
+    #: conditional outcomes the executor must resolve, etc.)
+    notes: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class ClauseVerdict:
     """One atomic ``done_when`` clause + the evaluator's per-clause finding.

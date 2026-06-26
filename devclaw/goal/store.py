@@ -231,6 +231,34 @@ class GoalStore:
         path = self._dir(goal_id) / "discovery.md"
         return path.read_text() if path.exists() else ""
 
+    # ---- checklist (decomposer output — the durable structured plan) ------
+
+    def write_checklist(self, goal_id: str, checklist: "Checklist") -> None:  # type: ignore[name-defined]
+        """Persist the decomposer's full output as ``checklist.yaml``. Lives
+        next to ``STATUS.md`` and is the source of truth the per-tick planner
+        picks actions from; mutable across ticks (settle hook + steer can
+        rewrite items)."""
+        from .checklist import dump_checklist
+
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "checklist.yaml").write_text(dump_checklist(checklist))
+
+    def read_checklist(self, goal_id: str) -> "Checklist | None":  # type: ignore[name-defined]
+        """The current checklist, or ``None`` if the decomposer hasn't run
+        yet (legacy goals + brand-new goals before the decomposing phase
+        completes). The per-tick planner falls back to backlog-driven mode
+        when this is ``None``."""
+        from .checklist import ChecklistParseError, parse_checklist
+
+        path = self._dir(goal_id) / "checklist.yaml"
+        if not path.exists():
+            return None
+        try:
+            return parse_checklist(path.read_text())
+        except ChecklistParseError:
+            return None  # corrupted on disk — caller treats as absent
+
     # ---- scope spec (handed in by the waiter via create_goal) ---------------
 
     def write_spec(self, goal_id: str, spec: str) -> None:
