@@ -802,10 +802,20 @@ async def _dispatch_action(
     notify_url: str, prepare_ws: WorkspacePrep,
     summarize: "ClaudeCaller | None" = None,
 ) -> Outcome:
-    # Runaway backstop (mechanism, not cognition): never spawn more than
-    # backlog-size + a small margin of engine actions for one goal without a
-    # human. A looping planner can't burn unbounded quota — it blocks instead.
-    cap = len(goal.backlog) + 2
+    # Runaway backstop (mechanism, not cognition): never spawn more than the
+    # goal's known-bounded work surface + a small margin without a human. A
+    # looping planner can't burn unbounded quota — it blocks instead.
+    #
+    # In backlog mode the cap is ``len(backlog) + 2`` — tight, matched to the
+    # owner's brain-dump of starting tasks. In checklist mode (Pillar 1) the
+    # decomposer's checklist IS the bounded work surface and is typically much
+    # larger than the backlog hint that produced it (29-item checklist from a
+    # 5-item backlog is normal); take the MAX so a checklist goal doesn't
+    # block every backlog-size dispatches. Live-found 2026-06-26 when
+    # finance-sentry-mcp-v3 hit a cap=7 with 22 ready items left.
+    base_cap = len(goal.backlog) + 2
+    checklist = store.read_checklist(goal_id)
+    cap = max(base_cap, len(checklist.items) + 2) if checklist else base_cap
     if base.actions_dispatched >= cap:
         store.append_log(goal_id, f"dispatch cap {cap} reached — blocking for review")
         store.save_status(
