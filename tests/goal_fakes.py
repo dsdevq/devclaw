@@ -61,9 +61,13 @@ class RecordingNotifier:
         return True
 
 
-async def fake_prepare(workspace_dir: str, repo_url: str | None = None) -> str:
-    """No-op workspace prep for tick tests (returns the default branch)."""
-    return "main"
+async def fake_prepare(
+    workspace_dir: str, repo_url: str | None = None, branch: str | None = None,
+) -> str:
+    """No-op workspace prep for tick tests. Returns the requested branch when
+    one is passed (mirrors the real prepare_workspace return for goal-branch
+    mode) so a settle-side assertion can check what branch was prepped."""
+    return branch or "main"
 
 
 class Clock:

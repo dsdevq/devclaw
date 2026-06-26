@@ -143,6 +143,58 @@ async def test_deliver_uses_the_engineer_commit_for_branch_not_the_goal(tmp_path
     assert "feat/add-the-widget-endpoint" in refs and "devclaw/" not in refs
 
 
+async def test_deliver_goal_branch_mode_does_not_create_per_task_branch(tmp_path):
+    """Pillar 2: when the workspace is on a ``goal/<id>`` branch (because
+    prepare_workspace put it there), deliver_change keeps the change ON that
+    branch — no per-task devclaw/* branch. The goal branch becomes the
+    durable thing every item commits to so the cumulative work stacks into
+    ONE PR. Closes the 2026-06-26 PR-fan-out failure where 11 separate PRs
+    each rebuilt the foundation in conflicting paths."""
+    origin = str(tmp_path / "origin.git")
+    subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+    repo = str(tmp_path / "repo")
+    subprocess.run(["git", "clone", "-q", origin, repo], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (tmp_path / "repo" / "base.txt").write_text("base\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "push", "-q", "origin", "HEAD")
+    # Simulate prepare_workspace having checked out the goal branch.
+    _git(repo, "checkout", "-b", "goal/my-goal")
+    # Agent makes its commit on the goal branch.
+    (tmp_path / "repo" / "feature.txt").write_text("agent change\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "feat(api): add the widget endpoint")
+
+    r = await deliver_change(
+        workspace_dir=repo, task_id="abcd1234ef",
+        goal="implement the widget", kind="implement_feature",
+    )
+
+    assert r["committed"] is True and r["pushed"] is True and r["delivered"] is True
+    # CRITICAL: branch stays on the goal branch — no devclaw/* fork.
+    assert r["branch"] == "goal/my-goal"
+    assert _branch(repo) == "goal/my-goal"
+    # The push landed the change on origin/goal/my-goal (the durable target).
+    refs = subprocess.run(
+        ["git", "ls-remote", "--heads", origin], capture_output=True, text=True,
+    ).stdout
+    assert "goal/my-goal" in refs and "devclaw/" not in refs and "feat/" not in refs
+
+
+async def test_current_branch_helper_returns_branch_or_none(tmp_path):
+    from devclaw.delivery import _current_branch
+
+    # Non-repo → None (graceful, not crash).
+    assert await _current_branch(str(tmp_path)) is None
+
+    # Real repo with a checked-out branch → returns its name.
+    repo = str(tmp_path / "r")
+    os.makedirs(repo)
+    _init_repo(repo)
+    assert (await _current_branch(repo)) in ("main", "master")
+
+
 def test_cc_helpers_and_changes_body():
     from devclaw.delivery import _cc_type, _cc_description, _looks_conventional
     assert _looks_conventional("feat(api): add x") and not _looks_conventional("add x")

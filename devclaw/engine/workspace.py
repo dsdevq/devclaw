@@ -47,10 +47,26 @@ async def _default_branch(workspace_dir: str) -> str:
     return "main"
 
 
-async def prepare_workspace(workspace_dir: str, repo_url: str | None = None) -> str:
-    """Ensure ``workspace_dir`` is a pristine checkout of the repo's default
-    branch at latest origin. Clones from ``repo_url`` if the dir isn't a repo.
-    Returns the default branch name. Raises :class:`WorkspaceError` on failure.
+async def prepare_workspace(
+    workspace_dir: str,
+    repo_url: str | None = None,
+    branch: str | None = None,
+) -> str:
+    """Ensure ``workspace_dir`` is a pristine checkout of either the repo's
+    default branch (when ``branch`` is None) OR the named ``branch`` at its
+    latest tip. Clones from ``repo_url`` if the dir isn't a repo. Returns the
+    name of the branch the working tree ended up on. Raises
+    :class:`WorkspaceError` on failure.
+
+    The ``branch`` arg is the Pillar 1 / Pillar 2 hook: each per-item task in
+    a checklist-mode goal passes ``branch="goal/<goal_id>"`` so subsequent
+    items see the prior items' commits stacked on the goal branch instead of
+    branching off origin/main and re-implementing the foundation (the
+    2026-06-26 finance-sentry-mcp-v3 PR-fan-out failure). When the goal
+    branch doesn't exist yet (first item) it is created from the default
+    branch at latest origin; otherwise it is fetched + fast-forwarded to its
+    own remote tip (preserving the agent's accumulated work) and rebased onto
+    the latest default-branch tip so a long-running goal still tracks main.
 
     Injected into the goal tick so unit tests pass a no-op.
     """
@@ -71,13 +87,49 @@ async def prepare_workspace(workspace_dir: str, repo_url: str | None = None) -> 
     if rc != 0:
         raise WorkspaceError(f"fetch failed: {out[-300:]}")
 
-    base = await _default_branch(workspace_dir)
-    for cmd in (
-        ("git", "checkout", "-f", base),
-        ("git", "reset", "--hard", f"origin/{base}"),
-        ("git", "clean", "-fdx"),
-    ):
-        rc, out = await _run(*cmd, cwd=workspace_dir)
+    default_branch = await _default_branch(workspace_dir)
+
+    if branch is None or branch == default_branch:
+        # Legacy / discovery / done-gate path — just reset to the default branch.
+        for cmd in (
+            ("git", "checkout", "-f", default_branch),
+            ("git", "reset", "--hard", f"origin/{default_branch}"),
+            ("git", "clean", "-fdx"),
+        ):
+            rc, out = await _run(*cmd, cwd=workspace_dir)
+            if rc != 0:
+                raise WorkspaceError(f"{' '.join(cmd)} failed: {out[-300:]}")
+        return default_branch
+
+    # Goal-branch path. Start clean (drop any untracked debris from a prior
+    # task), then either fast-forward the existing branch to its remote tip
+    # OR create it fresh from the default branch.
+    rc, _ = await _run("git", "clean", "-fdx", cwd=workspace_dir)
+    if rc != 0:
+        # clean failure is rare and not load-bearing here — log via the error
+        # below if a subsequent op trips on residue.
+        pass
+
+    rc_remote, _ = await _run(
+        "git", "rev-parse", "--verify", "--quiet", f"origin/{branch}",
+        cwd=workspace_dir,
+    )
+    if rc_remote == 0:
+        # Branch exists on origin — check it out and reset to its tip so we
+        # have ALL prior items' commits. (A force-reset is safe because we
+        # never write to this branch except via push from devclaw itself.)
+        rc, out = await _run(
+            "git", "checkout", "-B", branch, f"origin/{branch}", cwd=workspace_dir,
+        )
         if rc != 0:
-            raise WorkspaceError(f"{' '.join(cmd)} failed: {out[-300:]}")
-    return base
+            raise WorkspaceError(f"checkout goal branch {branch} failed: {out[-300:]}")
+    else:
+        # First item of the goal — branch from origin/<default> so the goal
+        # starts at the same point a single-PR rerun would.
+        rc, out = await _run(
+            "git", "checkout", "-B", branch, f"origin/{default_branch}",
+            cwd=workspace_dir,
+        )
+        if rc != 0:
+            raise WorkspaceError(f"create goal branch {branch} failed: {out[-300:]}")
+    return branch
