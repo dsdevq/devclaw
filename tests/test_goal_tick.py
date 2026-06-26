@@ -217,6 +217,60 @@ async def test_dispatch_cap_blocks_runaway(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_cap_lifts_in_checklist_mode(tmp_path):
+    """When a checklist exists, the cap floor rises to the checklist size +
+    margin — backlog size alone would block a long-checklist goal every few
+    items (live-found 2026-06-26 on finance-sentry-mcp-v3: cap=7 from a
+    5-item backlog blocked a goal with 22 ready items remaining)."""
+    from devclaw.goal.models import Checklist, ChecklistItem
+
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", backlog=["a", "b"])  # backlog cap would be 4
+
+    # 20 atomic items in the checklist — the bounded work surface is much larger
+    cl = Checklist(items=[
+        ChecklistItem(id=f"i-{i}", requirement="r", evidence_target="t")
+        for i in range(20)
+    ])
+    store.write_checklist("g", cl)
+
+    # actions_dispatched=5 would trip the legacy backlog cap (=4) — but
+    # checklist mode lifts the floor to 20+2=22, so this tick proceeds.
+    store.save_status("g", GoalStatus(phase="idle", actions_dispatched=5))
+    planner = FakeClaude(ACT_FEATURE)
+    engine = FakeEngine()  # dispatch only
+    out = await _tick(store, "g", planner, FakeClaude(), engine, RecordingNotifier())
+
+    assert out is Outcome.DISPATCHED
+    assert len(engine.dispatched) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_cap_still_blocks_when_checklist_exhausted(tmp_path):
+    """The cap is checklist_size + small margin — a goal that's already
+    dispatched more than every checklist item gets blocked, even in
+    checklist mode (the planner is genuinely looping)."""
+    from devclaw.goal.models import Checklist, ChecklistItem
+
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", backlog=["a"])
+
+    cl = Checklist(items=[
+        ChecklistItem(id=f"i-{i}", requirement="r", evidence_target="t")
+        for i in range(5)
+    ])
+    store.write_checklist("g", cl)
+    # cap = max(1+2, 5+2) = 7; dispatched 7 → blocked
+    store.save_status("g", GoalStatus(phase="idle", actions_dispatched=7))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", FakeClaude(ACT_FEATURE), FakeClaude(), FakeEngine(), notifier)
+
+    assert out is Outcome.BLOCKED
+    assert any("(7)" in m for m in notifier.sent)
+
+
+@pytest.mark.asyncio
 async def test_planner_blocked_notifies(tmp_path):
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
