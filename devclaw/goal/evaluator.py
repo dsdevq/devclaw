@@ -31,7 +31,7 @@ import os
 import re
 from typing import Awaitable, Callable, Optional
 
-from .models import EvalResult, Goal, GoalStatus
+from .models import ClauseVerdict, EvalResult, Goal, GoalStatus
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -111,7 +111,40 @@ def extract_json(text: str) -> str:
     raise GoalEvalError("No JSON object found in evaluator response", text)
 
 
-def validate(parsed: object) -> EvalResult:
+def _parse_clauses(raw: object) -> list[ClauseVerdict]:
+    """Parse the model's ``clauses`` array. Tolerant of shape drift: drops
+    entries that aren't dicts, coerces bool-ish ``satisfied`` values
+    (true/false, "yes"/"no", "partial" → False)."""
+    if not isinstance(raw, list):
+        return []
+    out: list[ClauseVerdict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        clause = str(entry.get("clause", "")).strip()
+        if not clause:
+            continue
+        sat_raw = entry.get("satisfied")
+        if isinstance(sat_raw, bool):
+            satisfied = sat_raw
+        elif isinstance(sat_raw, str):
+            # "yes" → True; "partial" / "no" / anything else → False (the strict
+            # contract: partial doesn't satisfy a clause at the done-gate)
+            satisfied = sat_raw.strip().lower() == "yes"
+        else:
+            satisfied = False
+        evidence = str(entry.get("evidence", "")).strip()
+        out.append(ClauseVerdict(clause=clause, satisfied=satisfied, evidence=evidence))
+    return out
+
+
+def validate(parsed: object, *, at_done_gate: bool = False) -> EvalResult:
+    """Validate + normalize the model's evaluation. When ``at_done_gate=True``,
+    ``achieved`` requires every clause in ``clauses`` to be ``satisfied=True``
+    with non-empty ``evidence`` — otherwise the verdict is downgraded to
+    ``off_track`` with one correction per unsatisfied clause (the safety net
+    that closes the 2026-06-25 "stub everything" failure mode, where the model
+    can still ignore the strict prompt and stamp ``achieved`` on vibes)."""
     if not isinstance(parsed, dict):
         raise GoalEvalError("Eval must be a JSON object")
     verdict = parsed.get("verdict")
@@ -121,14 +154,52 @@ def validate(parsed: object) -> EvalResult:
     raw_corr = parsed.get("corrections") or []
     corrections = [str(c).strip() for c in raw_corr if str(c).strip()] if isinstance(raw_corr, list) else []
     question = str(parsed.get("question", "")).strip()
+    clauses = _parse_clauses(parsed.get("clauses"))
     if verdict == "needs_human" and not question:
         # tolerate a model that put the ask in rationale rather than question
         question = rationale or "the evaluator needs a human decision (no question given)"
     if verdict == "off_track" and not corrections:
         # off_track is only actionable with corrections; treat a bare off_track as
         # a soft on_track so we don't silently stall without steering.
-        return EvalResult(verdict="on_track", rationale=rationale or "no corrections given")
-    return EvalResult(verdict=verdict, rationale=rationale, corrections=corrections, question=question)
+        return EvalResult(verdict="on_track", rationale=rationale or "no corrections given", clauses=clauses)
+    # Done-gate strictness: achieved MUST be backed by per-clause evidence; the
+    # model can technically still claim achieved with no clauses (or with some
+    # unsatisfied), so we re-check here and downgrade with derived corrections.
+    if at_done_gate and verdict == "achieved":
+        if not clauses:
+            return EvalResult(
+                verdict="off_track",
+                rationale=(
+                    rationale or "evaluator returned 'achieved' but provided no per-clause "
+                    "evidence — the done-gate requires explicit clause-by-clause grading."
+                ),
+                corrections=[
+                    "Return a per-clause `clauses` array with satisfied + evidence for "
+                    "every atomic done_when requirement; do not claim 'achieved' without "
+                    "it."
+                ],
+                clauses=clauses,
+            )
+        unsatisfied = [c for c in clauses if not c.satisfied or not c.evidence]
+        if unsatisfied:
+            derived = [
+                f"[clause: {c.clause}] {c.evidence or 'no evidence provided'} — "
+                f"address this before declaring done."
+                for c in unsatisfied
+            ]
+            return EvalResult(
+                verdict="off_track",
+                rationale=(
+                    rationale or f"{len(unsatisfied)} of {len(clauses)} done_when "
+                    "clause(s) lack confirmed evidence."
+                ),
+                corrections=derived,
+                clauses=clauses,
+            )
+    return EvalResult(
+        verdict=verdict, rationale=rationale, corrections=corrections,
+        question=question, clauses=clauses,
+    )
 
 
 async def evaluate(
@@ -155,7 +226,7 @@ async def evaluate(
         parsed = json.loads(extract_json(raw))
     except json.JSONDecodeError as exc:
         raise GoalEvalError(f"evaluator emitted invalid JSON: {exc}", raw) from exc
-    return validate(parsed)
+    return validate(parsed, at_done_gate=at_done_gate)
 
 
 def default_caller() -> ClaudeCaller:

@@ -139,6 +139,27 @@ class PlanResult:
 
 
 @dataclass(frozen=True)
+class ClauseVerdict:
+    """One atomic ``done_when`` clause + the evaluator's per-clause finding.
+
+    At the done-gate the evaluator decomposes ``done_when`` into independent
+    requirements joined by AND and grades each one against the repo-review
+    evidence. The aggregate verdict on the parent :class:`EvalResult` is then
+    derived from these: ``achieved`` requires every clause to be satisfied with
+    non-empty evidence; any unsatisfied clause forces ``off_track`` with that
+    clause cited in the corrections (closes the 2026-06-25 "stub everything"
+    failure mode)."""
+
+    clause: str
+    satisfied: bool
+    #: file path(s) + symbol/test name(s) confirming satisfaction, OR an explicit
+    #: "missing — should live in <where>" note when unsatisfied. Vague prose is
+    #: rejected by the evaluator prompt; a non-empty string here is the evidence
+    #: contract.
+    evidence: str = ""
+
+
+@dataclass(frozen=True)
 class EvalResult:
     """The direction evaluator's verdict — grounded in delivered artifacts, not
     in backlog-counts. ``verdict`` drives the loop: ``achieved`` closes the goal;
@@ -152,6 +173,8 @@ class EvalResult:
     corrections: list[str] = field(default_factory=list)
     #: present when verdict == "needs_human"
     question: str = ""
+    #: per-clause findings — populated at the done-gate. Empty pre-done-gate.
+    clauses: list[ClauseVerdict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
