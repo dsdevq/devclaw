@@ -58,6 +58,70 @@ NO_PROGRESS_S = int(os.environ.get("DEVCLAW_GOAL_NO_PROGRESS_S", "21600"))
 VERIFY_DONE = os.environ.get("DEVCLAW_GOAL_VERIFY_DONE", "1") not in ("0", "false", "")
 
 
+def _done_gate_review_brief(goal: "Goal") -> str:
+    """The instruction the in-sandbox read-only reviewer gets when the planner
+    proposes done. The reviewer's report is then fed to the direction evaluator
+    — both sides speak the same vocabulary: ``done_when`` is decomposed into
+    atomic clauses, and each clause needs SPECIFIC repo evidence (file path +
+    symbol + test name) to count as satisfied. This closes the
+    `finance-sentry-mcp-readonly` failure mode (2026-06-25), where the reviewer
+    produced a vague prose report, the evaluator stamped it `achieved`, and the
+    delivered PR turned out to be 16 stub tools with zero real backend reads."""
+    return (
+        "Read-only review of this repository to verify whether the goal is "
+        "fully satisfied. You produce the GROUNDED evidence the direction "
+        "evaluator will judge against — be specific and honest, not generous.\n\n"
+        f"Objective: {goal.objective}\n"
+        f"Done when: {goal.done_when}\n\n"
+        "PROCEDURE — follow in order, do NOT skip:\n\n"
+        "1. DECOMPOSE the 'Done when' text into atomic clauses (independent "
+        "requirements joined by AND). Number them. Treat 'X with Y, including "
+        "Z' as three clauses (X, Y, Z). An OR within a clause is a single "
+        "clause with an alternative — pick the alternative the code actually "
+        "shows.\n\n"
+        "2. For EACH clause, search the repository for SPECIFIC evidence and "
+        "report:\n"
+        "   - clause: the exact clause text\n"
+        "   - satisfied: yes | no | partial\n"
+        "   - evidence: file path(s) + function/class/test name(s) that confirm "
+        "satisfaction. 'src/Foo.cs handles it' is NOT evidence; "
+        "'src/Foo.cs:42 GetAccountById queries _db.Accounts, covered by "
+        "FooTests.GetAccountById_ReturnsAccount' IS evidence.\n"
+        "   - if not satisfied or partial: name what is missing and where it "
+        "should live (expected file path + symbol).\n\n"
+        "3. Reject 'satisfied' based on weak signals — none of these count "
+        "alone:\n"
+        "   - Tool/symbol NAMES that match the clause (a tool called "
+        "`get_accounts` that returns `{\"status\":\"not_yet_available\"}` does "
+        "NOT satisfy 'expose accounts to the caller').\n"
+        "   - Scaffolding without functionality (an empty contract test that "
+        "asserts 'the registry has 16 entries' does NOT satisfy 'tools must "
+        "read from real backend data').\n"
+        "   - Tests that only assert the stub-like shape (these prove the stub, "
+        "not the requirement).\n"
+        "   - A merged PR or a passing gate alone — those prove 'behaviour "
+        "doesn't break', not 'the requirement is met'.\n\n"
+        "4. Output format — your final report MUST have this structure:\n\n"
+        "   ## Per-clause evidence\n"
+        "   1. <clause 1 text>\n"
+        "      satisfied: yes | no | partial\n"
+        "      evidence: <specific files/symbols/tests OR 'missing — should "
+        "live in <path>:<symbol>'>\n"
+        "   2. <clause 2 text>\n"
+        "      satisfied: ...\n"
+        "      evidence: ...\n"
+        "   ...\n\n"
+        "   ## Summary\n"
+        "   <2-3 sentences: are all clauses satisfied? if not, which ones and "
+        "how serious?>\n\n"
+        "   ## Risks not in done_when\n"
+        "   <anything worth raising that isn't part of done_when>\n\n"
+        "Be honest. You are graded on producing a report that matches reality, "
+        "not on appearing thorough. Understating the gap means the goal will "
+        "close on incomplete work."
+    )
+
+
 class Outcome(str, Enum):
     IDLE = "idle"            # cheap check found nothing — 0 tokens
     IN_FLIGHT = "in_flight"  # dispatched action still running — 0 tokens
@@ -515,11 +579,7 @@ async def _open_done_gate(
             return Outcome.ERROR
         review = Action(
             engine="devclaw", tool="review_repository",
-            goal=(
-                f"Read-only review: does this repository fully satisfy the goal?\n"
-                f"Objective: {goal.objective}\nDone when: {goal.done_when}\n"
-                f"Report concretely what is satisfied and what (if anything) is missing or wrong."
-            ),
+            goal=_done_gate_review_brief(goal),
             open_pr=False,
         )
         try:

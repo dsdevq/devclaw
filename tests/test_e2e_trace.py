@@ -26,7 +26,20 @@ PLAN_ACT = json.dumps({
     "actions": [{"tool": "implement_feature", "goal": "add /health", "open_pr": True}],
 })
 PLAN_DONE = json.dumps({"decision": "done", "note": "all backlog shipped"})
-EVAL_ACHIEVED = json.dumps({"verdict": "achieved", "rationale": "all done_when met"})
+EVAL_ACHIEVED = json.dumps({
+    "verdict": "achieved",
+    "rationale": "all done_when met",
+    # Done-gate now requires per-clause evidence — a bare "achieved" is
+    # downgraded by the validator. Supply minimal clauses so this e2e
+    # lifecycle test stays on the happy path.
+    "clauses": [
+        {
+            "clause": "done_when met",
+            "satisfied": True,
+            "evidence": "PR #1 merged with gate passed",
+        }
+    ],
+})
 
 
 async def _tick(store, planner, evaluator, engine, notifier, *, verify_done=True):

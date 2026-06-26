@@ -286,6 +286,15 @@ async def test_planner_done_opens_verification_review(tmp_path):
     assert len(engine.dispatched) == 1
     review_action, _, _ = engine.dispatched[0]
     assert review_action.tool == "review_repository"
+    # The dispatched review brief MUST carry the strict per-clause directive — this
+    # is what closes the 2026-06-25 "stub-everything passed the done-gate" failure
+    # mode by ensuring both the reviewer (inside the sandbox) and the direction
+    # evaluator (in devclaw) speak the same per-clause-evidence vocabulary.
+    brief = review_action.goal
+    assert "DECOMPOSE" in brief and "atomic clauses" in brief
+    assert "Per-clause evidence" in brief
+    assert "not_yet_available" in brief or "stub" in brief.lower()  # the failure-mode warning
+    assert "Objective:" in brief and "Done when:" in brief
     saved = store.load_status("g")
     assert saved.phase == "verifying"
     assert saved.in_flight is not None and saved.in_flight.is_done_check is True
@@ -300,7 +309,22 @@ async def test_done_gate_review_achieved_closes_goal(tmp_path):
         in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
     ))
     planner = FakeClaude(ACT)  # must NOT be called
-    evaluator = FakeClaude(json.dumps({"verdict": "achieved", "rationale": "/health exists and is tested"}))
+    evaluator = FakeClaude(json.dumps({
+        "verdict": "achieved",
+        "rationale": "/health exists and is tested",
+        "clauses": [
+            {
+                "clause": "/health returns 200",
+                "satisfied": True,
+                "evidence": "src/Health.cs:12 returns OK; HealthTests.cs:8 asserts 200",
+            },
+            {
+                "clause": "/health is tested",
+                "satisfied": True,
+                "evidence": "HealthTests.cs:8 Health_Returns200",
+            },
+        ],
+    }))
     engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="repo has /health + test"))
     notifier = RecordingNotifier()
 
@@ -344,7 +368,22 @@ async def test_done_gate_disabled_uses_artifact_eval(tmp_path):
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     planner = FakeClaude(json.dumps({"decision": "done", "note": "done"}))
-    evaluator = FakeClaude(json.dumps({"verdict": "achieved", "rationale": "deliveries show done_when met"}))
+    evaluator = FakeClaude(json.dumps({
+        "verdict": "achieved",
+        "rationale": "deliveries show done_when met",
+        "clauses": [
+            {
+                "clause": "/health returns 200",
+                "satisfied": True,
+                "evidence": "PR #1 added src/Health.cs:12 + HealthTests.cs:8",
+            },
+            {
+                "clause": "/health is tested",
+                "satisfied": True,
+                "evidence": "HealthTests.cs:8 Health_Returns200 passing",
+            },
+        ],
+    }))
     engine, notifier = FakeEngine(), RecordingNotifier()
 
     out = await _tick(store, "g", planner, evaluator, engine, notifier, verify_done=False)

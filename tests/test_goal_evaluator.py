@@ -79,6 +79,151 @@ def test_done_gate_prompt_includes_spec_when_present():
     assert "Agreed spec" in prompt and "/ready" in prompt
 
 
+# ---- per-clause evidence contract (the 2026-06-25 trash-PR safety net) ----
+
+
+def test_goal_evaluator_prompt_carries_clause_decomposition_directive():
+    """The prompt MUST tell the model to decompose done_when into atomic
+    clauses and demand specific repo evidence per clause — this is the
+    behaviour that prevents the 'all stubs counted as done' failure mode."""
+    prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries", at_done_gate=True)
+    assert "DECOMPOSE" in prompt or "decompose" in prompt.lower()
+    assert "atomic clauses" in prompt.lower() or "atomic clause" in prompt.lower()
+    assert "evidence" in prompt.lower()
+    # the strict rule that prevents the trash-PR class
+    assert "achieved" in prompt.lower()
+
+
+def test_done_gate_achieved_without_clauses_is_downgraded():
+    # Belt-and-suspenders: even with a strict prompt the model can claim
+    # 'achieved' without producing per-clause evidence. The validator
+    # downgrades to off_track with a forcing correction.
+    r = validate(
+        {"verdict": "achieved", "rationale": "looks good"},
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert r.corrections, "expected a forcing correction asking for clauses"
+    assert "clause" in r.corrections[0].lower()
+
+
+def test_done_gate_achieved_with_unsatisfied_clause_is_downgraded():
+    # 'achieved' with at least one unsatisfied clause must downgrade and
+    # surface a per-clause correction.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "shipped",
+            "clauses": [
+                {
+                    "clause": "/health returns 200",
+                    "satisfied": True,
+                    "evidence": "src/Health.cs:12 returns OK; HealthTests.cs:8 asserts 200",
+                },
+                {
+                    "clause": "/health is tested",
+                    "satisfied": False,
+                    "evidence": "missing — should live in tests/HealthTests.cs",
+                },
+            ],
+        },
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    # the unsatisfied clause must surface as a correction
+    assert any("/health is tested" in c for c in r.corrections)
+    # clauses are preserved on the result for downstream visibility
+    assert len(r.clauses) == 2
+    assert r.clauses[1].satisfied is False
+
+
+def test_done_gate_achieved_with_partial_evidence_is_downgraded():
+    # 'partial' (string) coerces to satisfied=False — partial doesn't count.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "mostly",
+            "clauses": [
+                {"clause": "feature A", "satisfied": "yes", "evidence": "src/A.cs"},
+                {"clause": "feature B", "satisfied": "partial", "evidence": "src/B.cs (incomplete)"},
+            ],
+        },
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert any("feature B" in c for c in r.corrections)
+
+
+def test_done_gate_achieved_clause_with_no_evidence_is_downgraded():
+    # satisfied=True but empty evidence → still downgraded (evidence contract).
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "shipped",
+            "clauses": [
+                {"clause": "feature A", "satisfied": True, "evidence": ""},
+            ],
+        },
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert any("feature A" in c for c in r.corrections)
+
+
+def test_done_gate_achieved_with_all_clauses_satisfied_stays_achieved():
+    # The HAPPY path: every clause satisfied with real evidence → achieved.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "all clauses met",
+            "clauses": [
+                {
+                    "clause": "/health returns 200",
+                    "satisfied": True,
+                    "evidence": "src/Health.cs:12; HealthTests.cs:8",
+                },
+                {
+                    "clause": "/health is tested",
+                    "satisfied": True,
+                    "evidence": "HealthTests.cs:8 Health_Returns200",
+                },
+            ],
+        },
+        at_done_gate=True,
+    )
+    assert r.verdict == "achieved"
+    assert len(r.clauses) == 2
+    assert all(c.satisfied for c in r.clauses)
+
+
+def test_pre_done_gate_achieved_is_not_strict():
+    # Outside the done-gate, achieved doesn't require clauses (mid-goal
+    # evaluator never returns achieved in practice, but the validator must
+    # not reject it). Behaviour stays as the existing soft contract.
+    r = validate({"verdict": "achieved", "rationale": "wip"})
+    assert r.verdict == "achieved"
+
+
+def test_off_track_at_done_gate_preserves_clauses():
+    # When the model itself returns off_track (with corrections), the clauses
+    # it produced are still preserved for visibility.
+    r = validate(
+        {
+            "verdict": "off_track",
+            "rationale": "one clause missing",
+            "corrections": ["[clause 2] add the missing endpoint"],
+            "clauses": [
+                {"clause": "feature A", "satisfied": True, "evidence": "src/A.cs"},
+                {"clause": "feature B", "satisfied": False, "evidence": "missing"},
+            ],
+        },
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert len(r.clauses) == 2
+    assert r.corrections == ["[clause 2] add the missing endpoint"]
+
+
 def test_eval_prompt_omits_spec_section_when_absent():
     prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries")
     assert "Agreed spec" not in prompt
