@@ -9,6 +9,8 @@ leak can't silently come back, and assert it stays unit-testable (pure arg build
 no docker).
 """
 
+import pytest
+
 from devclaw.engine import sandcastle as sc
 
 
@@ -108,6 +110,73 @@ def test_docker_args_do_not_leak_skills_or_plugins():
     joined = " ".join(args)
     for leaked in ("/skills", "/plugins", "/projects", "/CLAUDE.md", "/history.jsonl"):
         assert leaked not in joined
+
+
+# ---- workspace pre-flight (close the silent-timeout traps) ----
+
+
+@pytest.fixture
+def in_prefix(monkeypatch):
+    """Simulate a containerized devclaw where workspaces live under
+    /var/lib/devclaw/workspaces (container view) ↔ /srv/devclaw/workspaces (host)."""
+    monkeypatch.setenv("DEVCLAW_CONTAINER_PATH_PREFIX", "/var/lib/devclaw/workspaces")
+    monkeypatch.setenv("DEVCLAW_HOST_PATH_PREFIX", "/srv/devclaw/workspaces")
+
+
+@pytest.fixture
+def no_prefix(monkeypatch):
+    """Local-dev: devclaw runs directly on the host, no translation."""
+    monkeypatch.delenv("DEVCLAW_CONTAINER_PATH_PREFIX", raising=False)
+    monkeypatch.delenv("DEVCLAW_HOST_PATH_PREFIX", raising=False)
+
+
+def test_validate_workspace_rejects_out_of_prefix_path(in_prefix, tmp_path):
+    # The 2026-06-25 finance-sentry-mcp incident: openclaw passed an in-its-own-
+    # container path that wasn't under devclaw's prefix; docker mounted an empty
+    # host dir at /workspace and every task timed out at 1800s with no signal.
+    err = sc._validate_workspace("/home/node/.openclaw/agents/devclaw/tmp/foo")
+    assert err is not None
+    assert "outside the devclaw workspaces mount" in err
+    assert "/var/lib/devclaw/workspaces" in err
+
+
+def test_validate_workspace_rejects_missing_path(in_prefix):
+    err = sc._validate_workspace("/var/lib/devclaw/workspaces/never-cloned")
+    assert err is not None
+    assert "does not exist" in err
+
+
+def test_validate_workspace_rejects_empty_dir(in_prefix, tmp_path, monkeypatch):
+    # An empty bind-source produces a silent timeout — this is the exact failure
+    # mode of the finance-sentry-mcp incident's host bind path.
+    monkeypatch.setenv("DEVCLAW_CONTAINER_PATH_PREFIX", str(tmp_path))
+    empty = tmp_path / "empty-ws"
+    empty.mkdir()
+    err = sc._validate_workspace(str(empty))
+    assert err is not None
+    assert "EMPTY directory" in err
+
+
+def test_validate_workspace_accepts_populated_dir(in_prefix, tmp_path, monkeypatch):
+    monkeypatch.setenv("DEVCLAW_CONTAINER_PATH_PREFIX", str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "README.md").write_text("hi")
+    assert sc._validate_workspace(str(ws)) is None
+
+
+def test_validate_workspace_passes_through_in_local_dev(no_prefix, tmp_path):
+    # No prefix env → any populated, existing path is fine (the local-dev posture
+    # where devclaw and docker share the same filesystem view).
+    (tmp_path / "f").write_text("x")
+    assert sc._validate_workspace(str(tmp_path)) is None
+
+
+def test_validate_workspace_still_rejects_missing_in_local_dev(no_prefix, tmp_path):
+    # Even without a prefix, a non-existent workspace mounts as nothing and
+    # times out — keep the precheck so the operator gets a clear message.
+    err = sc._validate_workspace(str(tmp_path / "nope"))
+    assert err is not None and "does not exist" in err
 
 
 # ---- API-key refusal (belt + suspenders, alongside the runner's own check) ----

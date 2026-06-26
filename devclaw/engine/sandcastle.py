@@ -136,6 +136,62 @@ def _translate_workspace_path(workspace_dir: str) -> str:
     return workspace_dir
 
 
+def _validate_workspace(workspace_dir: str) -> str | None:
+    """Catch the silent-timeout trap: an upstream that hands us a workspace_dir
+    we can't usefully bind-mount as ``/workspace``. Returns an error message if
+    the workspace is unusable, ``None`` otherwise.
+
+    Two failure modes are silent without this gate:
+
+    1. **Out-of-prefix path** — when devclaw runs containerized, only paths
+       under ``DEVCLAW_CONTAINER_PATH_PREFIX`` translate to a host path the
+       sibling sandbox can bind. A foreign path (e.g. an openclaw-waiter-side
+       tmp dir) passes through ``_translate_workspace_path`` unchanged and
+       docker mounts whatever happens to exist at that host location — usually
+       nothing, an empty dir, or stale content.
+    2. **Empty bind source** — even an in-prefix path may have been wiped or
+       never populated. An empty bind-mount looks identical to a hung sandbox:
+       the agent enters ``/workspace``, finds no repo, can't make progress,
+       and burns the full wall-clock before being torn down. The planner sees
+       only a generic timeout and has to guess.
+
+    Fail fast with a specific message instead — the goal layer surfaces it
+    verbatim and the operator (or planner) can correct course immediately."""
+    container_prefix = os.environ.get("DEVCLAW_CONTAINER_PATH_PREFIX")
+    host_prefix = os.environ.get("DEVCLAW_HOST_PATH_PREFIX")
+    if container_prefix and host_prefix and not workspace_dir.startswith(container_prefix):
+        return (
+            f"workspace_dir {workspace_dir!r} is outside the devclaw workspaces "
+            f"mount ({container_prefix!r} → {host_prefix!r}). The sibling sandbox "
+            f"cannot bind-mount paths it doesn't own; pass a workspace under "
+            f"{container_prefix}."
+        )
+    # Check the workspace AS THE devclaw PROCESS SEES IT — same dir contents as
+    # the host bind source (the container_prefix mount points at host_prefix).
+    # In local-dev (no prefix translation) this is also the host path itself.
+    p = Path(workspace_dir)
+    if not p.exists():
+        return (
+            f"workspace_dir {workspace_dir!r} does not exist. The sandbox would "
+            f"mount a non-existent path as /workspace and time out with no signal."
+        )
+    if p.is_dir():
+        try:
+            next(p.iterdir())
+        except StopIteration:
+            return (
+                f"workspace_dir {workspace_dir!r} is an EMPTY directory. The "
+                f"sandbox would mount it as an empty /workspace, the agent "
+                f"would find no repo, and the run would time out at the "
+                f"wall-clock. Clone or restore the workspace first."
+            )
+        except (PermissionError, OSError):
+            # Can't stat — fall through and let docker speak for itself rather
+            # than refusing a possibly-valid path.
+            pass
+    return None
+
+
 def _build_claude_mounts(claude_dir: str, allowlist: tuple[str, ...]) -> list[str]:
     """``-v`` args binding ONLY the allowlisted entries under the host ~/.claude
     into the sandbox config dir, each read-only. The curated boundary: auth in,
@@ -203,6 +259,11 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
     claude_dir = os.environ.get("DEVCLAW_HOST_CLAUDE_DIR") or str(
         Path.home() / ".claude"
     )
+    # Fail fast on a workspace the sandbox can't usefully mount — see
+    # _validate_workspace for the two silent-timeout traps this closes.
+    bind_err = _validate_workspace(req.workspace_dir)
+    if bind_err is not None:
+        return {"status": "error", "error": bind_err}
     host_bind_path = _translate_workspace_path(req.workspace_dir)
 
     # Per-task container name for greppable logs + manual cleanup if --rm fails.
