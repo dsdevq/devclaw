@@ -979,9 +979,21 @@ async def _resolve_polling_action(
     # Hands-off auto-merge: a delivered change whose verify gate passed is
     # merged by devclaw itself, with a plain owner ping. Best-effort + gated —
     # a failed merge just leaves the PR for review.
+    #
+    # Pillar 2 exception: when this action was a checklist-mode dispatch
+    # (action carries ``addresses`` of one or more checklist items), the PR
+    # is the SHARED goal-branch PR that subsequent items will keep pushing
+    # to. Auto-merging it now deletes the goal branch and forces item N+1
+    # to re-fork from main, fanning out into a new PR (the 2026-06-26
+    # finance-sentry-mcp-v4 regression that broke the v3 rerun's "one PR
+    # per goal" guarantee on item 1). Skip auto-merge in that case — the
+    # done-gate is the natural moment for a single human review of the
+    # cumulative work.
+    in_checklist_dispatch = bool(getattr(ref, "addresses", None))
     if (
         _merge.AUTOMERGE_ENABLED and ctx.merger is not None
         and poll.status == "done" and poll.gate_passed and poll.pr_url
+        and not in_checklist_dispatch
     ):
         if await ctx.merger(poll.pr_url):
             ctx.store.append_log(goal_id, f"auto-merged {poll.pr_url}")
