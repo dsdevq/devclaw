@@ -20,7 +20,8 @@ import os
 import re
 from typing import Awaitable, Callable
 
-from .models import Action, Goal, GoalStatus, PlanResult
+from .checklist import ready_items as _ready_items
+from .models import Action, Checklist, Goal, GoalStatus, PlanResult
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -37,6 +38,46 @@ class GoalPlannerError(Exception):
         self.raw = raw
 
 
+def _render_checklist_section(checklist: Checklist) -> str:
+    """A compact view of the checklist for the per-tick planner: ready items
+    (status==not_started + deps satisfied) plus a coarse status tally. The
+    planner picks the next action from ready items; the tally tells it when
+    the checklist is exhausted and it can propose done."""
+    total = len(checklist.items)
+    by_status: dict[str, int] = {}
+    for it in checklist.items:
+        by_status[it.status] = by_status.get(it.status, 0) + 1
+    tally = ", ".join(f"{k}: {v}" for k, v in sorted(by_status.items()))
+    ready = _ready_items(checklist)
+    lines = [
+        f"items total: {total}  ({tally})",
+        f"ready items (pick ONE; populate addresses=[<id>] in your action):",
+    ]
+    if not ready:
+        lines.append("  (none — every not_started item has unmet dependencies; "
+                     "if everything else is done, propose decision='done')")
+    for it in ready:
+        deps_note = (
+            f"  deps: {', '.join(it.depends_on)}" if it.depends_on else "  deps: none"
+        )
+        evid = f"  evidence_target: {it.evidence_target}"
+        note = f"  note: {it.note}" if it.note else ""
+        lines.append(f"  - {it.id}: {it.requirement}")
+        lines.append(deps_note)
+        lines.append(evid)
+        if note:
+            lines.append(note)
+    if checklist.open_questions:
+        lines.append("\nopen questions the decomposer left for the owner:")
+        for q in checklist.open_questions:
+            lines.append(f"  - {q}")
+    if checklist.notes:
+        lines.append("\nnotes from the decomposer (executor hints):")
+        for n in checklist.notes:
+            lines.append(f"  - {n}")
+    return "\n".join(lines)
+
+
 def build_prompt(
     goal: Goal,
     status: GoalStatus,
@@ -44,6 +85,7 @@ def build_prompt(
     steering: str,
     finished_detail: str,
     discovery: str = "",
+    checklist: Checklist | None = None,
 ) -> str:
     from ..prompts import load_prompt
 
@@ -73,6 +115,11 @@ def build_prompt(
             "\n## Discovery brief (from investigating the repo — current state · "
             "gap-to-good · what good looks like; draw the next action from this)",
             discovery,
+        ]
+    if checklist is not None and checklist.items:
+        parts += [
+            "\n## Checklist (ready items)",
+            _render_checklist_section(checklist),
         ]
     if finished_detail:
         parts += ["\n## The action that just finished (engine result)", finished_detail]
@@ -125,12 +172,22 @@ def validate(parsed: object) -> PlanResult:
     g = str(a.get("goal", "")).strip()
     if not g:
         raise GoalPlannerError("action.goal must be non-empty")
+    raw_addresses = a.get("addresses")
+    addresses: list[str] = []
+    if isinstance(raw_addresses, list):
+        seen: set[str] = set()
+        for entry in raw_addresses:
+            s = str(entry).strip()
+            if s and s not in seen:
+                seen.add(s)
+                addresses.append(s)
     action = Action(
         engine="devclaw",
         tool=tool,
         goal=g,
         verify_cmd=(str(a["verify_cmd"]).strip() if a.get("verify_cmd") else None),
         open_pr=bool(a.get("open_pr", True)),
+        addresses=addresses,
     )
     return PlanResult(decision="act", actions=[action], note=note or g)
 
@@ -144,10 +201,13 @@ async def plan(
     *,
     claude_caller: ClaudeCaller,
     discovery: str = "",
+    checklist: Checklist | None = None,
 ) -> PlanResult:
     """Run the next-action plan step. ``claude_caller`` is injected so tests stub
-    the LLM. ``discovery`` is the investigating-phase brief, when present."""
-    prompt = build_prompt(goal, status, recent_log, steering, finished_detail, discovery)
+    the LLM. ``discovery`` is the investigating-phase brief, when present.
+    ``checklist`` is the decomposer's structured plan — when present, the
+    prompt enters checklist mode and the planner picks one ready item."""
+    prompt = build_prompt(goal, status, recent_log, steering, finished_detail, discovery, checklist)
     raw = await claude_caller(prompt)
     try:
         parsed = json.loads(extract_json(raw))

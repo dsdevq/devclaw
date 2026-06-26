@@ -121,11 +121,17 @@ class GoalStore:
         inflight = None
         if fm.get("in_flight"):
             f = fm["in_flight"]
+            raw_addr = f.get("addresses") or []
+            addresses = (
+                [str(a) for a in raw_addr if str(a).strip()]
+                if isinstance(raw_addr, list) else []
+            )
             inflight = InFlight(
                 engine=f["engine"], tool=f["tool"], id=f["id"],
                 ref_kind=f["ref_kind"], goal=f.get("goal", ""),
                 is_done_check=bool(f.get("is_done_check", False)),
                 is_discovery=bool(f.get("is_discovery", False)),
+                addresses=addresses,
             )
         return GoalStatus(
             phase=fm.get("phase", "idle"),
@@ -158,6 +164,7 @@ class GoalStore:
                     "goal": status.in_flight.goal,
                     "is_done_check": status.in_flight.is_done_check,
                     "is_discovery": status.in_flight.is_discovery,
+                    "addresses": list(status.in_flight.addresses),
                 }
                 if status.in_flight
                 else None
@@ -230,6 +237,34 @@ class GoalStore:
         """The discovery brief, or '' if the investigating phase hasn't run."""
         path = self._dir(goal_id) / "discovery.md"
         return path.read_text() if path.exists() else ""
+
+    # ---- checklist (decomposer output — the durable structured plan) ------
+
+    def write_checklist(self, goal_id: str, checklist: "Checklist") -> None:  # type: ignore[name-defined]
+        """Persist the decomposer's full output as ``checklist.yaml``. Lives
+        next to ``STATUS.md`` and is the source of truth the per-tick planner
+        picks actions from; mutable across ticks (settle hook + steer can
+        rewrite items)."""
+        from .checklist import dump_checklist
+
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "checklist.yaml").write_text(dump_checklist(checklist))
+
+    def read_checklist(self, goal_id: str) -> "Checklist | None":  # type: ignore[name-defined]
+        """The current checklist, or ``None`` if the decomposer hasn't run
+        yet (legacy goals + brand-new goals before the decomposing phase
+        completes). The per-tick planner falls back to backlog-driven mode
+        when this is ``None``."""
+        from .checklist import ChecklistParseError, parse_checklist
+
+        path = self._dir(goal_id) / "checklist.yaml"
+        if not path.exists():
+            return None
+        try:
+            return parse_checklist(path.read_text())
+        except ChecklistParseError:
+            return None  # corrupted on disk — caller treats as absent
 
     # ---- scope spec (handed in by the waiter via create_goal) ---------------
 
