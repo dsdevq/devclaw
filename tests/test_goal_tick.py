@@ -132,16 +132,16 @@ async def test_workspace_prepped_before_dispatch(tmp_path):
     planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
     calls: list = []
 
-    async def rec_prepare(ws, repo_url=None):
-        calls.append((ws, repo_url))
-        return "main"
+    async def rec_prepare(ws, repo_url=None, branch=None):
+        calls.append((ws, repo_url, branch))
+        return branch or "main"
 
     out = await tick_goal(
         "g", store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
         notifier=notifier, notify_url="", prepare_ws=rec_prepare, eval_every=99,
     )
     assert out is Outcome.DISPATCHED
-    assert calls == [("/repos/demo", None)]
+    assert calls == [("/repos/demo", None, None)]  # legacy mode, no goal branch
     assert len(engine.dispatched) == 1
 
 
@@ -812,7 +812,9 @@ async def test_task_altitude_restores_the_firehose(tmp_path, monkeypatch):
 # ---- workspace-prep failure: block legibly, never silently loop -------------
 
 
-async def _failing_prepare(workspace_dir: str, repo_url: str | None = None) -> str:
+async def _failing_prepare(
+    workspace_dir: str, repo_url: str | None = None, branch: str | None = None,
+) -> str:
     """A prep that always fails the way a bad/missing/private repo_url does."""
     from devclaw.engine.workspace import WorkspaceError
 

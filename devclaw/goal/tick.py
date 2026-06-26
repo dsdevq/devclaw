@@ -45,8 +45,12 @@ from ..planner import PlannerError
 from ..state_store import _now_ms
 from ..engine.workspace import WorkspaceError, prepare_workspace
 
-#: (workspace_dir, repo_url) -> default branch. Injected so tests pass a no-op.
-WorkspacePrep = Callable[[str, "str | None"], Awaitable[str]]
+#: (workspace_dir, repo_url, branch) -> the branch name actually checked out.
+#: ``branch=None`` keeps the legacy behaviour (default branch); a goal-scoped
+#: ``"goal/<id>"`` branch is passed when checklist mode wants every item to
+#: stack on the same branch instead of forking off main. Injected so tests
+#: pass a no-op.
+WorkspacePrep = Callable[[str, "str | None", "str | None"], Awaitable[str]]
 
 #: deliveries between periodic direction evaluations (0 → only at the done-gate)
 EVAL_EVERY = int(os.environ.get("DEVCLAW_GOAL_EVAL_EVERY", "3"))
@@ -591,8 +595,12 @@ async def _open_done_gate(
     tick judge it, or — if done-verification is disabled — run an artifact-only
     done evaluation now."""
     if verify_done:
+        # In checklist mode the done-gate reviewer needs to see the goal's
+        # accumulated work — read the goal branch, not the default branch
+        # (otherwise it judges done_when against an empty diff).
+        done_gate_branch = f"goal/{goal_id}" if store.read_checklist(goal_id) else None
         try:
-            await prepare_ws(goal.workspace_dir, goal.repo_url)
+            await prepare_ws(goal.workspace_dir, goal.repo_url, done_gate_branch)
         except WorkspaceError as exc:
             store.append_log(goal_id, f"done-gate workspace prep failed: {exc}")
             store.save_status(goal_id, replace(base, phase="idle", next="retry done-gate"))
@@ -824,10 +832,18 @@ async def _dispatch_action(
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review", summarize=summarize)
         return Outcome.BLOCKED
-    # Give the engine a pristine checkout at latest origin/default — so this
-    # action doesn't pile onto a previous action's branch (per-action freshness).
+    # Give the engine a pristine checkout. Legacy mode resets to origin/<default>
+    # for per-action freshness; checklist mode (Pillar 1) checks out the goal's
+    # ``goal/<id>`` branch instead so each item's commits STACK on the prior
+    # items rather than fork off main and re-implement the foundation (the
+    # 2026-06-26 finance-sentry-mcp-v3 PR-fan-out failure). Read-only
+    # ``review_repository`` actions always run on the default branch — they
+    # don't write — even when a checklist exists.
+    branch_for_dispatch: str | None = None
+    if action.tool != "review_repository" and store.read_checklist(goal_id):
+        branch_for_dispatch = f"goal/{goal_id}"
     try:
-        await prepare_ws(goal.workspace_dir, goal.repo_url)
+        await prepare_ws(goal.workspace_dir, goal.repo_url, branch_for_dispatch)
     except WorkspaceError as exc:
         return await _block_on_prep_failure(
             goal_id, base, exc, store=store, notifier=notifier, summarize=summarize,

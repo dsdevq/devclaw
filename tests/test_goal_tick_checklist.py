@@ -426,6 +426,127 @@ async def test_settled_addressed_action_flips_item_done_with_evidence(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_uses_goal_branch_when_checklist_exists(tmp_path):
+    """Pillar 2 wiring — every item-mode dispatch checks out goal/<id> so
+    subsequent items stack on prior items' commits instead of forking off
+    main and re-implementing the foundation (2026-06-26 PR-fan-out failure)."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.write_checklist("g", _example_checklist())
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    calls: list = []
+
+    async def rec_prepare(ws, repo_url=None, branch=None):
+        calls.append(branch)
+        return branch or "main"
+
+    planner = FakeClaude(_ACT_WITH_ADDRESSES, role="planner")
+    engine = FakeEngine()
+
+    await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=rec_prepare,
+    )
+
+    assert "goal/g" in calls
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_default_branch_when_no_checklist(tmp_path):
+    """Legacy mode preserved: backlog-only goals still get the default-branch
+    reset on every dispatch."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")  # no checklist
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    calls: list = []
+
+    async def rec_prepare(ws, repo_url=None, branch=None):
+        calls.append(branch)
+        return branch or "main"
+
+    legacy_act = json.dumps({
+        "decision": "act", "note": "do it",
+        "actions": [{"tool": "implement_feature", "goal": "do something", "open_pr": True}],
+    })
+    planner = FakeClaude(legacy_act, role="planner")
+    engine = FakeEngine()
+
+    await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=rec_prepare,
+    )
+
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_review_repository_dispatch_does_not_use_goal_branch(tmp_path):
+    """``review_repository`` is read-only — it must run on the default branch
+    even when a checklist exists."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.write_checklist("g", _example_checklist())
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    calls: list = []
+
+    async def rec_prepare(ws, repo_url=None, branch=None):
+        calls.append(branch)
+        return branch or "main"
+
+    review_act = json.dumps({
+        "decision": "act", "note": "review",
+        "actions": [{
+            "tool": "review_repository", "goal": "scan", "open_pr": False,
+        }],
+    })
+    planner = FakeClaude(review_act, role="planner")
+    engine = FakeEngine()
+
+    await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=rec_prepare,
+    )
+
+    assert calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_done_gate_review_uses_goal_branch_when_checklist_exists(tmp_path):
+    """The done-gate review judges done_when against the goal's accumulated
+    work — must read the goal branch, not the empty default branch."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.write_checklist("g", _example_checklist())
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    calls: list = []
+
+    async def rec_prepare(ws, repo_url=None, branch=None):
+        calls.append(branch)
+        return branch or "main"
+
+    planner = FakeClaude(
+        json.dumps({"decision": "done", "note": "all items done"}),
+        role="planner",
+    )
+    engine = FakeEngine()
+
+    await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=rec_prepare,
+    )
+
+    assert "goal/g" in calls
+
+
+@pytest.mark.asyncio
 async def test_settled_addressed_action_gate_failed_reverts_to_not_started(tmp_path):
     store = _store(tmp_path)
     seed_goal(tmp_path, "g")

@@ -151,6 +151,34 @@ def _extract_pr_url(text: str) -> str | None:
     return m.group(0) if m else None
 
 
+async def _current_branch(workspace_dir: str) -> str | None:
+    """The workspace's currently-checked-out branch, or None on detached HEAD /
+    non-repo. Used to detect goal-branch mode: prepare_workspace(branch=...)
+    puts the workspace on a ``goal/<goal_id>`` branch, and that's how delivery
+    knows to PUSH to that branch (and reuse the goal's single PR) rather than
+    creating a new task-scoped branch."""
+    rc, out = await _run("git", "branch", "--show-current", cwd=workspace_dir)
+    if rc != 0:
+        return None
+    name = out.strip()
+    return name or None
+
+
+async def _find_pr_for_branch(workspace_dir: str, branch: str) -> str | None:
+    """The url of an existing open PR with ``--head <branch>``, or None.
+    Used when delivering to a goal branch so the second + Nth item just push
+    new commits to the same branch (the PR auto-updates) instead of trying
+    to ``gh pr create`` over an existing PR (which fails)."""
+    rc, out = await _run(
+        "gh", "pr", "list", "--head", branch, "--state", "open",
+        "--json", "url", "--jq", ".[0].url // empty",
+        cwd=workspace_dir,
+    )
+    if rc != 0:
+        return None
+    return out.strip() or None
+
+
 async def _default_base_ref(workspace_dir: str) -> str | None:
     """The remote's default branch as a local ref (e.g. 'origin/main'), or None
     if there's no usable origin tracking ref. Used to tell whether the agent
@@ -205,6 +233,15 @@ async def deliver_change(
         result["error"] = "no changes to deliver"
         return result
 
+    # Detect goal-branch mode: prepare_workspace(branch="goal/<id>") put the
+    # workspace on the goal branch BEFORE the agent ran. In that case all
+    # commits the agent made are already on the goal branch — we push it
+    # as-is (no new branch), and the goal's single PR is reused across items.
+    # Legacy mode (workspace on the default branch or off-goal) creates a
+    # per-task branch the way it always has.
+    current = await _current_branch(workspace_dir)
+    goal_mode = bool(current and current.startswith("goal/"))
+
     # Prefer the ENGINEER's own commit for the title / branch / PR body — so the
     # delivery reads as "what changed", not the task instruction. The _COMMIT_CODA
     # asks the agent to commit; when it did (clean tree, ahead of base) we derive
@@ -216,25 +253,32 @@ async def deliver_change(
     if agent_msg:
         subject, body = agent_msg
         title = _truncate_words(subject if _looks_conventional(subject) else _pr_title(subject, kind), 72)
-        branch = f"{_cc_type(subject, kind)}/{_slug(_cc_description(subject))}"
+        derived_branch = f"{_cc_type(subject, kind)}/{_slug(_cc_description(subject))}"
         changes: str | None = body or subject
     else:
         title = _pr_title(goal, kind)
-        branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
+        derived_branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
         changes = None
-    result["branch"] = branch
 
-    # Put the change on its branch. `checkout -b` carries HEAD — including any
-    # commits the agent already made — onto the new branch. A feature slug can
-    # repeat across tasks, so on collision disambiguate with a short task suffix.
-    rc, out = await _run("git", "checkout", "-b", branch, cwd=workspace_dir)
-    if rc != 0:
-        branch = f"{branch}-{task_id[:6]}"
+    if goal_mode:
+        # Stay on the goal branch — every item commits to it cumulatively.
+        branch = current  # type: ignore[assignment]
+        result["branch"] = branch
+    else:
+        branch = derived_branch
+        result["branch"] = branch
+        # Put the change on its branch. `checkout -b` carries HEAD — including
+        # any commits the agent already made — onto the new branch. A feature
+        # slug can repeat across tasks, so on collision disambiguate with a
+        # short task suffix.
         rc, out = await _run("git", "checkout", "-b", branch, cwd=workspace_dir)
         if rc != 0:
-            result["error"] = f"branch failed: {out}"
-            return result
-        result["branch"] = branch
+            branch = f"{branch}-{task_id[:6]}"
+            rc, out = await _run("git", "checkout", "-b", branch, cwd=workspace_dir)
+            if rc != 0:
+                result["error"] = f"branch failed: {out}"
+                return result
+            result["branch"] = branch
 
     if dirty:
         await _run("git", "add", "-A", cwd=workspace_dir)
@@ -269,8 +313,17 @@ async def deliver_change(
         return result
     result["pushed"] = True
 
-    # Open a PR only on a GitHub remote with gh available/authed.
+    # Open a PR only on a GitHub remote with gh available/authed. In goal-
+    # branch mode, second-and-Nth items push to the SAME branch the first
+    # item created a PR on — the existing PR auto-updates; reuse its URL
+    # rather than calling `gh pr create` over it (which would fail).
     if "github.com" in remote:
+        if goal_mode:
+            existing = await _find_pr_for_branch(workspace_dir, branch)
+            if existing:
+                result["pr_url"] = existing
+                result["delivered"] = True
+                return result
         rc, out = await _run(
             "gh", "pr", "create", "--head", branch,
             "--title", title,
