@@ -16,7 +16,15 @@ FROM devclaw-sandbox:latest
 # Install as root, then drop back to the inherited non-root agent user.
 USER root
 
-ARG DOTNET_CHANNEL=10.0
+# .NET supports SxS installs — multiple SDKs in the same dir, the project's
+# global.json / TargetFramework picks the right one at build time. Install 10
+# (the current default) AND 9 (still LTS-shaped + what most existing repos
+# target: lifekit-dashboard, finance-sentry, etc.). 2026-06-26: dropping 9
+# from this image broke the finance-sentry-mcp-v3 run mid-flight because
+# `dotnet test` couldn't find Microsoft.NETCore.App 9.0.0 — keep both until
+# the broader fix (mise-driven, project-declared toolchain — see
+# ~/memory/projects/devclaw/proposals) lands.
+ARG DOTNET_CHANNELS="10.0 9.0"
 ENV DOTNET_ROOT=/usr/share/dotnet \
     PATH=/usr/share/dotnet:/usr/local/bin:/usr/bin:/bin \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
@@ -26,18 +34,22 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
 
 # .NET's runtime needs ICU + OpenSSL + Kerberos libs that the slim base omits;
 # libicu-dev is version-agnostic (apt resolves the right libicuNN as a dep), so
-# this survives a base Debian bump. Then install the SDK via Microsoft's official
-# script into a world-readable dir so the agent user can run it.
+# this survives a base Debian bump. Then install each requested SDK channel
+# side-by-side via Microsoft's official script into a world-readable dir so the
+# agent user can run any version the project asks for.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       libicu-dev libssl3 libgssapi-krb5-2 ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
- && bash /tmp/dotnet-install.sh --channel "${DOTNET_CHANNEL}" --install-dir "${DOTNET_ROOT}" \
+ && for channel in ${DOTNET_CHANNELS}; do \
+      bash /tmp/dotnet-install.sh --channel "${channel}" --install-dir "${DOTNET_ROOT}"; \
+    done \
  && rm /tmp/dotnet-install.sh \
  && chmod -R a+rX "${DOTNET_ROOT}" \
  && ln -sf "${DOTNET_ROOT}/dotnet" /usr/local/bin/dotnet \
- && dotnet --info
+ && dotnet --info \
+ && dotnet --list-sdks
 
 USER agent
 # dotnet writes to $HOME/.nuget + $HOME/.dotnet (the agent's writable home) — not
