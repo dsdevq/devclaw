@@ -42,6 +42,29 @@ def test_create_goal_writes_and_rejects_dupes(tmp_path):
         store.create_goal("newg", objective="dup", workspace_dir="/ws")
 
 
+def test_create_goal_persists_stub_acceptable(tmp_path):
+    # The owner's explicit opt-in for which tools may ship as stubs must
+    # survive a round-trip through yaml — the done-gate reads it on every
+    # evaluation, so silent loss = silent policy bypass.
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="ship mcp", workspace_dir="/ws",
+        done_when="3 tools live, 1 stub", backlog=["scaffold"],
+        stub_acceptable=["get_cashflow_report", "get_tax_lots"],
+    )
+    g = store.load_goal("g")
+    assert g.stub_acceptable == ["get_cashflow_report", "get_tax_lots"]
+
+
+def test_load_goal_defaults_stub_acceptable_to_empty_when_absent(tmp_path):
+    # Legacy goals (written before this field existed) must load with an
+    # empty list, which the done-gate treats as "no stubs allowed" — the
+    # safe default.
+    seed_goal(tmp_path, "legacy")
+    g = GoalStore(tmp_path).load_goal("legacy")
+    assert g.stub_acceptable == []
+
+
 def test_status_roundtrip_with_eval_and_done_check(tmp_path):
     store = GoalStore(tmp_path, now=Clock())
     s = GoalStatus(

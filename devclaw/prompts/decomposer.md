@@ -39,9 +39,12 @@ and decide what's POSSIBLE vs what's a legitimate stub:
   identify the actual services/endpoints/queries that exist in the repo.
   Name them. If they exist → the clause expands into per-target items
   (one item per real read), each with `evidence_target` naming
-  `file_path` + `symbol`. If they don't exist → it's either an item that
-  builds the missing endpoint OR a legitimate `not_yet_available` stub
-  (with the gap recorded honestly).
+  `file_path` + `symbol`. If they DON'T exist → the clause expands into
+  the items that build the missing capability (schema migration, domain
+  service, query handler, then the read-side tool on top). Plan the real
+  work — do not silently substitute a stub. The ONE exception: the goal's
+  ``stub_acceptable`` field explicitly lists this tool/capability slug
+  (see step 6).
 - A clause requiring "tests for X" expands into test-file items, each
   with `evidence_target` naming the test class/method.
 - A clause requiring "docs" expands into doc-file items.
@@ -88,13 +91,25 @@ item B requires extracting an interface, lifting a service shape, or
 otherwise changing surrounding code BEFORE its own work begins, that
 refactor is a separate item that B depends on. Don't bury it in a note.
 
-**6. Mark unsupported clauses as LEGITIMATE STUBS, not as work.** If
-the repo genuinely has no path to satisfy a clause (e.g. a tool wants
-real prices and no price feed exists), the item is a STUB with a
-`note` starting `legit_stub: ` and an `evidence_target` of
-`not_yet_available` shape + the clause's `reason`. **Never invent work to
-satisfy a clause that has no home in the repo.** Surface this honestly
-so the owner can decide.
+**6. Stubs are FORBIDDEN unless explicitly authorized.** A stub is an
+item whose `evidence_target` is a `not_yet_available` payload (or any
+`*Stub` class returning a fixed "capability missing" shape). You may
+only emit a stub item when the goal's ``stub_acceptable`` list names
+the tool/capability slug it serves — that's the owner's explicit
+opt-in. For an authorized stub, the item's `note` starts with
+`legit_stub: ` and `evidence_target` names the stub class + the
+`not_yet_available` reason string.
+
+If a clause requires a capability the repo lacks AND the tool is NOT in
+``stub_acceptable``, plan the real work to build that capability (schema
++ service + handler + tool, as separate items with `depends_on`). If
+the work is genuinely out of scope or impossible from the digest, raise
+it in `open_questions` so the owner can either descope it or add the
+tool to ``stub_acceptable`` and re-run you. **Do NOT silently insert an
+unauthorized stub** — that is the failure mode this policy exists to
+prevent (finance-sentry-mcp-v5, 2026-06-26: 4 unauthorized stubs
+shipped + stamped done because the decomposer treated stubbing as a
+default escape hatch).
 
 **7. Open the `open_questions` channel.** Anything genuinely ambiguous
 in `done_when` that you couldn't decide from the digest goes here — the

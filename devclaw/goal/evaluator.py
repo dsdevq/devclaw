@@ -70,6 +70,17 @@ def build_prompt(
         "backlog (the starting work-list — NOT the definition of done):",
         backlog,
     ]
+    if goal.stub_acceptable:
+        parts += [
+            "\nstub_acceptable (tools/capabilities the OWNER explicitly authorized as `not_yet_available` stubs — a stub-shaped clause is ONLY satisfiable when the clause names one of these):",
+            "\n".join(f"  - {t}" for t in goal.stub_acceptable),
+        ]
+    else:
+        parts.append(
+            "\nstub_acceptable: (empty — the owner has NOT authorized any stubs. "
+            "If a clause's only evidence is a `not_yet_available` stub, that clause "
+            "is UNSATISFIED regardless of how the tool is shaped.)"
+        )
     if spec:
         parts += [
             "\n## Agreed spec (the contract aligned with the owner — judge done against THIS)",
@@ -138,7 +149,63 @@ def _parse_clauses(raw: object) -> list[ClauseVerdict]:
     return out
 
 
-def validate(parsed: object, *, at_done_gate: bool = False) -> EvalResult:
+#: case-insensitive substrings that mean "this clause is being satisfied by a
+#: stub, not by real work." The mechanical check below flips a satisfied clause
+#: to unsatisfied when one of these is present in clause+evidence AND the
+#: owner did not authorize a stub for the named tool.
+_STUB_MARKERS = ("not_yet_available", "notyetavailable", "legit_stub")
+
+
+def _looks_like_stub(text: str) -> bool:
+    s = text.lower()
+    return any(m in s for m in _STUB_MARKERS)
+
+
+_VERB_PREFIXES = ("get", "list", "fetch", "read", "describe", "show")
+
+
+def _norm(s: str) -> str:
+    """Aggressive identifier normalization for cross-naming-convention match:
+    lowercase, strip ``_ - `` and whitespace. Lets ``get_cashflow_report`` find
+    its evidence in ``CashflowReportStub.cs`` (different naming convention,
+    same underlying capability)."""
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _slug_variants(name: str) -> list[str]:
+    """For a stub_acceptable entry, return the normalized forms we'll search
+    for in the clause/evidence. Includes the verb-stripped variant so an MCP
+    tool slug like ``get_cashflow_report`` matches a C# evidence string like
+    ``CashflowReportStub.cs`` (which has no ``get`` prefix)."""
+    n = _norm(name)
+    if not n:
+        return []
+    variants = [n]
+    for prefix in _VERB_PREFIXES:
+        if n.startswith(prefix) and len(n) > len(prefix) + 2:
+            variants.append(n[len(prefix):])
+            break
+    return variants
+
+
+def _stub_is_authorized(clause: ClauseVerdict, stub_acceptable: list[str]) -> bool:
+    """A stub-shaped clause is authorized when the owner's ``stub_acceptable``
+    list names a tool/capability that appears in the clause text or its
+    evidence. Match is case-insensitive AND naming-convention-insensitive:
+    tool slug ``get_cashflow_report`` authorizes evidence mentioning
+    ``CashflowReportStub.cs`` or ``cashflow report`` or any other casing the
+    repo/model uses."""
+    if not stub_acceptable:
+        return False
+    haystack = _norm(f"{clause.clause}\n{clause.evidence}")
+    for name in stub_acceptable:
+        for variant in _slug_variants(name):
+            if variant in haystack:
+                return True
+    return False
+
+
+def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: list[str] | None = None) -> EvalResult:
     """Validate + normalize the model's evaluation. When ``at_done_gate=True``,
     ``achieved`` requires every clause in ``clauses`` to be ``satisfied=True``
     with non-empty ``evidence`` — otherwise the verdict is downgraded to
@@ -180,6 +247,30 @@ def validate(parsed: object, *, at_done_gate: bool = False) -> EvalResult:
                 ],
                 clauses=clauses,
             )
+        # Mechanical stub-policy enforcement: a satisfied clause whose evidence
+        # is structurally a stub (not_yet_available payload, *Stub class, etc.)
+        # is only allowed when the owner's stub_acceptable lists the tool the
+        # clause refers to. Otherwise we flip it to unsatisfied — the safety
+        # net for the 2026-06-26 v5 failure mode where the agent shipped four
+        # stubs as "done" and the gate stamped them green.
+        allowed_stubs = list(stub_acceptable or [])
+        normalized: list[ClauseVerdict] = []
+        for c in clauses:
+            if c.satisfied and c.evidence and _looks_like_stub(f"{c.clause}\n{c.evidence}"):
+                if not _stub_is_authorized(c, allowed_stubs):
+                    normalized.append(ClauseVerdict(
+                        clause=c.clause, satisfied=False,
+                        evidence=(
+                            f"unauthorized stub — evidence ({c.evidence!s}) is a "
+                            f"not_yet_available stub but the goal's stub_acceptable "
+                            f"does not list this tool. Either implement the real "
+                            f"capability or add the tool name to stub_acceptable in "
+                            f"goal.yaml to explicitly accept the stub."
+                        ),
+                    ))
+                    continue
+            normalized.append(c)
+        clauses = normalized
         unsatisfied = [c for c in clauses if not c.satisfied or not c.evidence]
         if unsatisfied:
             derived = [
@@ -226,7 +317,7 @@ async def evaluate(
         parsed = json.loads(extract_json(raw))
     except json.JSONDecodeError as exc:
         raise GoalEvalError(f"evaluator emitted invalid JSON: {exc}", raw) from exc
-    return validate(parsed, at_done_gate=at_done_gate)
+    return validate(parsed, at_done_gate=at_done_gate, stub_acceptable=goal.stub_acceptable)
 
 
 def default_caller() -> ClaudeCaller:
