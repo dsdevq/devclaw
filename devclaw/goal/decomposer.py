@@ -85,6 +85,16 @@ def build_prompt(
         "backlog:",
         backlog,
     ]
+    if goal.stub_acceptable:
+        parts += [
+            "\nstub_acceptable (owner-authorized stubs — ONLY these tools/capability slugs may ship as `not_yet_available` stubs; everything else must be planned as real work):",
+            "\n".join(f"  - {t}" for t in goal.stub_acceptable),
+        ]
+    else:
+        parts.append(
+            "\nstub_acceptable: (empty — no stubs authorized. Plan real work for every clause; "
+            "raise capability gaps as `open_questions` rather than silently stubbing.)"
+        )
     if discovery_brief:
         parts += [
             "\n## Discovery brief (prior pass — current state · gap · what good looks like)",

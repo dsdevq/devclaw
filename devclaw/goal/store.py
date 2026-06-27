@@ -269,6 +269,63 @@ class GoalStore:
         except ChecklistParseError:
             return None  # corrupted on disk — caller treats as absent
 
+    # ---- firmed-draft (firming-phase output) -------------------------------
+
+    def write_firmed_draft(self, goal_id: str, firmed: "FirmedGoal") -> None:  # type: ignore[name-defined]
+        """Persist the firming-phase output as ``firmed-draft.yaml``. One file
+        for both the in-progress (``status: needs_owner_answers``) and the
+        ready-for-decomposer (``status: firmed``) states — git history is the
+        audit log."""
+        from .firmed import dump_firmed
+
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "firmed-draft.yaml").write_text(dump_firmed(firmed))
+
+    def read_firmed_draft(self, goal_id: str) -> "FirmedGoal | None":  # type: ignore[name-defined]
+        """The current firmed draft, or ``None`` if firming hasn't run yet
+        (legacy goals + new goals before firming completes). A corrupted file
+        is also treated as absent — the next firming pass will rewrite it."""
+        from .firmed import FirmedParseError, parse_firmed
+
+        path = self._dir(goal_id) / "firmed-draft.yaml"
+        if not path.exists():
+            return None
+        try:
+            return parse_firmed(path.read_text())
+        except FirmedParseError:
+            return None
+
+    def load_effective_goal(self, goal_id: str) -> Goal:
+        """The goal as it currently is, with firming's outputs overlaid on the
+        original ``goal.yaml`` facts. Use this everywhere cognition + gating
+        need the CURRENT effective state (decomposer, planner, evaluator,
+        done-gate) — ``load_goal`` stays available for code that wants the
+        owner's original statement (audit, history, the firming handler's own
+        derived-goal builder).
+
+        Only firmed-status drafts overlay. While firming is in flight (status
+        ``needs_owner_answers``) the base goal is returned — the partial draft
+        is not authoritative yet."""
+        base = self.load_goal(goal_id)
+        firmed = self.read_firmed_draft(goal_id)
+        if firmed is None or firmed.status != "firmed":
+            return base
+        from dataclasses import replace as _replace
+
+        from .firmed import derive_done_when
+
+        derived_done_when = derive_done_when(firmed) or base.done_when
+        derived_stub_acceptable = (
+            list(firmed.stub_acceptable) if firmed.stub_acceptable
+            else list(base.stub_acceptable)
+        )
+        return _replace(
+            base,
+            done_when=derived_done_when,
+            stub_acceptable=derived_stub_acceptable,
+        )
+
     # ---- scope spec (handed in by the waiter via create_goal) ---------------
 
     def write_spec(self, goal_id: str, spec: str) -> None:
