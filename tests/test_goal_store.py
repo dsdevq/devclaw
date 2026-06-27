@@ -65,6 +65,96 @@ def test_load_goal_defaults_stub_acceptable_to_empty_when_absent(tmp_path):
     assert g.stub_acceptable == []
 
 
+# ---- load_effective_goal — firmed overlay (2026-06-27 gap closure) --------
+
+
+def test_load_effective_goal_returns_base_when_no_firmed_draft(tmp_path):
+    """No firming has run yet → load_effective_goal is identical to load_goal.
+    The default (firming disabled / new goal) path must be transparent."""
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="x", workspace_dir="/ws", done_when="original done_when",
+        stub_acceptable=["original_tool"],
+    )
+    eff = store.load_effective_goal("g")
+    base = store.load_goal("g")
+    assert eff == base
+    assert eff.done_when == "original done_when"
+    assert eff.stub_acceptable == ["original_tool"]
+
+
+def test_load_effective_goal_ignores_in_progress_firming_draft(tmp_path):
+    """An in-flight firming draft (status=needs_owner_answers) is NOT
+    authoritative — load_effective_goal must still return the base goal so
+    the done-gate / evaluator don't honor an incomplete firming."""
+    from devclaw.goal.firmed import FirmedGoal, SuccessCriterion, Unknown
+
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws", done_when="original")
+    in_progress = FirmedGoal(
+        status="needs_owner_answers", round=1, intent="x",
+        success_criteria=[SuccessCriterion(id="c1", text="firmed clause")],
+        unknowns=[Unknown(id="q1", question="?")],
+        stub_acceptable=["firmed_tool"],
+    )
+    store.write_firmed_draft("g", in_progress)
+    eff = store.load_effective_goal("g")
+    assert eff.done_when == "original"
+    assert eff.stub_acceptable == []
+
+
+def test_load_effective_goal_overlays_firmed_done_when_and_stub_acceptable(tmp_path):
+    """A firmed draft (status=firmed) overlays both done_when (synthesized
+    from success_criteria) and stub_acceptable onto the base goal — the
+    done-gate now sees the OWNER's authorization decisions, not the original
+    goal.yaml that's been firmed past."""
+    from devclaw.goal.firmed import FirmedGoal, SuccessCriterion
+
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="x", workspace_dir="/ws", done_when="original done_when",
+        stub_acceptable=[],
+    )
+    firmed = FirmedGoal(
+        status="firmed", round=2, intent="x",
+        success_criteria=[
+            SuccessCriterion(id="c1", text="report exposes monthly cashflow"),
+            SuccessCriterion(id="c2", text="get_cashflow_report tool ships"),
+        ],
+        stub_acceptable=["get_cashflow_report", "get_tax_lots"],
+    )
+    store.write_firmed_draft("g", firmed)
+    eff = store.load_effective_goal("g")
+    assert "monthly cashflow" in eff.done_when
+    assert "get_cashflow_report tool ships" in eff.done_when
+    assert " AND " in eff.done_when
+    assert eff.stub_acceptable == ["get_cashflow_report", "get_tax_lots"]
+    # base goal is unchanged on disk — load_goal still returns the original
+    assert store.load_goal("g").done_when == "original done_when"
+    assert store.load_goal("g").stub_acceptable == []
+
+
+def test_load_effective_goal_empty_firmed_stub_acceptable_falls_back_to_base(tmp_path):
+    """When firmed stub_acceptable is empty but the base goal had explicit
+    entries (set by the owner at creation), preserve the base list — empty
+    in firmed means 'firming did not address stubs', not 'owner rescinded'."""
+    from devclaw.goal.firmed import FirmedGoal, SuccessCriterion
+
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="x", workspace_dir="/ws", done_when="o",
+        stub_acceptable=["pre_authorized_tool"],
+    )
+    firmed = FirmedGoal(
+        status="firmed", round=2, intent="x",
+        success_criteria=[SuccessCriterion(id="c1", text="something")],
+        stub_acceptable=[],
+    )
+    store.write_firmed_draft("g", firmed)
+    eff = store.load_effective_goal("g")
+    assert eff.stub_acceptable == ["pre_authorized_tool"]
+
+
 def test_status_roundtrip_with_eval_and_done_check(tmp_path):
     store = GoalStore(tmp_path, now=Clock())
     s = GoalStatus(

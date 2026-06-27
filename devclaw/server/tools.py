@@ -593,6 +593,37 @@ async def steer_goal(goal_id: str, message: str) -> str:
 
 
 @mcp.tool
+async def answer_unknowns(goal_id: str, answers: dict[str, str]) -> str:
+    """Answer the open ``unknowns`` from a goal's firmed-draft so DevClaw can
+    finish firming and start work. Synchronous: fires firming round N+1 inside
+    the call, then either transitions the goal to executing (decomposer fires
+    on the next heartbeat) or returns a new set of unknowns that the prior
+    answers exposed.
+
+    ``answers`` MUST cover EVERY currently open unknown id exactly once — no
+    partials, no extras. Get the current unknowns from ``get_goal(goal_id)``'s
+    ``firmed_draft.unknowns`` field; pass them as ``{unknown_id: answer_text}``.
+    The waiter is responsible for collecting a complete answer set from the
+    owner before calling this tool.
+
+    Response:
+      {"status": "firmed", "round": N, "unknowns": []}
+      {"status": "needs_more_answers", "round": N, "unknowns": [{...}, ...]}
+    """
+    if not goal_id:
+        raise ToolError("answer_unknowns requires goal_id")
+    if not isinstance(answers, dict) or not answers:
+        raise ToolError("answer_unknowns requires a non-empty answers map")
+    try:
+        result = await goals.answer_unknowns(goal_id, answers)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+    except ValueError as exc:
+        raise ToolError(str(exc))
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool
 async def cancel_goal(goal_id: str) -> str:
     """Permanently stop a durable goal. Sets its phase to 'cancelled' (a terminal
     state — DevClaw will skip it on every future heartbeat) and tears down any

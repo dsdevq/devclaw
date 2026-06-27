@@ -32,7 +32,7 @@ Phase = Literal["idle", "in_flight", "verifying", "blocked", "done", "cancelled"
 #: (the per-tick execution state): ``Lifecycle`` is the coarse stage of the goal.
 #: ``None`` on a stored status means a legacy goal created before the lifecycle
 #: existed — treated as ``executing`` so it keeps running the flat backlog.
-Lifecycle = Literal["investigating", "executing"]
+Lifecycle = Literal["investigating", "firming", "executing"]
 Decision = Literal["act", "sleep", "blocked", "done"]
 EvalVerdict = Literal["on_track", "off_track", "achieved", "stalled", "needs_human"]
 
