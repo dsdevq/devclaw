@@ -320,6 +320,7 @@ class Phase(str, Enum):
     POLLING_DONE_GATE = "polling_done_gate"
     POLLING_ACTION = "polling_action"
     INVESTIGATING = "investigating"
+    FIRMING = "firming"
     EXECUTING = "executing"
 
 
@@ -346,6 +347,8 @@ def _classify(status: GoalStatus) -> Phase:
     lifecycle = status.lifecycle or "executing"
     if lifecycle == "investigating":
         return Phase.INVESTIGATING
+    if lifecycle == "firming":
+        return Phase.FIRMING
     return Phase.EXECUTING
 
 
@@ -431,7 +434,11 @@ async def _tick_goal_impl(
         decomposer_caller=decomposer_caller,
     )
 
-    goal = store.load_goal(goal_id)
+    # Effective goal = goal.yaml overlaid with firmed.yaml outputs when firming
+    # has landed. Every cognition + gating path inside this tick (planner,
+    # evaluator, done-gate) reads from here, so firmed stub_acceptable / derived
+    # done_when are honored — not silently shadowed by the original goal.yaml.
+    goal = store.load_effective_goal(goal_id)
     status = store.load_status(goal_id)
     phase = _classify(status)
 
@@ -472,6 +479,8 @@ async def _tick_goal_impl(
             store=store, engine=engine, notifier=notifier,
             notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
         )
+    if phase is Phase.FIRMING:
+        return await _dispatch_phase_handler(goal_id, goal, status, ctx, "firming")
     if phase is Phase.EXECUTING:
         return await _handle_executing(goal_id, goal, status, finished_detail, ctx)
 
@@ -699,8 +708,14 @@ async def _resolve_discovery(
         store.append_log(goal_id, f"discovery synthesis failed ({exc}) — proceeding")
         synth_ok = False
 
+    # Firming, when enabled, gates the decomposer: the decomposer should run
+    # against the FIRMED goal, not the pre-firming goal.yaml. Skip the
+    # in-discovery decomposer call in that case — a later session will wire the
+    # decomposer to fire off firmed.yaml (proposal step 7).
+    from .phases.firming import FIRMING_ENABLED as _FIRMING_ENABLED_FOR_DECOMPOSE
+
     decompose_ok = False
-    if decompose_enabled and goal.done_when:
+    if decompose_enabled and goal.done_when and not _FIRMING_ENABLED_FOR_DECOMPOSE:
         caller = decomposer_caller or research_caller
         try:
             cl = await _decomposer.decompose(
@@ -722,8 +737,17 @@ async def _resolve_discovery(
                 f"decomposition failed ({exc}) — falling back to backlog mode",
             )
 
+    # Firming sits between investigating and executing when enabled — its
+    # handler will re-tick under lifecycle=firming on the very next loop turn
+    # (the ADVANCED outcome we return below pokes the heartbeat).
+    from .phases.firming import FIRMING_ENABLED as _FIRMING_ENABLED
+
+    next_lifecycle = "firming" if _FIRMING_ENABLED else "executing"
+    next_phase_note = (
+        "discovery done → firming" if _FIRMING_ENABLED else "discovery done → executing"
+    )
     store.save_status(
-        goal_id, replace(status, lifecycle="executing", phase="idle", next="discovery done → executing"),
+        goal_id, replace(status, lifecycle=next_lifecycle, phase="idle", next=next_phase_note),
     )
     if decompose_ok:
         msg = (
@@ -873,6 +897,42 @@ async def _dispatch_action(
     store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}")
     await _notify(notifier, NotifyLevel.TASK, f"🚀 [{goal_id}] {action.tool}: {action.goal}  ({ref.id})")
     return Outcome.DISPATCHED
+
+
+# ---- registry-driven phase dispatch ----------------------------------------
+
+
+async def _dispatch_phase_handler(
+    goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext, name: str,
+) -> Outcome:
+    """Hand a phase off to the registered :class:`PhaseHandler`. Tick is the
+    dispatcher; the handler owns its own cognition, persistence, and notify.
+    Maps the handler's string outcome back to an :class:`Outcome` enum so the
+    rest of tick is unchanged.
+
+    A missing handler is a silent no-op (sleep this tick) — that should never
+    happen in practice (the Phase enum is the source of truth) but the conservative
+    fallback keeps a typo from wedging a goal."""
+    from .phases.registry import handler_for
+
+    handler = handler_for(name)
+    if handler is None:
+        ctx.store.append_log(goal_id, f"no handler registered for phase {name!r} — sleeping")
+        return Outcome.SLEPT
+    if not await handler.can_run(goal, status, ctx.store):
+        # The handler decided this isn't its tick (e.g. firming parked on
+        # owner-answers). Mechanism, zero tokens.
+        ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
+        return Outcome.IDLE
+    result = await handler.run(goal_id, goal, status, ctx)
+    try:
+        return Outcome(result.outcome)
+    except ValueError:
+        ctx.store.append_log(
+            goal_id,
+            f"handler {name!r} returned unknown outcome {result.outcome!r} — treating as slept",
+        )
+        return Outcome.SLEPT
 
 
 # ---- phase handlers --------------------------------------------------------

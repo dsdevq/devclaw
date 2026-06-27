@@ -230,8 +230,12 @@ class GoalService:
     def get_goal(self, goal_id: str) -> dict:
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
-        g = self._goal_store.load_goal(goal_id)
+        # Effective goal so the MCP-exposed view shows what cognition actually
+        # uses (firmed-derived done_when, firmed stub_acceptable) — not the
+        # original owner statement that's already been firmed past.
+        g = self._goal_store.load_effective_goal(goal_id)
         s = self._goal_store.load_status(goal_id)
+        firmed_draft = self._firmed_draft_payload(goal_id)
         return {
             "id": g.id,
             "objective": g.objective,
@@ -255,6 +259,36 @@ class GoalService:
                 if s.last_eval_verdict else None
             ),
             "recent_log": self._goal_store.recent_log(goal_id, n=15),
+            "firmed_draft": firmed_draft,
+        }
+
+    def _firmed_draft_payload(self, goal_id: str) -> Optional[dict]:
+        """Serialize the goal's current firmed-draft for the waiter — only the
+        fields the waiter renders (status, round, unknowns + their options/why,
+        success_criteria). Returns None when firming hasn't run yet."""
+        draft = self._goal_store.read_firmed_draft(goal_id)
+        if draft is None:
+            return None
+        return {
+            "status": draft.status,
+            "round": draft.round,
+            "intent": draft.intent,
+            "success_criteria": [
+                {"id": c.id, "text": c.text, "verifiable_by": c.verifiable_by}
+                for c in draft.success_criteria
+            ],
+            "conventions_to_follow": list(draft.conventions_to_follow),
+            "unknowns": [
+                {
+                    "id": u.id, "question": u.question, "why": u.why,
+                    "options": list(u.options),
+                    "default_if_no_answer": u.default_if_no_answer,
+                }
+                for u in draft.unknowns
+            ],
+            "blockers": list(draft.blockers),
+            "stub_acceptable": list(draft.stub_acceptable),
+            "descoped": list(draft.descoped),
         }
 
     def tail_goal(
@@ -273,7 +307,7 @@ class GoalService:
         time). Everything is bounded — read-only, never mutates the goal."""
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
-        g = self._goal_store.load_goal(goal_id)
+        g = self._goal_store.load_effective_goal(goal_id)
         s = self._goal_store.load_status(goal_id)
 
         live_events: list[dict] = []
@@ -352,7 +386,9 @@ class GoalService:
         verdict. Reports + steers (corrections → inbox); does not block on demand."""
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
-        g = self._goal_store.load_goal(goal_id)
+        # Effective goal so the evaluator's stub-policy check honors any
+        # stub_acceptable the owner added during firming.
+        g = self._goal_store.load_effective_goal(goal_id)
         s = self._goal_store.load_status(goal_id)
         ev = await goal_evaluator.evaluate(
             g, s, self._goal_store.recent_log(goal_id),
@@ -372,6 +408,49 @@ class GoalService:
             "rationale": ev.rationale, "corrections": ev.corrections,
             "question": ev.question,
         }
+
+    async def answer_unknowns(self, goal_id: str, answers: dict[str, str]) -> dict:
+        """Owner-side input for the firming phase. The MCP tool wraps this.
+        Validates that ``answers`` covers every current unknown id (no partials,
+        no extras), then fires firming round N+1 via the FirmingHandler. Returns
+        the structured next state (``firmed`` or ``needs_more_answers``)."""
+        if not self._goal_store.exists(goal_id):
+            raise KeyError(goal_id)
+        draft = self._goal_store.read_firmed_draft(goal_id)
+        if draft is None:
+            raise ValueError(
+                f"goal {goal_id!r} has no firmed-draft.yaml yet — firming round 1 "
+                "must run first (created via the heartbeat after discovery completes)"
+            )
+        expected = {u.id for u in draft.unknowns}
+        provided = {k for k, v in (answers or {}).items() if str(v).strip()}
+        missing = expected - provided
+        extra = provided - expected
+        if missing or extra:
+            raise ValueError(
+                f"answers must cover EVERY current unknown exactly once — "
+                f"missing={sorted(missing)} extra={sorted(extra)}"
+            )
+
+        from .phases.firming import FirmingHandler
+        from .phases.registry import handler_for
+        from .tick import TickContext
+
+        handler = handler_for("firming")
+        if not isinstance(handler, FirmingHandler):
+            raise RuntimeError("firming handler is not registered")
+        ctx = TickContext(
+            store=self._goal_store, engine=self._engine,
+            planner_caller=self._planner(), evaluator_caller=self._evaluator(),
+            notifier=self._notifier, notify_url=self._cfg.notify_url,
+            eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+            summary_caller=self._summary(), merger=self._merger(),
+        )
+        result = await handler.handle_answer(goal_id, answers, ctx=ctx)
+        # Decomposer + first executor tick fire on the next heartbeat; poke it now
+        # so a firmed goal starts working immediately rather than waiting 900s.
+        self.poke()
+        return result
 
     def cancel_goal(self, goal_id: str) -> dict:
         """Abort a durable goal. Sets phase to 'cancelled' (terminal — skipped on
