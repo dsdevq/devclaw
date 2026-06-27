@@ -108,7 +108,10 @@ async def test_firming_clean_round_advances_lifecycle(tmp_path):
     store.save_status("g", GoalStatus(lifecycle="firming"))
     registry.register(
         "firming",
-        FirmingHandler(caller=FakeClaude(DRAFT_FIRMED, role="goal_firming")),
+        FirmingHandler(
+            caller=FakeClaude(DRAFT_FIRMED, role="goal_firming"),
+            decomposer_caller=FakeClaude(role="goal_decomposer"),
+        ),
     )
 
     planner = FakeClaude(role="goal_planner")
