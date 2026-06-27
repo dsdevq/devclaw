@@ -54,6 +54,20 @@ satisfy a clause:
 - A merged PR or a passing gate on its own — the gate proves *behaviour
   doesn't break*, not *the requirement is met*.
 
+**3a. Stub-policy check.** A clause is being satisfied by a STUB when
+its evidence is structurally a `not_yet_available` payload, a
+`*Stub`-suffixed class, or any other "capability not implemented yet"
+placeholder. A stub may ONLY satisfy a clause when the goal's
+``stub_acceptable`` list (shown in the `## Goal` block above) explicitly
+names the tool/capability slug the clause refers to. If the goal lists
+no ``stub_acceptable`` (or lists tools other than the one in the
+clause), any stub evidence is **UNSATISFIED** — even if a "test" passes
+that only verifies the stub's shape. This is the owner's explicit
+opt-in: no list, no stubs. The mechanical post-check will downgrade
+unauthorized stubs even if you mark them satisfied — but get it right
+in your own output and put the unsatisfied clause in `corrections` so
+the next-action planner builds the real capability.
+
 **4. Choose the verdict from the clause coverage:**
 - `achieved`   — EVERY clause has SPECIFIC, REPO-CONFIRMED evidence. Only
                  use at the done-gate, and only when step 2 produced a hit

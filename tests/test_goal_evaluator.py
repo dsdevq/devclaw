@@ -227,3 +227,204 @@ def test_off_track_at_done_gate_preserves_clauses():
 def test_eval_prompt_omits_spec_section_when_absent():
     prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries")
     assert "Agreed spec" not in prompt
+
+
+# ---- stub-policy enforcement (the 2026-06-26 v5 safety net) ---------------
+#
+# Backstory: finance-sentry-mcp-v5 shipped 4 `not_yet_available` stubs for
+# capabilities the repo didn't have (cashflow, crypto-pnl, tax-lots, net-worth-
+# history). Every per-item gate passed (narrow verify_cmd) and the done-gate
+# evaluator stamped them satisfied because the prompt previously endorsed
+# "legitimate stubs". The fix: stubs are only acceptable when the goal's
+# `stub_acceptable` list NAMES the tool. The validator enforces this
+# mechanically as a belt-and-suspenders backup to the prompt rule.
+
+
+def _goal_with_stub_acceptable(allowed: list[str]) -> Goal:
+    return Goal(
+        id="g", objective="ship a finance MCP", cadence="1d", engine="devclaw",
+        workspace_dir="/ws",
+        done_when=(
+            "expose get_account_summary, get_cashflow_report, and get_tax_lots "
+            "as MCP tools backed by authoritative reads"
+        ),
+        backlog=["scaffold mcp", "wire tools"],
+        stub_acceptable=allowed,
+    )
+
+
+def test_eval_prompt_renders_stub_acceptable_block_when_populated():
+    prompt = build_prompt(
+        _goal_with_stub_acceptable(["get_cashflow_report", "get_tax_lots"]),
+        GoalStatus(), "log", "deliveries", at_done_gate=True,
+    )
+    assert "stub_acceptable" in prompt
+    assert "get_cashflow_report" in prompt
+    assert "get_tax_lots" in prompt
+
+
+def test_eval_prompt_warns_when_stub_acceptable_empty():
+    # The empty case must be LOUD — the prompt actively warns the model so it
+    # doesn't fall back to "stubs are basically fine" priors.
+    prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries", at_done_gate=True)
+    assert "stub_acceptable" in prompt
+    assert "empty" in prompt.lower()
+    assert "not authorized" in prompt.lower()
+
+
+def test_unauthorized_stub_clause_is_downgraded_at_done_gate():
+    # The exact v5 failure pattern: model returns satisfied=True for a clause
+    # whose ONLY evidence is a not_yet_available stub. No stub_acceptable on
+    # the goal → validator must flip it and surface the policy violation in
+    # the correction.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "all 3 tools implemented",
+            "clauses": [
+                {
+                    "clause": "get_account_summary returns authoritative data",
+                    "satisfied": True,
+                    "evidence": "Tools/GetAccountSummaryTool.cs:14 dispatches IBankingAccountsReader",
+                },
+                {
+                    "clause": "get_cashflow_report returns a cashflow report",
+                    "satisfied": True,
+                    "evidence": "Tools/Stubs/CashflowReportStub.cs:14 returns NotYetAvailablePayload(\"not_yet_available\", \"...\")",
+                },
+            ],
+        },
+        at_done_gate=True,
+        stub_acceptable=[],
+    )
+    assert r.verdict == "off_track"
+    # the stub clause is flipped to unsatisfied with the policy reason
+    cashflow = next(c for c in r.clauses if "cashflow" in c.clause)
+    assert cashflow.satisfied is False
+    assert "unauthorized stub" in cashflow.evidence.lower()
+    # the real clause is preserved untouched
+    summary = next(c for c in r.clauses if "summary" in c.clause)
+    assert summary.satisfied is True
+    # the correction names the unsatisfied clause so the planner can act
+    assert any("cashflow" in c.lower() for c in r.corrections)
+
+
+def test_authorized_stub_clause_stays_satisfied_at_done_gate():
+    # Same shape as the previous test but stub_acceptable explicitly names
+    # the cashflow tool → owner opted in → clause stays satisfied → verdict
+    # remains achieved.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "1 real tool, 1 authorized stub",
+            "clauses": [
+                {
+                    "clause": "get_account_summary returns authoritative data",
+                    "satisfied": True,
+                    "evidence": "Tools/GetAccountSummaryTool.cs:14 dispatches IBankingAccountsReader",
+                },
+                {
+                    "clause": "get_cashflow_report returns a cashflow report",
+                    "satisfied": True,
+                    "evidence": "Tools/Stubs/CashflowReportStub.cs:14 returns NotYetAvailablePayload(\"not_yet_available\", \"...\")",
+                },
+            ],
+        },
+        at_done_gate=True,
+        stub_acceptable=["get_cashflow_report"],
+    )
+    assert r.verdict == "achieved"
+    assert all(c.satisfied for c in r.clauses)
+
+
+def test_authorized_stub_matched_by_substring_not_just_exact():
+    # Tool-slug authorization is substring (case-insensitive) — the clause
+    # text says "get_tax_lots tool" not "get_tax_lots" verbatim; the
+    # evidence is a *Stub class name. Both forms should be enough to match
+    # the stub_acceptable entry.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "authorized stub",
+            "clauses": [
+                {
+                    "clause": "the get_tax_lots tool is exposed",
+                    "satisfied": True,
+                    "evidence": "Stubs/TaxLotsStub.cs:9 returns not_yet_available",
+                },
+            ],
+        },
+        at_done_gate=True,
+        stub_acceptable=["GET_TAX_LOTS"],  # case-insensitive
+    )
+    assert r.verdict == "achieved"
+
+
+def test_stub_policy_no_op_when_no_stub_markers_in_evidence():
+    # A clause whose evidence is real symbols (no stub markers) is
+    # unaffected by the stub policy even if stub_acceptable is empty.
+    r = validate(
+        {
+            "verdict": "achieved",
+            "rationale": "real wiring",
+            "clauses": [
+                {
+                    "clause": "get_account_summary returns data",
+                    "satisfied": True,
+                    "evidence": "Tools/GetAccountSummaryTool.cs:14 dispatches IBankingAccountsReader",
+                },
+            ],
+        },
+        at_done_gate=True,
+        stub_acceptable=[],
+    )
+    assert r.verdict == "achieved"
+
+
+def test_stub_policy_only_applies_at_done_gate():
+    # Outside the done-gate the policy is dormant — pre-done-gate ticks
+    # shouldn't downgrade evidence the planner is mid-shipping.
+    r = validate(
+        {
+            "verdict": "achieved",  # nonsense pre-done-gate but accepted as-is
+            "rationale": "wip",
+            "clauses": [
+                {
+                    "clause": "get_cashflow_report",
+                    "satisfied": True,
+                    "evidence": "CashflowReportStub.cs returns not_yet_available",
+                },
+            ],
+        },
+        at_done_gate=False,
+        stub_acceptable=[],
+    )
+    assert r.verdict == "achieved"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_threads_stub_acceptable_through_to_validate():
+    # End-to-end at the function level: evaluate() must pull stub_acceptable
+    # off the goal and pass it to validate() — otherwise the policy is
+    # unenforced in production despite the unit tests passing.
+    goal = _goal_with_stub_acceptable([])  # no stubs allowed
+
+    async def caller(_prompt: str) -> str:
+        return json.dumps({
+            "verdict": "achieved",
+            "rationale": "shipped",
+            "clauses": [
+                {
+                    "clause": "get_cashflow_report",
+                    "satisfied": True,
+                    "evidence": "CashflowReportStub.cs returns not_yet_available",
+                },
+            ],
+        })
+
+    r = await evaluate(
+        goal, GoalStatus(), "log", "deliveries",
+        claude_caller=caller, at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert "cashflow" in r.corrections[0].lower()

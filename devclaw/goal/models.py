@@ -58,6 +58,13 @@ class Goal:
     done_when: str = ""
     #: concrete starting work-list the planner draws the next action from
     backlog: list[str] = field(default_factory=list)
+    #: explicit list of MCP tool names (or capability slugs) for which a
+    #: ``not_yet_available`` stub is an acceptable terminal state. The
+    #: decomposer is forbidden from emitting stubs unless the tool appears
+    #: here; the done-gate refuses to mark a stub-shaped clause satisfied
+    #: unless one of these names appears in the clause/evidence text. Empty
+    #: list (the default) means "no stubs allowed — plan real work."
+    stub_acceptable: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
