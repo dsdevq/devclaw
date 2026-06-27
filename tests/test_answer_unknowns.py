@@ -91,7 +91,10 @@ async def test_complete_answers_advance_to_firmed(tmp_path, db):
     _seed_blocked_firming(svc, goals_dir)
     registry.register(
         "firming",
-        FirmingHandler(caller=FakeClaude(DRAFT_FIRMED, role="goal_firming")),
+        FirmingHandler(
+            caller=FakeClaude(DRAFT_FIRMED, role="goal_firming"),
+            decomposer_caller=FakeClaude(role="goal_decomposer"),
+        ),
     )
 
     result = await svc.answer_unknowns("g", {"cf-u1": "calendar_month"})
