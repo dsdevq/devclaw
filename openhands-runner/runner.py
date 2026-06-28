@@ -18,10 +18,12 @@ Authentication: Claude Code OAuth session via CLAUDE_CODE_EXECUTABLE +
 CLAUDE_CONFIG_DIR env vars. No ANTHROPIC_API_KEY required or accepted.
 """
 
+import atexit
 import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -292,6 +294,41 @@ def main() -> None:
     wrapped_goal = _wrap_goal(kind, goal)
 
     os.makedirs(workspace_dir, exist_ok=True)
+
+    # Drop the sandbox-only MCP config into the workspace so claude auto-
+    # discovers it at project scope. The image bakes /opt/devclaw/sandbox-mcp.json
+    # (Playwright MCP only); we don't mount the host's mcpServers because the
+    # sandcastle allowlist deliberately excludes them. Skip if the workspace
+    # already has its own .mcp.json so a project can override. Mark the file
+    # as locally-ignored via .git/info/exclude so the agent's `git add .` can't
+    # accidentally commit it; we also remove it in the finally block below in
+    # case the workspace isn't a git repo.
+    _baked_mcp = "/opt/devclaw/sandbox-mcp.json"
+    _workspace_mcp = os.path.join(workspace_dir, ".mcp.json")
+    _mcp_dropped = False
+    if os.path.exists(_baked_mcp) and not os.path.exists(_workspace_mcp):
+        try:
+            shutil.copyfile(_baked_mcp, _workspace_mcp)
+            _mcp_dropped = True
+        except OSError:
+            # Best-effort: a read-only workspace mount shouldn't fail the run.
+            pass
+    if _mcp_dropped:
+        _exclude = os.path.join(workspace_dir, ".git", "info", "exclude")
+        if os.path.isdir(os.path.dirname(_exclude)):
+            try:
+                with open(_exclude, "a", encoding="utf-8") as fh:
+                    fh.write("\n.mcp.json\n")
+            except OSError:
+                pass
+
+        def _cleanup_mcp() -> None:
+            try:
+                os.remove(_workspace_mcp)
+            except OSError:
+                pass
+
+        atexit.register(_cleanup_mcp)
 
     # Default to a PATH lookup — inside the sandbox the Dockerfile sets
     # CLAUDE_CODE_EXECUTABLE=/usr/bin/claude, so this fallback only matters for

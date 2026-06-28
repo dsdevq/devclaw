@@ -34,6 +34,16 @@ RUN apt-get update \
  && groupadd --gid ${AGENT_GID} agent \
  && useradd  --uid ${AGENT_UID} --gid ${AGENT_GID} --create-home --shell /bin/bash agent
 
+# Headless-Chromium system libraries required by the Playwright MCP server the
+# agent calls when it needs to drive a real browser (UI verification, E2E).
+# Same list openclaw-gateway uses — without these the bundled Chromium fails to
+# launch on debian-slim with cryptic "shared libraries" errors.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+      libxcomposite1 libxdamage1 libatspi2.0-0 libdrm2 libxkbcommon0 \
+      libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 \
+ && rm -rf /var/lib/apt/lists/*
+
 # Install python deps system-wide so the agent user can import them without
 # its own venv. openhands-sdk pulls in a long tail of deps; the image is fat
 # but that's fine — it's built once per sandbox version.
@@ -41,14 +51,29 @@ COPY openhands-runner/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Claude CLI + claude-agent-acp via npm. Pinned so image is reproducible.
+# @playwright/mcp is the MCP server the agent reaches Playwright through
+# (configured at /workspace/.mcp.json by runner.py per task).
 RUN npm install -g \
       @anthropic-ai/claude-code@${CLAUDE_CLI_VERSION} \
       @agentclientprotocol/claude-agent-acp@${CLAUDE_AGENT_ACP_VERSION} \
+      @playwright/mcp@latest \
  && npm cache clean --force
+
+# Bake the sandbox-only MCP config. runner.py copies this to
+# /workspace/.mcp.json at task start so claude auto-discovers Playwright MCP
+# WITHOUT mounting the host's mcpServers (which would re-open the leak
+# SANDBOX_CLAUDE_ALLOWLIST exists to prevent).
+COPY --chown=agent:agent openhands-runner/sandbox-mcp.json /opt/devclaw/sandbox-mcp.json
 
 COPY --chown=agent:agent openhands-runner/runner.py /opt/devclaw/runner.py
 
 USER agent
+
+# Pre-fetch the Playwright Chromium build into the agent user's cache so the
+# Playwright MCP server doesn't pull ~150MB on first invocation (and so first
+# call works without network). Lands in /home/agent/.cache/ms-playwright.
+RUN npx -y playwright@latest install chromium
+
 WORKDIR /workspace
 
 ENV CLAUDE_CODE_EXECUTABLE=/usr/bin/claude \
