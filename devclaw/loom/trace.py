@@ -55,6 +55,11 @@ class CognitionEvent:
     response_preview: str = ""
     latency_ms: int = 0
     error: str = ""
+    # Rough proxy for cost: ~4 chars per token. The `claude --print` path doesn't
+    # return real token usage today, so this is deliberately approximate. Treat
+    # as a relative measure for comparing cascades, not for billing accuracy.
+    tokens_in_est: int = 0
+    tokens_out_est: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -267,6 +272,35 @@ def get_tracer() -> Optional[Tracer]:
     return _current.get()
 
 
+class _TracerScope:
+    """Context manager that sets the active tracer and properly resets it on
+    exit using the ContextVar token, so nested scopes don't leak state."""
+
+    def __init__(self, tracer: Optional[Tracer]) -> None:
+        self._tracer = tracer
+        self._token: Any = None
+
+    def __enter__(self) -> Optional[Tracer]:
+        if self._tracer is not None:
+            self._token = _current.set(self._tracer)
+        return self._tracer
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._token is not None:
+            _current.reset(self._token)
+            self._token = None
+
+
+def tracer_scope(tracer: Optional[Tracer]) -> _TracerScope:
+    """Use as ``with tracer_scope(tracer): ...`` to bind a tracer for a block.
+
+    Cleaner than manual set/reset because the ContextVar token is preserved
+    even across nested scopes — important when the heartbeat loops over many
+    goals and creates a per-goal tracer for each.
+    """
+    return _TracerScope(tracer)
+
+
 # ---- recorders (no-ops when no tracer is attached) -------------------------
 
 
@@ -282,6 +316,8 @@ def record_cognition(
         prompt_hash=_hash(prompt), prompt_preview=_preview(prompt),
         response_preview=_preview(response), latency_ms=latency_ms,
         error=error[:300],
+        tokens_in_est=len(prompt or "") // 4,
+        tokens_out_est=len(response or "") // 4,
     ))
 
 
@@ -340,6 +376,55 @@ def record_note(text: str) -> None:
     if t is None:
         return
     t.append(NoteEvent(text=text))
+
+
+# ---- persistent tracer (production telemetry) ------------------------------
+
+
+class PersistentTracer(Tracer):
+    """A Tracer that ALSO appends every event to a StateStore.
+
+    The base ``Tracer`` is in-memory only — fine for the e2e harness and
+    tests, but the events evaporate at process exit. ``PersistentTracer``
+    bridges the existing recorder API into the ``traces`` sqlite table so
+    production heartbeats leave a durable trail readable via the ``get_trace``
+    MCP tool.
+
+    All persistence is best-effort: if the sqlite write raises (busy, locked,
+    schema mismatch), the in-memory append still happens and the goal tick
+    continues — telemetry must never break production.
+
+    Each tracer is scoped to one heartbeat tick: ``trace_id`` (uuid) groups
+    every cognition / dispatch / delivery / etc. emitted during that tick;
+    ``goal_id`` ties them to the goal whose tick they belong to.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: Any,  # devclaw.state_store.StateStore — typed as Any to avoid the cycle
+        trace_id: str,
+        goal_id: str,
+        label: str = "",
+    ) -> None:
+        super().__init__(label=label)
+        self._store = store
+        self._trace_id = trace_id
+        self._goal_id = goal_id
+
+    def append(self, event: Any) -> None:
+        super().append(event)
+        payload = self.events[-1]
+        try:
+            self._store.append_trace_event(
+                trace_id=self._trace_id,
+                goal_id=self._goal_id,
+                kind=str(payload.get("kind", "unknown")),
+                payload=payload,
+            )
+        except Exception:
+            # Telemetry must never break the cascade. Swallow + continue.
+            pass
 
 
 def now_ms() -> int:

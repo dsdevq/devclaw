@@ -265,6 +265,20 @@ class StateStore:
                   key             TEXT PRIMARY KEY,
                   value           TEXT NOT NULL
                 );
+
+                -- Per-goal-tick trace events: every cognition call, dispatch,
+                -- delivery, subprocess, notify, etc. that a heartbeat tick
+                -- emitted. Grouped by trace_id (one per tick) so the full
+                -- causal chain of a tick can be replayed. Append-only; never
+                -- mutated. Read by the get_trace MCP tool and the dashboard.
+                CREATE TABLE IF NOT EXISTS traces (
+                  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                  trace_id        TEXT NOT NULL,
+                  goal_id         TEXT NOT NULL,
+                  kind            TEXT NOT NULL,
+                  ts              INTEGER NOT NULL,
+                  payload_json    TEXT NOT NULL
+                );
                 """
             )
 
@@ -297,6 +311,9 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
                 CREATE INDEX IF NOT EXISTS idx_events_program   ON events(program_id, id);
                 CREATE INDEX IF NOT EXISTS idx_events_task      ON events(task_id, id);
+                CREATE INDEX IF NOT EXISTS idx_traces_goal      ON traces(goal_id, id);
+                CREATE INDEX IF NOT EXISTS idx_traces_trace     ON traces(trace_id, id);
+                CREATE INDEX IF NOT EXISTS idx_traces_kind      ON traces(kind, id);
                 """
             )
             self._db.commit()
@@ -564,6 +581,103 @@ class StateStore:
             )
             self._db.commit()
             return int(cur.lastrowid)
+
+    # ---- traces (per-tick observability) --------------------------------
+
+    def append_trace_event(
+        self,
+        *,
+        trace_id: str,
+        goal_id: str,
+        kind: str,
+        payload: dict,
+        ts: Optional[int] = None,
+    ) -> int:
+        """Persist one trace event (cognition / tick / dispatch / delivery /
+        subprocess / notify / note). Best-effort by convention — callers should
+        not propagate exceptions out of telemetry. Returns the monotonic id."""
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO traces (trace_id, goal_id, kind, ts, payload_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    trace_id,
+                    goal_id,
+                    kind,
+                    ts if ts is not None else _now_ms(),
+                    json.dumps(payload, default=str),
+                ),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+    def read_traces(
+        self,
+        *,
+        goal_id: str,
+        since_id: int = 0,
+        limit: int = 500,
+        kind: Optional[str] = None,
+    ) -> list[dict]:
+        """Read trace events for one goal in emission order. Pass ``since_id``
+        to resume after a known cursor (exclusive); pass ``kind`` to filter
+        (e.g. only cognition calls)."""
+        sql = (
+            "SELECT id, trace_id, goal_id, kind, ts, payload_json FROM traces "
+            "WHERE goal_id = ? AND id > ?"
+        )
+        args: list[object] = [goal_id, since_id]
+        if kind:
+            sql += " AND kind = ?"
+            args.append(kind)
+        sql += " ORDER BY id ASC LIMIT ?"
+        args.append(limit)
+        with self._lock:
+            rows = self._db.execute(sql, tuple(args)).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "trace_id": r["trace_id"],
+                "goal_id": r["goal_id"],
+                "kind": r["kind"],
+                "ts": r["ts"],
+                "payload": json.loads(r["payload_json"]),
+            }
+            for r in rows
+        ]
+
+    def trace_totals(self, *, goal_id: str) -> dict:
+        """Aggregate stats over all trace events for a goal: counts per kind,
+        cognition total latency + estimated tokens. Cheap SQL — no LLM call."""
+        with self._lock:
+            counts = dict(
+                self._db.execute(
+                    "SELECT kind, COUNT(*) AS n FROM traces WHERE goal_id = ? GROUP BY kind",
+                    (goal_id,),
+                ).fetchall()
+            )
+            # cognition aggregates require unpacking payload_json
+            cog_rows = self._db.execute(
+                "SELECT payload_json FROM traces WHERE goal_id = ? AND kind = 'cognition'",
+                (goal_id,),
+            ).fetchall()
+        latency_ms = 0
+        tokens_in = 0
+        tokens_out = 0
+        for r in cog_rows:
+            try:
+                p = json.loads(r["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            latency_ms += int(p.get("latency_ms") or 0)
+            tokens_in += int(p.get("tokens_in_est") or 0)
+            tokens_out += int(p.get("tokens_out_est") or 0)
+        return {
+            "events_by_kind": {k: int(v) for k, v in counts.items()},
+            "cognition_total_latency_ms": latency_ms,
+            "cognition_tokens_in_est": tokens_in,
+            "cognition_tokens_out_est": tokens_out,
+        }
 
     def list_events(
         self,
