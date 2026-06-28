@@ -299,6 +299,10 @@ _MANIFEST = [{"label": "home", "url": "/", "screenshot": "home.png"}]
 @pytest.fixture(autouse=True)
 def _enable_visual_gate_and_fake_diff(monkeypatch):
     monkeypatch.setattr(task_queue, "VISUAL_GATE_ENABLED", True)
+    # The e2e-coverage gate would otherwise block our UI-only test diffs before
+    # the visual gate runs — disable it here so these tests stay focused on
+    # visual-gate behavior (it's covered in test_e2e_coverage.py).
+    monkeypatch.setattr(task_queue, "E2E_COVERAGE_GATE_ENABLED", False)
 
     async def fake_diff(_host_dir):
         return _UI_DIFF

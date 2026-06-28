@@ -87,6 +87,14 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 | `DEVCLAW_GOAL_PLAIN_SUMMARY` | `1` | One-line plain-prose summary per delivery for `deliveries.md` (one `claude` call per delivery). |
 | `DEVCLAW_NOTIFY_ALTITUDE` | `owner` | Floor for goal-layer notifications: `owner` (only real blockers / direction questions / completions) or `task` (also includes per-task chatter). |
 
+## Pre-PR E2E coverage gate
+
+Mechanical (no LLM call). UI changes (`*.tsx/jsx/vue/svelte/html/css/scss`) must ship a Playwright spec (`*.spec.ts/tsx/js/jsx` or `*.e2e.*`) in the same diff. New specs must contain at least one `test(`/`it(`/`describe(` call. Fires between test-integrity and the LLM-based gates.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `DEVCLAW_E2E_COVERAGE_GATE` | `1` | Master switch. `0` disables for projects that don't use `@playwright/test` (e.g. pytest-playwright shops). |
+
 ## Pre-PR review gate
 
 | Var | Default | Purpose |

@@ -50,6 +50,10 @@ from .quality.visual_judge import (
     format_visual_feedback,
     judge_screenshots,
 )
+from .quality.e2e_coverage import (
+    format_feedback as format_coverage_feedback,
+    scan_diff as scan_e2e_coverage,
+)
 from .engine.sandcastle import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
@@ -90,6 +94,11 @@ _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
 #: in twice over: this env flag AND a per-repo .agent/visual-verify.sh that
 #: actually emits a manifest.
 VISUAL_GATE_ENABLED = os.environ.get("DEVCLAW_VISUAL_GATE", "0") not in ("0", "false", "False", "")
+#: the mechanical E2E coverage gate: after verify + integrity, before the
+#: (LLM-based) visual + review gates, refuse a UI change that didn't ship a
+#: Playwright spec. Pure regex on the diff; no LLM call. ON by default — a
+#: project without Playwright disables via DEVCLAW_E2E_COVERAGE_GATE=0.
+E2E_COVERAGE_GATE_ENABLED = os.environ.get("DEVCLAW_E2E_COVERAGE_GATE", "1") not in ("0", "false", "False", "")
 #: which file extensions in the diff count as "this change touches UI". A change
 #: that touches none of these skips the visual gate (cheap-skip — no LLM call).
 _UI_FILE_SUFFIXES = (".tsx", ".jsx", ".ts", ".css", ".scss", ".html", ".vue", ".svelte")
@@ -166,6 +175,21 @@ def _load_per_repo_rubric(workspace_dir: str) -> str:
             return fh.read().strip()
     except OSError:
         return ""
+
+
+def _e2e_coverage_failure(kind: TaskKind, diff: str) -> Optional[str]:
+    """Return a failure summary if a UI change shipped without Playwright
+    coverage, else None. Mechanical (no LLM), kind-gated to code-writing kinds,
+    env-gated via DEVCLAW_E2E_COVERAGE_GATE. Best-effort — never raises."""
+    if not E2E_COVERAGE_GATE_ENABLED or kind not in _REVIEWABLE_KINDS:
+        return None
+    try:
+        report = scan_e2e_coverage(diff)
+    except Exception:  # noqa: BLE001 — a guard must never break a real task
+        return None
+    if report.ok:
+        return None
+    return format_coverage_feedback(report)
 
 
 def _integrity_failure(diff: str) -> Optional[str]:
@@ -763,23 +787,35 @@ class TaskQueue:
                         # the deployed container. Use workspace_dir directly.
                         diff = await _git_diff(workspace_dir)
                         integrity = _integrity_failure(diff)
+                        # E2E coverage runs next — mechanical, no LLM call. UI
+                        # changes that didn't ship a Playwright spec block here
+                        # before any of the cognition-heavy gates fire.
+                        coverage = (
+                            None if integrity is not None
+                            else _e2e_coverage_failure(kind, diff)
+                        )
                         # Visual gate runs BEFORE the diff-review gate so a visibly
                         # broken UI is caught first (cheaper feedback than re-reading
                         # the diff). The evidence payload comes from the runner.
                         visual_fb = (
-                            None if integrity is not None
+                            None if integrity is not None or coverage is not None
                             else await self._visual_failure(
                                 kind, goal, diff, result.get("evidence") or {}, workspace_dir,
                             )
                         )
                         review_fb = (
-                            None if integrity is not None or visual_fb is not None
+                            None
+                            if integrity is not None or coverage is not None or visual_fb is not None
                             else await self._review_failure(kind, goal, diff)
                         )
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
                             # a gate failure so it retries with the tampering fed back.
                             last_failure = integrity
+                        elif coverage is not None:
+                            # gate + tests fine, but UI shipped without an E2E spec —
+                            # feed the coverage gap back through the SAME retry loop.
+                            last_failure = coverage
                         elif visual_fb is not None:
                             # gate + tests fine, but the rendered UI is broken — feed
                             # the visual issues back through the SAME retry loop.
