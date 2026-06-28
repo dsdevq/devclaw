@@ -7,3 +7,9 @@ Do NOT assume the existing code is good — assess what you touch: if it's poorl
 AGENTS.md in the repo root is the project's ACCUMULATED AGENT HARNESS — read it FIRST so you don't re-derive what's already known (stack, how to run/test, layout, conventions, key decisions, gotchas, reusable patterns).
 
 As part of this change, KEEP AGENTS.md CURRENT: if it's missing, create it; if you learned or decided something a future task would otherwise have to re-reason, record it there concisely. It is the memory that saves the next task from re-thinking the same topics — treat maintaining it as part of the work, not optional.
+
+## Per-repo skills (project-owned)
+
+Some projects ship a `.agent/skills/` directory with project-specific notes — auth flow, schema migrations, deploy steps, "before changing X always do Y", etc. Before starting, `ls .agent/skills/` if it exists and read any file whose name looks relevant to your task. These are PROJECT-OWNED and complement (do not override) the doctrine above.
+
+If you learn something project-specific during this task that future agents would benefit from — e.g. "the migration command in this repo is `alembic upgrade head` from `backend/`, not the repo root" — write it as a new file in `.agent/skills/<topic>.md` so the next task starts informed. Same maintenance discipline as AGENTS.md: capture the *non-obvious*, not the obvious.

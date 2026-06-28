@@ -102,30 +102,27 @@ def test_wrap_goal_falls_back_when_skill_dir_missing(runner, monkeypatch, tmp_pa
     assert "AGENTS.md" in wrapped  # from embedded _CONTEXT_PREAMBLE
 
 
-# ---- _run_hook behavior -----------------------------------------------------
+# ---- _run_hook behavior (universal + per-repo) ------------------------------
 
 
-def test_run_hook_returns_false_when_missing(runner, monkeypatch, tmp_path):
+def test_run_hook_returns_empty_when_nothing_exists(runner, monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_HOOKS_DIR", str(tmp_path / "nonexistent"))
-    ran, out = runner._run_hook("pre-run", "/tmp", "implement_feature", "task-id")
-    assert ran is False
-    assert out == ""
+    warnings = runner._run_hook("pre-run", str(tmp_path), "implement_feature", "task-id")
+    assert warnings == []
 
 
 def test_pre_run_hook_executes(runner, hook_dir, tmp_path):
-    # workspace must exist and look like a git repo for pre-run to snapshot HEAD
+    # workspace must exist; pre-run snapshots HEAD if git, otherwise quiet.
     ws = tmp_path / "ws"
     ws.mkdir()
-    ran, out = runner._run_hook("pre-run", str(ws), "implement_feature", "task-id")
-    assert ran is True
-    # workspace is not a git repo so no snapshot file created — no warnings
-    # expected on this happy path; output may be empty.
-    assert "fatal" not in out.lower()
+    warnings = runner._run_hook("pre-run", str(ws), "implement_feature", "task-id")
+    # non-git workspace → no snapshot → no warnings on happy path
+    assert all("fatal" not in w.lower() for w in warnings)
 
 
 def test_post_run_hook_warns_on_e2e_without_playwright_in_verify(runner, hook_dir, tmp_path):
     # Simulate: pre-run snapshotted a HEAD, agent added an e2e spec, verify_cmd
-    # is pytest-only. Post-run should warn.
+    # is pytest-only. Post-run should warn with the [post-run] tag.
     import subprocess as sp
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -145,9 +142,44 @@ def test_post_run_hook_warns_on_e2e_without_playwright_in_verify(runner, hook_di
     sp.run(["git", "-C", str(ws), "add", "."], check=True)
     sp.run(["git", "-C", str(ws), "commit", "-q", "-m", "add e2e"], check=True)
 
-    ran, out = runner._run_hook(
+    warnings = runner._run_hook(
         "post-run", str(ws), "implement_feature", "task-id", "pytest -q"
     )
-    assert ran is True
-    assert "browser tests added but verify_cmd" in out
-    assert "smoke.spec.ts" in out
+    assert any("[post-run]" in w for w in warnings)
+    joined = "\n".join(warnings)
+    assert "browser tests added but verify_cmd" in joined
+    assert "smoke.spec.ts" in joined
+
+
+def test_per_repo_hook_runs_alongside_universal(runner, hook_dir, tmp_path):
+    # When the workspace ships its own .agent/hooks/<name>.sh, runner fires the
+    # universal hook AND the per-repo hook; both contribute to the warning list
+    # with distinct tags so the goal layer can tell them apart.
+    ws = tmp_path / "ws"
+    (ws / ".agent" / "hooks").mkdir(parents=True)
+    repo_hook = ws / ".agent" / "hooks" / "pre-run.sh"
+    repo_hook.write_text("#!/usr/bin/env bash\necho 'repo-pre-run-fired'\n")
+    repo_hook.chmod(0o755)
+
+    warnings = runner._run_hook("pre-run", str(ws), "implement_feature", "task-id")
+    repo_warnings = [w for w in warnings if w.startswith("[pre-run:repo]")]
+    assert repo_warnings, f"expected per-repo warning, got: {warnings}"
+    assert "repo-pre-run-fired" in repo_warnings[0]
+
+
+def test_per_repo_hook_missing_does_not_crash(runner, hook_dir, tmp_path):
+    # Workspaces WITHOUT .agent/hooks/ still work — per-repo layer is purely
+    # opt-in, no warnings emitted on its behalf.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    warnings = runner._run_hook("pre-run", str(ws), "implement_feature", "task-id")
+    repo_warnings = [w for w in warnings if "[pre-run:repo]" in w]
+    assert repo_warnings == []
+
+
+def test_common_skill_mentions_per_repo_skills(runner, skill_dir):
+    # The _common skill is what tells the agent to ls .agent/skills/ — that's
+    # the entire discovery mechanism for the per-repo layer.
+    bundle = runner._load_skills("implement_feature")
+    assert ".agent/skills/" in bundle
+    assert "PROJECT-OWNED" in bundle

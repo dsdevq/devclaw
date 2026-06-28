@@ -73,14 +73,8 @@ def _load_skills(kind: str) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
-def _run_hook(name: str, *args: str) -> tuple[bool, str]:
-    """Run a sandbox-baked hook (best-effort).
-
-    Returns (ran, captured_output). The runner forwards captured warnings into
-    the result payload so the goal layer can surface them. Hook failures are
-    NOT fatal — they're advisory, the verify gate is the source of truth.
-    """
-    path = os.path.join(_HOOKS_DIR, f"{name}.sh")
+def _run_one_hook(path: str, args: tuple[str, ...]) -> tuple[bool, str]:
+    """Run a single hook script (best-effort). Returns (ran, captured_output)."""
     if not os.path.exists(path):
         return False, ""
     try:
@@ -92,9 +86,36 @@ def _run_hook(name: str, *args: str) -> tuple[bool, str]:
         )
         return True, ((proc.stdout or "") + (proc.stderr or "")).strip()
     except subprocess.TimeoutExpired:
-        return True, f"hook {name} timed out after {_HOOK_TIMEOUT_S}s"
+        return True, f"hook timed out after {_HOOK_TIMEOUT_S}s"
     except OSError as exc:
-        return True, f"hook {name} failed to start: {exc}"
+        return True, f"hook failed to start: {exc}"
+
+
+def _run_hook(name: str, *args: str) -> list[str]:
+    """Run the universal devclaw hook then the per-repo hook (if either exists).
+
+    Universal hooks live in /opt/devclaw/hooks/ (baked into the sandbox image,
+    devclaw-owned). Per-repo hooks live in <workspace>/.agent/hooks/ (project-
+    owned, evolves at the repo's pace). Both contribute to the warnings list
+    with a tagged prefix so the goal layer can tell them apart.
+
+    Returns a list of warning lines (possibly empty). Hook failures are NOT
+    fatal — they're advisory; the verify gate is the source of truth.
+    """
+    warnings: list[str] = []
+    # Universal: devclaw-owned doctrine baked into the image.
+    universal_path = os.path.join(_HOOKS_DIR, f"{name}.sh")
+    ran, out = _run_one_hook(universal_path, args)
+    if ran and out:
+        warnings.append(f"[{name}] {out}")
+    # Per-repo: project-owned, lives in the workspace alongside AGENTS.md.
+    # args[0] is workspace_dir by convention; if no args we can't locate it.
+    if args:
+        repo_path = os.path.join(args[0], ".agent", "hooks", f"{name}.sh")
+        ran, out = _run_one_hook(repo_path, args)
+        if ran and out:
+            warnings.append(f"[{name}:repo] {out}")
+    return warnings
 
 
 # (Legacy embedded preambles — kept only as the in-process fallback when the
@@ -405,12 +426,11 @@ def main() -> None:
     # e2e tests but verify_cmd does not run them"). Hooks are best-effort —
     # their warnings are advisory, the verify gate is the source of truth.
     # Pre-run hook fires AFTER the MCP config drop so it sees the final
-    # workspace state.
+    # workspace state. _run_hook fires both the universal hook AND any per-repo
+    # hook in <workspace>/.agent/hooks/, returning a list of tagged warnings.
     task_id = str(req.get("task_id") or "")
     hook_warnings: list[str] = []
-    pre_ran, pre_out = _run_hook("pre-run", workspace_dir, kind, task_id)
-    if pre_ran and pre_out:
-        hook_warnings.append(f"[pre-run] {pre_out}")
+    hook_warnings.extend(_run_hook("pre-run", workspace_dir, kind, task_id))
 
     # Default to a PATH lookup — inside the sandbox the Dockerfile sets
     # CLAUDE_CODE_EXECUTABLE=/usr/bin/claude, so this fallback only matters for
@@ -504,11 +524,9 @@ def main() -> None:
     # "you added browser tests but verify_cmd is still pytest-only"). Runs
     # BEFORE the verify gate so the hook can pass verify_cmd to its diff-aware
     # checks and so its warnings ride alongside the gate verdict in the result.
-    post_ran, post_out = _run_hook(
-        "post-run", workspace_dir, kind, task_id, verify_cmd or ""
+    hook_warnings.extend(
+        _run_hook("post-run", workspace_dir, kind, task_id, verify_cmd or "")
     )
-    if post_ran and post_out:
-        hook_warnings.append(f"[post-run] {post_out}")
 
     result_payload = {
         "status": "ok",

@@ -40,6 +40,17 @@ Five distinct layers below the user, and only one of them is an agent harness in
 
 DevClaw is mostly **plumbing + prompts** around that one worker harness. The reasoning is Claude's, borrowed via (a) one-shot cognition calls the loop makes for planning/firming/evaluation, and (b) the worker harness running interactively inside the sandbox. The state machine, persistence, lifecycle, and gates are the real engineering — they let one goal span days, many PRs, many evaluator passes without the owner at the desk.
 
+### Skills + hooks — two layers, one mechanism
+
+The worker harness reads two complementary layers of doctrine each task:
+
+| Layer | Lives in | Owned by | Purpose |
+|---|---|---|---|
+| **Universal** | `/opt/devclaw/skills/` + `/opt/devclaw/hooks/` (baked into the sandbox image from `openhands-runner/skills/` and `openhands-runner/hooks/` in this repo) | DevClaw | Cross-repo doctrine — quality bar, verify-gate coverage, commit hygiene, e2e patterns. The runner prepends per-task-kind skill bundles to the goal; universal hooks run mechanical pre/post checks. |
+| **Per-repo** | `<repo>/.agent/skills/` + `<repo>/.agent/hooks/` (alongside `AGENTS.md`) | The project | Project-specific notes — auth flow, migration commands, deploy steps. Agent-discovered (the universal `_common` skill tells it to `ls .agent/skills/`); per-repo hooks fire after universal ones with a `[name:repo]` tag. |
+
+Same pattern as `AGENTS.md`: universal devclaw doctrine + per-repo project facts. The universal layer stays consistent across every cascade; the per-repo layer evolves at the project's own pace.
+
 ## The split
 
 | Concern | Owner |
