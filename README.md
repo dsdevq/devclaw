@@ -28,6 +28,8 @@ DevClaw (the chef — this repo, FastMCP)
 
 ### Layered view — where the agent harness actually lives
 
+> The canonical layer reference, with per-layer contracts and invariants, is **[`docs/architecture-layers.md`](./docs/architecture-layers.md)**. This README section is the high-level summary. Architectural changes are judged against the doc.
+
 Five distinct layers below the user, and only one of them is an agent harness in the technical sense (a turn-loop hosting tool calls).
 
 | Layer | What it is | Harness? |
