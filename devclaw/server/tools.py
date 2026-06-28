@@ -624,6 +624,36 @@ async def answer_unknowns(goal_id: str, answers: dict[str, str]) -> str:
 
 
 @mcp.tool
+async def get_trace(
+    goal_id: str,
+    since_id: int = 0,
+    limit: Annotated[int, Field(ge=1, le=2000)] = 200,
+    kind: Optional[str] = None,
+) -> str:
+    """Read durable trace events for a goal — every cognition call, dispatch,
+    delivery, subprocess, and notification a heartbeat tick has emitted, in
+    emission order. Grouped by ``trace_id`` (one per goal-tick).
+
+    Use this to inspect what actually happened during a cascade: which prompts
+    fired with what role, how long each cognition call took, estimated input/
+    output tokens (rough proxy — len/4), and the chain of dispatches that
+    followed. Pair with ``get_goal`` for the high-level state + this for the
+    causal detail.
+
+    Returns ``{"events": [...], "totals": {...}}``. Pass ``since_id`` (the
+    monotonic id of the last event you've seen) to incrementally tail; pass
+    ``kind`` to filter (e.g. ``cognition`` for prompts only).
+    """
+    if not goal_id:
+        raise ToolError("get_trace requires goal_id")
+    events = store.read_traces(
+        goal_id=goal_id, since_id=since_id, limit=limit, kind=kind,
+    )
+    totals = store.trace_totals(goal_id=goal_id)
+    return json.dumps({"events": events, "totals": totals}, indent=2, default=str)
+
+
+@mcp.tool
 async def cancel_goal(goal_id: str) -> str:
     """Permanently stop a durable goal. Sets its phase to 'cancelled' (a terminal
     state — DevClaw will skip it on every future heartbeat) and tears down any

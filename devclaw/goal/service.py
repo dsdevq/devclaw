@@ -16,6 +16,7 @@ import asyncio
 import os
 import re
 import sys
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
@@ -31,9 +32,17 @@ from .models import GoalStatus
 from .notify import HttpNotifier, Notifier, NullNotifier
 from .store import GoalStore
 from .tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
+from ..loom import trace as _trace
 from ..state_store import StateStore
 from ..task_queue import TaskQueue
 from ..engine.workspace import prepare_workspace
+
+
+# Telemetry: opt-out via env. Default ON in production so heartbeats leave a
+# durable trace in the sqlite traces table; set to "0" for tests / local runs
+# where the per-tick PersistentTracer would just be noise. Tests inject their
+# own tracer directly when they want to assert on events.
+_TRACE_PERSIST_ENABLED = os.environ.get("DEVCLAW_TRACE_PERSIST", "1") != "0"
 
 
 _BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")
@@ -176,6 +185,21 @@ class GoalService:
             except Exception as exc:  # noqa: BLE001 — a tick crash must not kill the loop
                 sys.stderr.write(f"goal-layer: tick crashed: {exc}\n")
 
+    def _make_tracer(self, goal_id: str) -> "Optional[_trace.PersistentTracer]":
+        """Per-goal-tick PersistentTracer that writes into the sqlite traces
+        table. Disabled when DEVCLAW_TRACE_PERSIST=0 (test/local convenience).
+        Each tick gets a fresh ``trace_id`` so the full causal chain of one
+        wakeup can be replayed via ``get_trace(goal_id)``.
+        """
+        if not _TRACE_PERSIST_ENABLED:
+            return None
+        return _trace.PersistentTracer(
+            store=self._store,
+            trace_id=str(uuid.uuid4()),
+            goal_id=goal_id,
+            label=f"tick-{goal_id}",
+        )
+
     async def tick_all(self) -> dict:
         outcomes = await tick_all(
             store=self._goal_store, engine=self._engine,
@@ -183,17 +207,19 @@ class GoalService:
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
             summary_caller=self._summary(), merger=self._merger(),
+            tracer_factory=self._make_tracer,
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
     async def tick_one(self, goal_id: str) -> str:
-        outcome = await tick_goal(
-            goal_id, store=self._goal_store, engine=self._engine,
-            planner_caller=self._planner(), evaluator_caller=self._evaluator(),
-            notifier=self._notifier, notify_url="",
-            eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(),
-        )
+        with _trace.tracer_scope(self._make_tracer(goal_id)):
+            outcome = await tick_goal(
+                goal_id, store=self._goal_store, engine=self._engine,
+                planner_caller=self._planner(), evaluator_caller=self._evaluator(),
+                notifier=self._notifier, notify_url="",
+                eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+                summary_caller=self._summary(), merger=self._merger(),
+            )
         return outcome.value
 
     # ---- steer / observe surface (wrapped by MCP tools) --------------------

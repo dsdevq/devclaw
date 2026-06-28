@@ -1179,9 +1179,15 @@ async def tick_all(
     no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
+    tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others, and a usage
-    limit pauses the whole layer (0 tokens) rather than crashing per-goal."""
+    limit pauses the whole layer (0 tokens) rather than crashing per-goal.
+
+    ``tracer_factory(goal_id) -> Tracer | None`` is the seam GoalService uses
+    to attach a :class:`PersistentTracer` per goal-tick so the cascade's
+    cognition / dispatch / delivery events land in the durable trace store.
+    """
     outcomes: dict[str, Outcome] = {}
 
     # Unified quota pause: the OAuth quota is account-wide, so if anything (a task
@@ -1194,14 +1200,16 @@ async def tick_all(
         _engine_clear_pause(engine)
 
     for goal_id in store.list_goal_ids():
+        tracer = tracer_factory(goal_id) if tracer_factory else None
         try:
-            outcomes[goal_id] = await tick_goal(
-                goal_id, store=store, engine=engine,
-                planner_caller=planner_caller, evaluator_caller=evaluator_caller,
-                notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-                eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
-                summary_caller=summary_caller, merger=merger,
-            )
+            with _trace.tracer_scope(tracer):
+                outcomes[goal_id] = await tick_goal(
+                    goal_id, store=store, engine=engine,
+                    planner_caller=planner_caller, evaluator_caller=evaluator_caller,
+                    notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
+                    eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+                    summary_caller=summary_caller, merger=merger,
+                )
         except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
             # the goal's OWN cognition (claude --print) hitting a limit pauses the
             # whole layer instead of crash-looping + burning quota; anything else is
