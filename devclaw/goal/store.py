@@ -320,10 +320,17 @@ class GoalStore:
             list(firmed.stub_acceptable) if firmed.stub_acceptable
             else list(base.stub_acceptable)
         )
+        # verify_cmd: firming's value WINS when present. Closes the cf-11 churn
+        # root cause — without this, a cascade can't update its own gate even
+        # when firming derived a stricter contract (e.g. "gate runs pytest AND
+        # playwright"), and the agent invents workarounds (Makefiles, pytest
+        # wrappers) to smuggle new tools through the stale gate.
+        derived_verify_cmd = firmed.verify_cmd or base.verify_cmd
         return _replace(
             base,
             done_when=derived_done_when,
             stub_acceptable=derived_stub_acceptable,
+            verify_cmd=derived_verify_cmd,
         )
 
     # ---- scope spec (handed in by the waiter via create_goal) ---------------
