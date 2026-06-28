@@ -1,4 +1,4 @@
-"""devclaw CLI — drive the project registry from a terminal.
+"""devclaw CLI — drive the project registry + visual-judge from a terminal.
 
 The third face of the control plane: chat (MCP tools) and the dashboard (HTTP)
 already exist; this is the CLI. It talks to the SAME stores the server uses —
@@ -16,15 +16,20 @@ Usage:
   python -m devclaw.cli projects archive <id>
   python -m devclaw.cli projects rm <id>
 
-Output is human-readable by default; pass ``--json`` to list/show for the raw
-rollup (the same shape the MCP tools return), so the CLI is scriptable too.
+  python -m devclaw.cli visual-judge <workspace> [--rubric path] [--against-head] [--json]
+
+Output is human-readable by default; pass ``--json`` to list/show/visual-judge
+for the raw rollup (the same shape the MCP tools return), so the CLI is
+scriptable too.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
+import subprocess
 import sys
 from typing import Optional
 
@@ -186,6 +191,148 @@ def _cmd_rm(reg: ProjectRegistry, goal_get, args) -> int:
     return 1
 
 
+# ---- visual-judge: smoke the gate against an arbitrary workspace ----------
+
+#: the well-known evidence subdir the runner-side gate writes to (same path).
+_VISUAL_EVIDENCE_SUBDIR = ".devclaw-evidence"
+
+
+def _run_local_visual_verify(workspace_dir: str, timeout: int) -> dict:
+    """Host-side mirror of the runner's `_run_visual_verify`. Inlined rather
+    than imported so devclaw stays decoupled from openhands-runner (which is
+    not a Python package — model-agnostic invariant). Same JSON contract on
+    stdout: ``{routes: [...], notes}``."""
+    script = os.path.join(workspace_dir, ".agent", "visual-verify.sh")
+    if not os.path.exists(script):
+        return {"ran": False, "manifest": [], "errors": [], "reason": "no script"}
+    if not os.access(script, os.X_OK):
+        return {
+            "ran": False, "manifest": [], "errors": [],
+            "reason": ".agent/visual-verify.sh is not executable",
+        }
+    evidence_dir = os.path.join(workspace_dir, _VISUAL_EVIDENCE_SUBDIR)
+    try:
+        os.makedirs(evidence_dir, exist_ok=True)
+    except OSError as exc:
+        return {
+            "ran": False, "manifest": [], "errors": [f"evidence dir: {exc}"],
+            "reason": "evidence dir create failed",
+        }
+    env = dict(os.environ)
+    env["DEVCLAW_VISUAL_EVIDENCE_DIR"] = evidence_dir
+    env["DEVCLAW_TASK_KIND"] = "cli"
+    env["DEVCLAW_TASK_ID"] = "cli"
+    try:
+        proc = subprocess.run(
+            ["bash", script],
+            cwd=workspace_dir, capture_output=True, text=True, timeout=timeout, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ran": True, "manifest": [], "reason": "timeout",
+                "errors": [f"visual-verify timed out after {timeout}s"]}
+    except OSError as exc:
+        return {"ran": True, "manifest": [], "reason": "spawn failed",
+                "errors": [f"failed to run visual-verify: {exc}"]}
+    if proc.returncode != 0:
+        return {"ran": True, "manifest": [], "reason": f"exit {proc.returncode}",
+                "errors": [f"visual-verify exited {proc.returncode}",
+                           (proc.stderr or "")[-2000:]]}
+    stdout = (proc.stdout or "").strip()
+    if not stdout:
+        return {"ran": True, "manifest": [], "reason": "empty manifest",
+                "errors": ["visual-verify printed nothing to stdout"]}
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return {"ran": True, "manifest": [], "reason": "bad json",
+                "errors": [f"visual-verify stdout was not JSON: {exc}", stdout[-2000:]]}
+    if not isinstance(parsed, dict):
+        return {"ran": True, "manifest": [], "reason": "bad shape",
+                "errors": ["visual-verify JSON root must be an object"]}
+    routes = parsed.get("routes")
+    manifest: list[dict] = []
+    if isinstance(routes, list):
+        for entry in routes:
+            if isinstance(entry, dict):
+                manifest.append(entry)
+    return {"ran": True, "manifest": manifest, "errors": [],
+            "reason": "ok" if manifest else "empty routes",
+            "notes": str(parsed.get("notes") or "").strip()}
+
+
+def _read_rubric(workspace_dir: str, override: Optional[str]) -> str:
+    path = override or os.path.join(workspace_dir, ".agent", "visual-rubric.md")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _diff_against_head(workspace_dir: str) -> str:
+    """`git diff HEAD~1` for the workspace; empty string on any failure (not a
+    repo, no parent, git missing)."""
+    try:
+        p = subprocess.run(
+            ["git", "-C", workspace_dir, "diff", "HEAD~1"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return p.stdout if p.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _cmd_visual_judge(reg, goal_get, args) -> int:
+    """Run the visual gate against a workspace checkpoint. Exit codes:
+    0 approve, 1 request_changes, 2 infrastructure error (script missing,
+    judge unreachable, parse error)."""
+    workspace = os.path.abspath(args.workspace)
+    if not os.path.isdir(workspace):
+        print(f"workspace not found: {workspace}", file=sys.stderr)
+        return 2
+    timeout = int(os.environ.get("DEVCLAW_VISUAL_TIMEOUT_S", "180"))
+    evidence = _run_local_visual_verify(workspace, timeout=timeout)
+    if not evidence.get("ran"):
+        print(f"visual-verify did not run: {evidence.get('reason')}", file=sys.stderr)
+        return 2
+    if not evidence.get("manifest"):
+        msg = f"visual-verify produced no manifest: {evidence.get('reason')}"
+        if evidence.get("errors"):
+            msg += "\n  errors: " + "\n  ".join(evidence["errors"])
+        print(msg, file=sys.stderr)
+        return 2
+    rubric = _read_rubric(workspace, args.rubric)
+    diff = _diff_against_head(workspace) if args.against_head else ""
+
+    from .quality.visual_judge import judge_screenshots
+
+    evidence_dir = os.path.join(workspace, _VISUAL_EVIDENCE_SUBDIR)
+    try:
+        verdict = asyncio.run(judge_screenshots(
+            goal=args.goal or "(no ticket — CLI smoke)",
+            kind="implement_feature",
+            diff=diff,
+            manifest=evidence["manifest"],
+            evidence_dir=evidence_dir,
+            rubric_per_repo=rubric,
+        ))
+    except Exception as err:  # noqa: BLE001 — surface judge errors as infra failures
+        print(f"visual judge failed: {err}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(verdict, indent=2))
+    else:
+        print(f"verdict: {verdict['verdict']}")
+        if verdict.get("summary"):
+            print(f"summary: {verdict['summary']}")
+        for i in verdict.get("issues", []):
+            loc = f" [{i['location']}]" if i.get("location") else ""
+            print(f"  ({i['severity']}){loc} {i['problem']}")
+            if i.get("fix"):
+                print(f"    fix: {i['fix']}")
+    return 0 if verdict["verdict"] == "approve" else 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="devclaw", description="devclaw control-plane CLI")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -236,14 +383,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p_rm.add_argument("id")
     p_rm.set_defaults(func=_cmd_rm)
 
+    vj = sub.add_parser(
+        "visual-judge",
+        help="run the visual-evidence gate against a workspace checkpoint",
+    )
+    vj.add_argument("workspace", help="path to the workspace whose .agent/visual-verify.sh runs")
+    vj.add_argument("--rubric", help="override per-repo rubric path (default: <workspace>/.agent/visual-rubric.md)")
+    vj.add_argument("--against-head", action="store_true",
+                    help="include `git diff HEAD~1` as the diff context for the judge")
+    vj.add_argument("--goal", default="", help="ticket text describing the change (defaults to a CLI-smoke note)")
+    vj.add_argument("--json", action="store_true", help="emit the full verdict dict")
+    vj.set_defaults(func=_cmd_visual_judge, _needs_registry=False)
+
     return parser
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    reg = ProjectRegistry(_db_path())
-    goal_get = _goal_getter(GoalStore(_goals_dir()))
+    # Lazy: only spin up the project registry + goal store for commands that
+    # actually need them. visual-judge runs against an arbitrary workspace and
+    # must not create a stray devclaw.db in its CWD.
+    needs_registry = getattr(args, "_needs_registry", True)
+    if needs_registry:
+        reg = ProjectRegistry(_db_path())
+        goal_get = _goal_getter(GoalStore(_goals_dir()))
+    else:
+        reg, goal_get = None, None
     return args.func(reg, goal_get, args)
 
 

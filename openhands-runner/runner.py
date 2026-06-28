@@ -34,6 +34,17 @@ import traceback
 # the task forever (the agent's own wall-clock guard is separate — improvement #3).
 _VERIFY_TIMEOUT_S = int(os.environ.get("DEVCLAW_VERIFY_TIMEOUT_S", "900"))
 
+# Wall-clock cap for the per-repo `.agent/visual-verify.sh` script that boots
+# the app + drives Playwright + captures screenshots. Generous default so a slow
+# dev-server boot doesn't trip it — but bounded so a hung server can't hang the
+# task. The host visual gate fails OPEN on timeout (no manifest → judge skipped).
+_VISUAL_TIMEOUT_S = int(os.environ.get("DEVCLAW_VISUAL_TIMEOUT_S", "180"))
+
+# Where the per-repo visual-verify script writes screenshots inside the
+# sandbox. Co-located with the workspace so the bind-mount surfaces them on the
+# host without any path translation (the host gate reads from the SAME path).
+_VISUAL_EVIDENCE_SUBDIR = ".devclaw-evidence"
+
 # Skill bundle baked into the sandbox image at /opt/devclaw/skills/. Layout:
 #   _common.md          → always prepended
 #   _writes-code/*.md   → for kinds that write code (implement_feature, fix_bug)
@@ -261,6 +272,118 @@ def _wrap_goal(kind: str, goal: str) -> str:
         return f"{skills}\n\n---\n\n## Goal\n\n{goal}"
     template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
     return template.format(goal=goal)
+
+
+def _pick_free_port() -> int:
+    """Pick a free TCP port the visual-verify script can bind the app to.
+    Best-effort: a sandbox container is the only thing listening, so the
+    classic TOCTOU window (port grabbed between probe + use) isn't a concern
+    here. Falls back to 3000 if the probe fails."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+    except OSError:
+        return 3000
+
+
+def _run_visual_verify(
+    workspace_dir: str, kind: str, task_id: str, timeout: int = _VISUAL_TIMEOUT_S,
+) -> dict:
+    """Run the project-owned ``.agent/visual-verify.sh`` if present. The script's
+    contract: boot the app, drive Playwright against it, write screenshots to
+    ``$DEVCLAW_VISUAL_EVIDENCE_DIR``, and PRINT a JSON manifest on stdout shaped
+    ``{"routes":[{"label","url","screenshot","console_errors":[...]}],"notes":""}``.
+
+    Returns ``{ran, manifest, errors, reason}`` consumed by the host-side visual
+    gate. The script is owned by the project — devclaw runs it but does not
+    second-guess what it does. Never raises: a crash/timeout/parse-failure is a
+    skipped gate (fail open), not a runner crash. The host's retry loop must be
+    reserved for *judged* UI breakage, never for infra flakiness."""
+    script = os.path.join(workspace_dir, ".agent", "visual-verify.sh")
+    if not os.path.exists(script):
+        return {"ran": False, "manifest": [], "errors": [], "reason": "no script"}
+    if not os.access(script, os.X_OK):
+        return {
+            "ran": False, "manifest": [], "errors": [],
+            "reason": ".agent/visual-verify.sh is not executable",
+        }
+    evidence_dir = os.path.join(workspace_dir, _VISUAL_EVIDENCE_SUBDIR)
+    try:
+        os.makedirs(evidence_dir, exist_ok=True)
+    except OSError as exc:
+        return {
+            "ran": False, "manifest": [], "errors": [f"evidence dir: {exc}"],
+            "reason": "evidence dir create failed",
+        }
+    port = _pick_free_port()
+    env = dict(os.environ)
+    env["DEVCLAW_VISUAL_EVIDENCE_DIR"] = evidence_dir
+    env["DEVCLAW_BROWSER_PORT"] = str(port)
+    env["DEVCLAW_TASK_KIND"] = kind
+    env["DEVCLAW_TASK_ID"] = task_id
+    try:
+        proc = subprocess.run(
+            ["bash", script],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run leaves exc.stdout/exc.stderr as raw bytes even when
+        # text=True, so decode defensively rather than crash on concat.
+        def _as_text(buf):
+            if buf is None:
+                return ""
+            return buf.decode("utf-8", "replace") if isinstance(buf, bytes) else buf
+        partial = (_as_text(exc.stdout) + _as_text(exc.stderr)).strip()
+        return {
+            "ran": True, "manifest": [], "reason": "timeout",
+            "errors": [f"visual-verify timed out after {timeout}s", partial[-2000:]],
+        }
+    except OSError as exc:
+        return {
+            "ran": True, "manifest": [], "reason": "spawn failed",
+            "errors": [f"failed to run visual-verify: {exc}"],
+        }
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    if proc.returncode != 0:
+        return {
+            "ran": True, "manifest": [], "reason": f"exit {proc.returncode}",
+            "errors": [f"visual-verify exited {proc.returncode}", stderr[-2000:]],
+        }
+    if not stdout:
+        return {
+            "ran": True, "manifest": [], "reason": "empty manifest",
+            "errors": ["visual-verify printed nothing to stdout"],
+        }
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "ran": True, "manifest": [], "reason": "bad json",
+            "errors": [f"visual-verify stdout was not JSON: {exc}", stdout[-2000:]],
+        }
+    if not isinstance(parsed, dict):
+        return {
+            "ran": True, "manifest": [], "reason": "bad shape",
+            "errors": ["visual-verify JSON root must be an object"],
+        }
+    routes = parsed.get("routes")
+    manifest: list[dict] = []
+    if isinstance(routes, list):
+        for entry in routes:
+            if isinstance(entry, dict):
+                manifest.append(entry)
+    return {
+        "ran": True, "manifest": manifest, "errors": [],
+        "reason": "ok" if manifest else "empty routes",
+        "notes": str(parsed.get("notes") or "").strip(),
+    }
 
 
 def _run_verify(cmd: str, workspace_dir: str, timeout: int = _VERIFY_TIMEOUT_S) -> dict:
@@ -536,6 +659,28 @@ def main() -> None:
     }
     if hook_warnings:
         result_payload["hook_warnings"] = hook_warnings
+
+    # Visual-evidence capture: if the project ships `.agent/visual-verify.sh`,
+    # run it to boot the app + drive Playwright + screenshot the routes. We run
+    # this BEFORE the verify gate so a single dev-server boot can serve both
+    # (Playwright + an `npx playwright test` verify_cmd). The host's visual
+    # gate consumes `result["evidence"]`; absence (or ran=False) means skip.
+    evidence = _run_visual_verify(workspace_dir, kind, task_id)
+    result_payload["evidence"] = evidence
+    _emit_event(
+        {
+            "id": "visual-verify",
+            "type": "VisualEvidence",
+            "source": "devclaw",
+            "ts": time.time(),
+            "payload": {
+                "ran": evidence.get("ran", False),
+                "manifest_count": len(evidence.get("manifest", [])),
+                "errors": evidence.get("errors", []),
+                "reason": evidence.get("reason", ""),
+            },
+        }
+    )
 
     # Verify gate: the agent loop finished, but "done" means the project's own
     # test/build command passes — run it now and attach the verdict. The host

@@ -95,6 +95,18 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 | `DEVCLAW_REVIEW_MODEL` | `sonnet` | Model tier for the review-gate `claude` pass. |
 | `DEVCLAW_REVIEW_MAX_DIFF_CHARS` | `60000` | Truncation cap on the diff fed to the reviewer. |
 
+## Pre-PR visual-evidence gate
+
+Closes the green-tests-broken-UI hole: a multimodal `claude` pass judges screenshots captured by the per-repo `.agent/visual-verify.sh` script against a universal rubric + the repo's `.agent/visual-rubric.md`. **Opt-in twice over** — this env flag AND a per-repo script must both be present. No magical app-startup fallback.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `DEVCLAW_VISUAL_GATE` | `0` | Master switch for the visual gate. Off by default — a real dev-server boot is project-specific and an unreliable default would flap. |
+| `DEVCLAW_VISUAL_JUDGE_MODEL` | `sonnet` | Model tier for the visual judge. Sonnet is the floor (Haiku's vision is weak; Opus is overkill for screenshot triage). |
+| `DEVCLAW_VISUAL_TIMEOUT_S` | `180` | Wall-clock for `.agent/visual-verify.sh` (boot the app + drive Playwright + dump manifest). Gate fails open on timeout. |
+| `DEVCLAW_VISUAL_MAX_SCREENSHOTS` | `8` | Cap on screenshots embedded in one judge call. Larger manifests are head-trimmed and annotated; prompt-cost guard. |
+| `DEVCLAW_VISUAL_MAX_DIFF_CHARS` | `30000` | Truncation cap on the diff context passed to the visual judge. |
+
 ## Model tiering (cognition cost lever)
 
 Cognition is tiered per role so autonomous runs don't burn Pro/Max quota on Opus where a lighter model does the job. **No API key = the constraint is your session quota, not a bill.** Host roles take a `claude --model` value (alias like `sonnet`/`opus` OR a full id). The exec engine takes a full model id. Empty → account default.
@@ -109,6 +121,7 @@ Cognition is tiered per role so autonomous runs don't burn Pro/Max quota on Opus
 | `DEVCLAW_GOAL_EVAL_MODEL` | `sonnet` | Direction evaluator — bump to `opus` per hard direction call. |
 | `DEVCLAW_GOAL_SUMMARY_MODEL` | `haiku` | Plain-prose per-delivery summary. |
 | `DEVCLAW_REVIEW_MODEL` | `sonnet` | (Repeated in [Pre-PR review gate](#pre-pr-review-gate).) |
+| `DEVCLAW_VISUAL_JUDGE_MODEL` | `sonnet` | (Repeated in [Pre-PR visual-evidence gate](#pre-pr-visual-evidence-gate).) |
 
 ## Deploy hosting
 

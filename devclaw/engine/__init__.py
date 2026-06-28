@@ -55,7 +55,11 @@ class EngineRequest:
 #: ``status == "error"`` carries ``error`` (+ optional ``trace``). When a
 #: ``verify_cmd`` ran, ``result["verify"]`` carries the gate verdict
 #: ``{ran, cmd, passed, exit_code, timed_out, output}`` — the orchestration
-#: (not the engine) decides done-vs-failed from ``passed``.
+#: (not the engine) decides done-vs-failed from ``passed``. When the per-repo
+#: ``.agent/visual-verify.sh`` ran, ``result["evidence"]`` carries
+#: ``{ran, manifest: [{label,url,screenshot,console_errors}], errors}`` —
+#: orchestration's visual gate consumes this; absence (or ``ran=False``) means
+#: the visual gate skips for this task.
 EngineResult = dict
 
 

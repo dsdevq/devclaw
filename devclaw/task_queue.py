@@ -46,6 +46,10 @@ from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .quality import format_feedback, review_diff
+from .quality.visual_judge import (
+    format_visual_feedback,
+    judge_screenshots,
+)
 from .engine.sandcastle import run_sandcastle
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
@@ -79,6 +83,16 @@ REVIEW_GATE_ENABLED = os.environ.get("DEVCLAW_REVIEW_GATE", "1") not in ("0", "f
 #: review applies only to code-producing kinds (a diff to read); review_repository
 #: is read-only and onboard writes only a comprehension doc.
 _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
+#: the pre-PR visual-evidence gate: after the verify gate + test-integrity pass,
+#: BEFORE the diff-review gate, judge screenshots captured by the per-repo
+#: .agent/visual-verify.sh against a multimodal judge. OFF by default — a real
+#: dev-server boot is project-specific and unreliable defaults would flap. Opt
+#: in twice over: this env flag AND a per-repo .agent/visual-verify.sh that
+#: actually emits a manifest.
+VISUAL_GATE_ENABLED = os.environ.get("DEVCLAW_VISUAL_GATE", "0") not in ("0", "false", "False", "")
+#: which file extensions in the diff count as "this change touches UI". A change
+#: that touches none of these skips the visual gate (cheap-skip — no LLM call).
+_UI_FILE_SUFFIXES = (".tsx", ".jsx", ".ts", ".css", ".scss", ".html", ".vue", ".svelte")
 
 #: _run_and_settle returns this when a task was paused for a quota limit (not
 #: settled): the task is back to 'pending' and the global pause holds dispatch.
@@ -127,6 +141,33 @@ async def _git_diff(host_dir: str) -> str:
     return await asyncio.to_thread(_git_diff_sync, host_dir)
 
 
+def _diff_touches_ui(diff: str) -> bool:
+    """True iff the diff adds/modifies any file with a UI-bearing extension.
+    Heuristic on `+++ b/<path>` markers — same parser shape as test-integrity,
+    same posture (best-effort, fail open). A diff that touches nothing visible
+    skips the visual gate without a Claude call."""
+    if not diff:
+        return False
+    for line in diff.splitlines():
+        if not line.startswith("+++ b/"):
+            continue
+        path = line[6:].strip()
+        if path.endswith(_UI_FILE_SUFFIXES):
+            return True
+    return False
+
+
+def _load_per_repo_rubric(workspace_dir: str) -> str:
+    """Best-effort read of ``<workspace>/.agent/visual-rubric.md``. Missing /
+    unreadable → empty string (the universal rubric still applies)."""
+    path = os.path.join(workspace_dir, ".agent", "visual-rubric.md")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
 def _integrity_failure(diff: str) -> Optional[str]:
     """Return a failure summary if the change weakened the tests (deleted/skipped),
     else None. Enforces what the prompt only asks for. Operates on an already-
@@ -172,6 +213,7 @@ class TaskQueue:
         runner: Optional[RunnerFn] = None,
         on_settle: Optional[Callable[[], None]] = None,
         reviewer: Optional[Callable[..., Awaitable[dict]]] = None,
+        visual_judge: Optional[Callable[..., Awaitable[dict]]] = None,
     ) -> None:
         self._store = store
         # Injectable for tests — default to the real planner / sandcastle runner.
@@ -184,6 +226,11 @@ class TaskQueue:
         # The pre-PR review gate's cognition (diff → verdict). Injectable so tests
         # stub the Claude call; defaults to the real review_diff (host-side claude).
         self._reviewer: Callable[..., Awaitable[dict]] = reviewer or review_diff
+        # The pre-PR visual judge's cognition (screenshots → verdict). Injectable
+        # so tests stub the multimodal claude call; defaults to judge_screenshots.
+        # Bound at construct time so test fixtures swap it the same way reviewer
+        # is swapped (see test_review_gate.py).
+        self._visual_judge: Callable[..., Awaitable[dict]] = visual_judge or judge_screenshots
         # Optional in-process hook fired whenever a task/program reaches a
         # terminal state — the goal layer wires its heartbeat-wake here so a
         # finished engine run triggers an immediate goal tick (replacing the old
@@ -716,14 +763,27 @@ class TaskQueue:
                         # the deployed container. Use workspace_dir directly.
                         diff = await _git_diff(workspace_dir)
                         integrity = _integrity_failure(diff)
-                        review_fb = (
+                        # Visual gate runs BEFORE the diff-review gate so a visibly
+                        # broken UI is caught first (cheaper feedback than re-reading
+                        # the diff). The evidence payload comes from the runner.
+                        visual_fb = (
                             None if integrity is not None
+                            else await self._visual_failure(
+                                kind, goal, diff, result.get("evidence") or {}, workspace_dir,
+                            )
+                        )
+                        review_fb = (
+                            None if integrity is not None or visual_fb is not None
                             else await self._review_failure(kind, goal, diff)
                         )
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
                             # a gate failure so it retries with the tampering fed back.
                             last_failure = integrity
+                        elif visual_fb is not None:
+                            # gate + tests fine, but the rendered UI is broken — feed
+                            # the visual issues back through the SAME retry loop.
+                            last_failure = visual_fb
                         elif review_fb is not None:
                             # gate + tests fine, but review found a real defect — feed
                             # the issues back through the SAME retry loop as a gate fail.
@@ -757,6 +817,52 @@ class TaskQueue:
         # every attempt failed — escalate.
         suffix = f" (failed after {attempts} attempts)" if attempts > 1 else ""
         self._store.mark_failed(task_id, f"{last_failure}{suffix}")
+        return None
+
+    async def _visual_failure(
+        self,
+        kind: TaskKind,
+        goal: str,
+        diff: str,
+        evidence: dict,
+        workspace_dir: str,
+    ) -> Optional[str]:
+        """Run the pre-PR visual-evidence gate on the screenshots the runner
+        captured. Returns the request-changes feedback (→ fed back into the
+        retry loop like a gate fail), or None to let the task ship.
+
+        Fails OPEN on every infrastructure error: gate disabled, kind not
+        reviewable, diff doesn't touch UI, the runner skipped (no script /
+        empty manifest), the judge raises. The retry loop is reserved for
+        *judged* UI breakage — never for a flaky dev-server boot or a missing
+        per-repo wiring. Skip vs. judge is binary; the host doesn't second-
+        guess what the script captured."""
+        if not VISUAL_GATE_ENABLED or kind not in _REVIEWABLE_KINDS:
+            return None
+        if not evidence.get("ran"):
+            return None
+        manifest = evidence.get("manifest") or []
+        if not manifest:
+            return None
+        if not _diff_touches_ui(diff):
+            return None
+        rubric = _load_per_repo_rubric(workspace_dir)
+        evidence_dir = os.path.join(workspace_dir, ".devclaw-evidence")
+        try:
+            verdict = await self._visual_judge(
+                goal=goal, kind=kind, diff=diff,
+                manifest=manifest, evidence_dir=evidence_dir,
+                rubric_per_repo=rubric,
+            )
+        except Exception as err:  # noqa: BLE001 — never block a verified task on a judge crash
+            sys.stderr.write(f"task-queue: visual gate errored (failing open): {err}\n")
+            return None
+        if verdict.get("verdict") == "request_changes":
+            sys.stderr.write(
+                f"task-queue: visual gate requested changes "
+                f"({len(verdict.get('blocking', []))} blocking issue(s))\n"
+            )
+            return format_visual_feedback(verdict)
         return None
 
     async def _review_failure(self, kind: TaskKind, goal: str, diff: str) -> Optional[str]:
