@@ -139,7 +139,39 @@ blockers:
   - <one line — what's missing + where it would live>
 stub_acceptable: [<tool/capability slug, ...>]   # owner-authorized only
 descoped: [<thing the owner ruled out, ...>]
+verify_cmd: <single shell line, or omit/null if no change from goal.yaml>
 ```
+
+### When to set `verify_cmd`
+
+Look at the goal's existing `verify_cmd` (shown in `## Goal` below) AND your
+success_criteria. If your criteria require the gate to run something the
+existing command does NOT cover, output the **full replacement command** as
+`verify_cmd`. The cascade applies it via `load_effective_goal` so the done-gate
+and the agent both see the corrected gate — no Makefile/pytest-wrapper hacks
+needed.
+
+Concrete triggers (set verify_cmd when ANY apply):
+
+- A success criterion names a test layer the existing gate does not run
+  (e.g. cf-N = "verify gate runs npx playwright test" while existing
+  verify_cmd is pytest-only) → append `&& npx playwright test --reporter=list`
+  (using the correct working directory).
+- A convention requires a build step the existing gate skips (e.g. "frontend
+  must be built before serving") → prepend the build, e.g.
+  `npm --prefix frontend run build && <existing command>`.
+- The existing `verify_cmd` references a tool/file/path that no longer exists
+  in the firmed contract.
+
+If the existing `verify_cmd` already covers your criteria, OMIT the field
+(or set to `null`). Do NOT churn the command for cosmetic reasons; only
+change it when the contract genuinely requires a different gate.
+
+Format rules: a single shell line (use `&&` to chain), exact paths/working
+dirs as they exist in the workspace, no environment variables the agent
+might not have. The host runs it through `bash -c`.
+
+---
 
 The schema is a contract — extra top-level keys are dropped, missing
 required fields make parsing fail and we have to re-run you. Start
@@ -151,6 +183,7 @@ your output at `status:` with no fences and no prose preamble.
 
 objective: {objective}
 done_when: {done_when}
+verify_cmd: {verify_cmd}
 round: {round}
 
 ## Spec (waiter's scope-grill output)

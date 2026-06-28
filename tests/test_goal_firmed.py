@@ -86,6 +86,61 @@ def test_status_firmed_with_lingering_unknowns_is_forced_back():
     assert firmed.status == "needs_owner_answers"
 
 
+def test_verify_cmd_round_trip_when_set():
+    """When firming derives a new verify_cmd (e.g. cf-11 = gate must run
+    playwright), the field round-trips cleanly so load_effective_goal can
+    overlay it. Closes the cf-11 churn root cause."""
+    raw = (
+        "status: firmed\n"
+        "round: 2\n"
+        "intent: build it\n"
+        "success_criteria:\n"
+        "  - id: c1\n"
+        "    text: pytest + playwright both run\n"
+        "    verifiable_by: gate exit 0\n"
+        "verify_cmd: pytest -q && npx playwright test --reporter=list\n"
+    )
+    firmed = parse_firmed(raw)
+    assert firmed.verify_cmd == "pytest -q && npx playwright test --reporter=list"
+    rendered = dump_firmed(firmed)
+    parsed_again = parse_firmed(rendered)
+    assert parsed_again.verify_cmd == firmed.verify_cmd
+
+
+def test_verify_cmd_defaults_to_none_when_omitted():
+    """When firming does not specify a verify_cmd (the existing one already
+    covers the criteria), the field is None and load_effective_goal preserves
+    the base goal's verify_cmd."""
+    raw = (
+        "status: firmed\n"
+        "round: 1\n"
+        "intent: build it\n"
+        "success_criteria:\n"
+        "  - id: c1\n"
+        "    text: a thing\n"
+        "    verifiable_by: tests pass\n"
+    )
+    firmed = parse_firmed(raw)
+    assert firmed.verify_cmd is None
+
+
+def test_verify_cmd_empty_string_normalized_to_none():
+    """Defensive: a model that emits `verify_cmd: ''` or whitespace should be
+    treated the same as omitting the field — no spurious overlay."""
+    raw = (
+        "status: firmed\n"
+        "round: 1\n"
+        "intent: build it\n"
+        "success_criteria:\n"
+        "  - id: c1\n"
+        "    text: thing\n"
+        "    verifiable_by: tests\n"
+        "verify_cmd: '   '\n"
+    )
+    firmed = parse_firmed(raw)
+    assert firmed.verify_cmd is None
+
+
 def test_tolerates_preamble_and_fence():
     """Models occasionally wrap output or precede with prose; both are stripped."""
     wrapped = "Sure, here's the firmed draft:\n\n```yaml\n" + GOOD_YAML + "\n```"

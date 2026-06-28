@@ -134,6 +134,52 @@ def test_load_effective_goal_overlays_firmed_done_when_and_stub_acceptable(tmp_p
     assert store.load_goal("g").stub_acceptable == []
 
 
+def test_load_effective_goal_overlays_firmed_verify_cmd(tmp_path):
+    """A firmed draft that sets verify_cmd (e.g. firming derived the gate must
+    run pytest AND playwright) overlays it onto the base goal — the done-gate
+    and the agent both see the corrected gate. Closes the cf-11 churn root
+    cause: without this, the agent had to invent Makefile/pytest-wrapper hacks
+    to smuggle Playwright through a pytest-only verify_cmd."""
+    from devclaw.goal.firmed import FirmedGoal, SuccessCriterion
+
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="x", workspace_dir="/ws", done_when="o",
+        verify_cmd="pytest -q",
+    )
+    firmed = FirmedGoal(
+        status="firmed", round=2, intent="x",
+        success_criteria=[SuccessCriterion(id="c1", text="gate runs both layers")],
+        verify_cmd="pytest -q && npx playwright test --reporter=list",
+    )
+    store.write_firmed_draft("g", firmed)
+    eff = store.load_effective_goal("g")
+    assert eff.verify_cmd == "pytest -q && npx playwright test --reporter=list"
+    # base goal.yaml is unchanged on disk — load_goal still returns original
+    assert store.load_goal("g").verify_cmd == "pytest -q"
+
+
+def test_load_effective_goal_falls_back_to_base_verify_cmd_when_firmed_omits(tmp_path):
+    """When firming did not specify a verify_cmd (the existing one already
+    covers the criteria), the base goal's verify_cmd is preserved — empty/None
+    in firmed means 'firming did not change the gate', not 'rescind it'."""
+    from devclaw.goal.firmed import FirmedGoal, SuccessCriterion
+
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="x", workspace_dir="/ws", done_when="o",
+        verify_cmd="pytest -q",
+    )
+    firmed = FirmedGoal(
+        status="firmed", round=2, intent="x",
+        success_criteria=[SuccessCriterion(id="c1", text="something")],
+        verify_cmd=None,
+    )
+    store.write_firmed_draft("g", firmed)
+    eff = store.load_effective_goal("g")
+    assert eff.verify_cmd == "pytest -q"
+
+
 def test_load_effective_goal_empty_firmed_stub_acceptable_falls_back_to_base(tmp_path):
     """When firmed stub_acceptable is empty but the base goal had explicit
     entries (set by the owner at creation), preserve the base list — empty

@@ -67,6 +67,7 @@ def _build_prompt(
         "firming",
         objective=goal.objective,
         done_when=goal.done_when or "(not specified)",
+        verify_cmd=goal.verify_cmd or "(not specified)",
         round=round_,
         spec=spec or "(no spec — waiter scope-grill did not run)",
         discovery_brief=discovery_brief or "(no discovery brief yet)",

@@ -57,7 +57,18 @@ class Unknown:
 class FirmedGoal:
     """The full firming output. ``status == firmed`` means decomposer may
     read it; ``needs_owner_answers`` means the goal is parked at
-    ``phase=blocked`` waiting on answers."""
+    ``phase=blocked`` waiting on answers.
+
+    ``verify_cmd``: when firming derives a stricter or different gate from
+    the success criteria (e.g. cf-11 = "gate runs pytest AND playwright"),
+    the model outputs the full replacement command here. ``None`` means the
+    original ``goal.yaml`` verify_cmd is correct as-is. ``load_effective_goal``
+    overlays this so the done-gate, the planner, and the executor all see
+    the firmed gate — the cascade can never silently disagree with itself.
+    Closes the cf-11 churn root cause: PRs invented Makefile/pytest-wrapper
+    hacks to smuggle Playwright through a stale verify_cmd because firming
+    couldn't update the goal's gate.
+    """
 
     status: FirmedStatus
     round: int
@@ -68,6 +79,7 @@ class FirmedGoal:
     blockers: list[str] = field(default_factory=list)
     stub_acceptable: list[str] = field(default_factory=list)
     descoped: list[str] = field(default_factory=list)
+    verify_cmd: str | None = None
 
 
 class FirmedParseError(Exception):
@@ -179,6 +191,9 @@ def parse_firmed(text: str) -> FirmedGoal:
     # model claims.
     status: FirmedStatus = "firmed" if (status_raw == "firmed" and not unknowns) else "needs_owner_answers"
 
+    verify_cmd_raw = data.get("verify_cmd")
+    verify_cmd = str(verify_cmd_raw).strip() if verify_cmd_raw is not None and str(verify_cmd_raw).strip() else None
+
     return FirmedGoal(
         status=status,
         round=round_,
@@ -189,6 +204,7 @@ def parse_firmed(text: str) -> FirmedGoal:
         blockers=_str_list(data.get("blockers")),
         stub_acceptable=_str_list(data.get("stub_acceptable")),
         descoped=_str_list(data.get("descoped")),
+        verify_cmd=verify_cmd,
     )
 
 
@@ -225,5 +241,6 @@ def dump_firmed(firmed: FirmedGoal) -> str:
         "blockers": list(firmed.blockers),
         "stub_acceptable": list(firmed.stub_acceptable),
         "descoped": list(firmed.descoped),
+        "verify_cmd": firmed.verify_cmd,
     }
     return yaml.safe_dump(data, sort_keys=False)
