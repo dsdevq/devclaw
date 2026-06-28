@@ -66,6 +66,12 @@ RUN npm install -g \
 COPY --chown=agent:agent openhands-runner/sandbox-mcp.json /opt/devclaw/sandbox-mcp.json
 
 COPY --chown=agent:agent openhands-runner/runner.py /opt/devclaw/runner.py
+# Skill bundle + hooks baked into the image. Skills are markdown files
+# runner.py concatenates per-task-kind and prepends to the goal; hooks are
+# best-effort bash scripts runner.py invokes around the agent loop.
+COPY --chown=agent:agent openhands-runner/skills/ /opt/devclaw/skills/
+COPY --chown=agent:agent openhands-runner/hooks/  /opt/devclaw/hooks/
+RUN chmod +x /opt/devclaw/hooks/*.sh
 
 USER agent
 
