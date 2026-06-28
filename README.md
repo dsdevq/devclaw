@@ -51,6 +51,17 @@ The worker harness reads two complementary layers of doctrine each task:
 
 Same pattern as `AGENTS.md`: universal devclaw doctrine + per-repo project facts. The universal layer stays consistent across every cascade; the per-repo layer evolves at the project's own pace.
 
+#### Model-agnostic invariants
+
+The skill/hook system is deliberately neutral about which agent runs inside the sandbox. Today it's `claude-code` + `claude-agent-acp`; tomorrow it could be `codex`, `gemini-cli`, an open-source agent, anything that can read files and call tools. To keep this true, the following are invariants — do NOT add code that violates them:
+
+- **Skills are plain markdown.** No frontmatter with model-specific fields. No `Skill(name=…)` tool invocations in the prompt — that's Claude's native skill system, not ours. Any LLM that can read a markdown file at the start of its conversation can consume our skills.
+- **Hooks are bash, not settings.json entries.** Hooks live as `.sh` files in `/opt/devclaw/hooks/` or `<repo>/.agent/hooks/`. `runner.py` invokes them directly. Do not move them into a `settings.json` (Claude-Code-specific) or any other harness-native config.
+- **Use MCP, not vendor-specific tool wiring.** MCP is the one cross-tool standard (Cline, Cursor, Zed, Claude Code all support it). Tools we want every agent to have go through MCP, not through Claude-Code plugins or commands.
+- **Per-repo discovery is `ls .agent/skills/` + `cat`, not an agent-specific catalog API.** Any agent with file-read can find them.
+
+The day we swap claude-code for another harness, the entire skill/hook system survives — only the `ACPAgent` call in `runner.py` changes.
+
 ## The split
 
 | Concern | Owner |
