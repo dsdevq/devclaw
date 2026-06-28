@@ -20,6 +20,7 @@ CLAUDE_CONFIG_DIR env vars. No ANTHROPIC_API_KEY required or accepted.
 
 import atexit
 import contextlib
+import glob as _glob
 import io
 import json
 import os
@@ -33,14 +34,94 @@ import traceback
 # the task forever (the agent's own wall-clock guard is separate — improvement #3).
 _VERIFY_TIMEOUT_S = int(os.environ.get("DEVCLAW_VERIFY_TIMEOUT_S", "900"))
 
+# Skill bundle baked into the sandbox image at /opt/devclaw/skills/. Layout:
+#   _common.md          → always prepended
+#   _writes-code/*.md   → for kinds that write code (implement_feature, fix_bug)
+#   <kind>/*.md         → kind-specific (review_repository, onboard, …)
+# Files inside a tier are sorted lexicographically so a leading number controls
+# order. Repo-specific guidance still lives in the target repo's AGENTS.md — the
+# skills carry devclaw's cross-repo doctrine; AGENTS.md carries this repo's facts.
+_SKILLS_DIR = os.environ.get("DEVCLAW_SKILLS_DIR", "/opt/devclaw/skills")
+_HOOKS_DIR = os.environ.get("DEVCLAW_HOOKS_DIR", "/opt/devclaw/hooks")
+_WRITES_CODE_KINDS = {"implement_feature", "fix_bug"}
+_HOOK_TIMEOUT_S = int(os.environ.get("DEVCLAW_HOOK_TIMEOUT_S", "30"))
 
-# Operating instructions prepended to the user's goal before it's sent to the ACP
-# agent (Claude Code). Cheap behavioral scaffolding: the agent is capable, but a
-# RAW goal made it start blind on an existing repo — it didn't read the project's
-# own conventions and didn't verify its own work. This briefs it on the repo and
-# tells it to self-verify. (Shaped by OpenHands' prompting guidance: concrete,
-# location-aware, scoped, run the tests.) devclaw's own verify gate still
-# double-checks the result — this is the engineer self-checking, not the gate.
+
+def _read_skill(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _load_skills(kind: str) -> str:
+    """Concatenate the skill bundle for a given task kind.
+
+    Order: _common.md → _writes-code/*.md (only for code-writing kinds) → <kind>/*.md.
+    Empty paths and missing files are tolerated so a partial skill dir can't
+    crash the runner — at worst the agent just gets less briefing.
+    """
+    paths: list[str] = []
+    common = os.path.join(_SKILLS_DIR, "_common.md")
+    if os.path.exists(common):
+        paths.append(common)
+    if kind in _WRITES_CODE_KINDS:
+        paths.extend(sorted(_glob.glob(os.path.join(_SKILLS_DIR, "_writes-code", "*.md"))))
+    paths.extend(sorted(_glob.glob(os.path.join(_SKILLS_DIR, kind, "*.md"))))
+    blocks = [b for b in (_read_skill(p) for p in paths) if b]
+    return "\n\n---\n\n".join(blocks)
+
+
+def _run_one_hook(path: str, args: tuple[str, ...]) -> tuple[bool, str]:
+    """Run a single hook script (best-effort). Returns (ran, captured_output)."""
+    if not os.path.exists(path):
+        return False, ""
+    try:
+        proc = subprocess.run(
+            ["bash", path, *args],
+            capture_output=True,
+            text=True,
+            timeout=_HOOK_TIMEOUT_S,
+        )
+        return True, ((proc.stdout or "") + (proc.stderr or "")).strip()
+    except subprocess.TimeoutExpired:
+        return True, f"hook timed out after {_HOOK_TIMEOUT_S}s"
+    except OSError as exc:
+        return True, f"hook failed to start: {exc}"
+
+
+def _run_hook(name: str, *args: str) -> list[str]:
+    """Run the universal devclaw hook then the per-repo hook (if either exists).
+
+    Universal hooks live in /opt/devclaw/hooks/ (baked into the sandbox image,
+    devclaw-owned). Per-repo hooks live in <workspace>/.agent/hooks/ (project-
+    owned, evolves at the repo's pace). Both contribute to the warnings list
+    with a tagged prefix so the goal layer can tell them apart.
+
+    Returns a list of warning lines (possibly empty). Hook failures are NOT
+    fatal — they're advisory; the verify gate is the source of truth.
+    """
+    warnings: list[str] = []
+    # Universal: devclaw-owned doctrine baked into the image.
+    universal_path = os.path.join(_HOOKS_DIR, f"{name}.sh")
+    ran, out = _run_one_hook(universal_path, args)
+    if ran and out:
+        warnings.append(f"[{name}] {out}")
+    # Per-repo: project-owned, lives in the workspace alongside AGENTS.md.
+    # args[0] is workspace_dir by convention; if no args we can't locate it.
+    if args:
+        repo_path = os.path.join(args[0], ".agent", "hooks", f"{name}.sh")
+        ran, out = _run_one_hook(repo_path, args)
+        if ran and out:
+            warnings.append(f"[{name}:repo] {out}")
+    return warnings
+
+
+# (Legacy embedded preambles — kept only as the in-process fallback when the
+# baked skill dir is missing. The sandbox image's /opt/devclaw/skills/ is the
+# canonical source; these strings exist so devclaw still runs in degraded mode
+# without it.)
 _CONTEXT_PREAMBLE = (
     "You are working in the repository in your current working directory. Before "
     "changing anything, get your bearings: read the project's own guide if present "
@@ -169,6 +250,15 @@ _KIND_WRAPPERS = {
 
 
 def _wrap_goal(kind: str, goal: str) -> str:
+    """Skills prepended, then the goal under a clear marker.
+
+    Falls back to the legacy embedded _KIND_WRAPPERS only when the baked skill
+    dir is missing (host-side dev, fresh image without skills/ baked in). Once
+    the sandbox image ships skills, that fallback is dead path.
+    """
+    skills = _load_skills(kind)
+    if skills:
+        return f"{skills}\n\n---\n\n## Goal\n\n{goal}"
     template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
     return template.format(goal=goal)
 
@@ -290,7 +380,8 @@ def main() -> None:
     # Wrap the user's goal with kind-specific operating instructions. The
     # OpenHands ACP-driven Claude session reads this as the user message,
     # so prepending instructions here is the cheapest way to bias behavior
-    # without a custom system prompt.
+    # without a custom system prompt. Skills now live in /opt/devclaw/skills/
+    # and are loaded per-kind by _wrap_goal.
     wrapped_goal = _wrap_goal(kind, goal)
 
     os.makedirs(workspace_dir, exist_ok=True)
@@ -329,6 +420,17 @@ def main() -> None:
                 pass
 
         atexit.register(_cleanup_mcp)
+
+    # Hook warnings accumulated across pre/post hooks. Surfaced in the result
+    # payload so the goal layer's evaluator can read them (e.g. "you added
+    # e2e tests but verify_cmd does not run them"). Hooks are best-effort —
+    # their warnings are advisory, the verify gate is the source of truth.
+    # Pre-run hook fires AFTER the MCP config drop so it sees the final
+    # workspace state. _run_hook fires both the universal hook AND any per-repo
+    # hook in <workspace>/.agent/hooks/, returning a list of tagged warnings.
+    task_id = str(req.get("task_id") or "")
+    hook_warnings: list[str] = []
+    hook_warnings.extend(_run_hook("pre-run", workspace_dir, kind, task_id))
 
     # Default to a PATH lookup — inside the sandbox the Dockerfile sets
     # CLAUDE_CODE_EXECUTABLE=/usr/bin/claude, so this fallback only matters for
@@ -407,15 +509,24 @@ def main() -> None:
             conversation.run()
             agent.close()
     except Exception as exc:
-        _emit_result(
-            {
-                "status": "error",
-                "error": str(exc),
-                "trace": traceback.format_exc(),
-                "agent_output": captured_stdout.getvalue(),
-            }
-        )
+        err_payload = {
+            "status": "error",
+            "error": str(exc),
+            "trace": traceback.format_exc(),
+            "agent_output": captured_stdout.getvalue(),
+        }
+        if hook_warnings:
+            err_payload["hook_warnings"] = hook_warnings
+        _emit_result(err_payload)
         sys.exit(1)
+
+    # Post-run hook: mechanical checks against what the agent shipped (e.g.
+    # "you added browser tests but verify_cmd is still pytest-only"). Runs
+    # BEFORE the verify gate so the hook can pass verify_cmd to its diff-aware
+    # checks and so its warnings ride alongside the gate verdict in the result.
+    hook_warnings.extend(
+        _run_hook("post-run", workspace_dir, kind, task_id, verify_cmd or "")
+    )
 
     result_payload = {
         "status": "ok",
@@ -423,6 +534,8 @@ def main() -> None:
         "message": "OpenHands completed.",
         "agent_output": captured_stdout.getvalue(),
     }
+    if hook_warnings:
+        result_payload["hook_warnings"] = hook_warnings
 
     # Verify gate: the agent loop finished, but "done" means the project's own
     # test/build command passes — run it now and attach the verdict. The host

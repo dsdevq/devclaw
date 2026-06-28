@@ -26,6 +26,44 @@ DevClaw (the chef — this repo, FastMCP)
   OpenHands (Python SDK) — agent loop, runs `claude` via ACP (Pro OAuth)
 ```
 
+### Layered view — where the agent harness actually lives
+
+> The canonical layer reference, with per-layer contracts and invariants, is **[`docs/architecture-layers.md`](./docs/architecture-layers.md)**. This README section is the high-level summary. Architectural changes are judged against the doc.
+
+Five distinct layers below the user, and only one of them is an agent harness in the technical sense (a turn-loop hosting tool calls).
+
+| Layer | What it is | Harness? |
+|---|---|---|
+| **MCP surface** (`devclaw.server`) | HTTP/stdio protocol exposing tools (`create_goal`, `get_goal`, `answer_unknowns`, …) | No — protocol |
+| **GoalService + heartbeat** (`devclaw.goal`) | State machine + scheduler; owns lifecycle (`investigating → firming → executing`); ticks every ~15 min; reads on-disk state and decides the next move per goal | No — orchestrator |
+| **Cognition callers** (firming, decomposer, planner, evaluator, summarizer) | One-shot `claude --print` invocations with baked prompts + goal state; return YAML the loop parses | Borderline — Claude as a reasoning API, not an interactive agent |
+| **TaskQueue + sandcastle engine** (`devclaw.engine`) | Receives "do task X" → `docker run devclaw-sandbox(-dotnet):local <payload>`; streams stdout events back | No — container launcher |
+| **Worker harness** (`runner.py` → `claude-agent-acp` → `claude-code` CLI + MCP servers, e.g. Playwright MCP) | The actual agent turn-loop. Tool calls (Read/Edit/Bash/browser), edits the repo, commits, exits | **Yes — the only true harness in the stack** |
+
+DevClaw is mostly **plumbing + prompts** around that one worker harness. The reasoning is Claude's, borrowed via (a) one-shot cognition calls the loop makes for planning/firming/evaluation, and (b) the worker harness running interactively inside the sandbox. The state machine, persistence, lifecycle, and gates are the real engineering — they let one goal span days, many PRs, many evaluator passes without the owner at the desk.
+
+### Skills + hooks — two layers, one mechanism
+
+The worker harness reads two complementary layers of doctrine each task:
+
+| Layer | Lives in | Owned by | Purpose |
+|---|---|---|---|
+| **Universal** | `/opt/devclaw/skills/` + `/opt/devclaw/hooks/` (baked into the sandbox image from `openhands-runner/skills/` and `openhands-runner/hooks/` in this repo) | DevClaw | Cross-repo doctrine — quality bar, verify-gate coverage, commit hygiene, e2e patterns. The runner prepends per-task-kind skill bundles to the goal; universal hooks run mechanical pre/post checks. |
+| **Per-repo** | `<repo>/.agent/skills/` + `<repo>/.agent/hooks/` (alongside `AGENTS.md`) | The project | Project-specific notes — auth flow, migration commands, deploy steps. Agent-discovered (the universal `_common` skill tells it to `ls .agent/skills/`); per-repo hooks fire after universal ones with a `[name:repo]` tag. |
+
+Same pattern as `AGENTS.md`: universal devclaw doctrine + per-repo project facts. The universal layer stays consistent across every cascade; the per-repo layer evolves at the project's own pace.
+
+#### Model-agnostic invariants
+
+The skill/hook system is deliberately neutral about which agent runs inside the sandbox. Today it's `claude-code` + `claude-agent-acp`; tomorrow it could be `codex`, `gemini-cli`, an open-source agent, anything that can read files and call tools. To keep this true, the following are invariants — do NOT add code that violates them:
+
+- **Skills are plain markdown.** No frontmatter with model-specific fields. No `Skill(name=…)` tool invocations in the prompt — that's Claude's native skill system, not ours. Any LLM that can read a markdown file at the start of its conversation can consume our skills.
+- **Hooks are bash, not settings.json entries.** Hooks live as `.sh` files in `/opt/devclaw/hooks/` or `<repo>/.agent/hooks/`. `runner.py` invokes them directly. Do not move them into a `settings.json` (Claude-Code-specific) or any other harness-native config.
+- **Use MCP, not vendor-specific tool wiring.** MCP is the one cross-tool standard (Cline, Cursor, Zed, Claude Code all support it). Tools we want every agent to have go through MCP, not through Claude-Code plugins or commands.
+- **Per-repo discovery is `ls .agent/skills/` + `cat`, not an agent-specific catalog API.** Any agent with file-read can find them.
+
+The day we swap claude-code for another harness, the entire skill/hook system survives — only the `ACPAgent` call in `runner.py` changes.
+
 ## The split
 
 | Concern | Owner |
@@ -125,12 +163,18 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 | `answer_goal(goal_id, answer)` | Reply to a goal waiting on the owner (Telegram answer channel for scope questions) |
 | `cancel_goal(goal_id)` | Permanently stop a goal — terminal `cancelled`, tears down any in-flight action |
 
-**How a goal is driven (per heartbeat):**
+**Lifecycle:** every goal moves through `investigating → firming → executing`. Investigation produces a repo discovery brief; firming sharpens the goal into a typed contract (success criteria + unknowns + conventions + blockers + stub policy); executing runs the cascade.
+
+**Firming** (opt-in via `DEVCLAW_GOAL_FIRMING=1`) sits between investigation and execution. It reads the discovery brief plus the raw goal, surfaces the questions a human PM would ask (named, with reasoned defaults), and writes `firmed-draft.yaml` with `status: needs_owner_answers`. The owner answers via `answer_unknowns(goal_id, {…})` (typically through the OpenClaw chat). Firming re-runs against the answers and either advances to `executing` or surfaces a new round. The result is a typed contract the decomposer + evaluator + done-gate all judge against — not the loose original prose.
+
+**Stub policy** (`Goal.stub_acceptable: list[str]`) — the done-gate refuses any clause that ships as a stub *unless* the owner has explicitly listed that clause in `stub_acceptable`. Mechanical, not vibe-based: an unauthorised stub flips its clause to unsatisfied at gate time. Firming captures owner stub authorisations from the answers.
+
+**How a goal is driven (per heartbeat past firming):**
 1. **Cheap check** (0 tokens) — poll the in-flight action via a local SQLite read.
 2. **Per-delivery evidence** (0 tokens) — on a finished action, read the *full* task result (agent output + gate verdict) and append a grounded note to `deliveries.md`.
 3. **Next-action plan** (1 LLM call, only past the gate) — pick the single next action from the backlog/steering and dispatch it in-process.
 4. **Direction evaluation** (periodic LLM call) — every `DEVCLAW_GOAL_EVAL_EVERY` deliveries, judge whether the *delivered work* is achieving the objective; corrections are fed back as steering, a hard verdict blocks.
-5. **Done-gate** — the planner's `done` is only a *proposal*; it triggers a read-only `review_repository` against `done_when`, and the goal closes **only if the evaluator confirms `achieved`** from that review. "Done" is gated on grounded evaluation, not on counting PRs.
+5. **Done-gate** — the planner's `done` is only a *proposal*; it triggers a read-only `review_repository` against the firmed `done_when` + `stub_acceptable`, and the goal closes **only if the evaluator confirms `achieved`** from that review. "Done" is gated on grounded evaluation, not on counting PRs.
 
 The zero-token idle guard is load-bearing: an idle goal and an in-flight-still-running goal cost **0 `claude` calls** (the heartbeat is mechanism; cognition runs only when there's real work).
 
@@ -240,7 +284,9 @@ DevClaw is the live runtime. As of mid-2026 it serves as the chef behind an Open
 
 - **Not a chatbot.** It's a backend service the OpenClaw waiter calls.
 - **Not a general assistant.** It executes software-development goals, nothing else.
-- **Not a rebuild of OpenHands.** OpenHands is the execution engine; DevClaw is the orchestration above it.
+- **Not a rebuild of OpenHands or Claude Code.** OpenHands is the wrapper, `claude-code` + `claude-agent-acp` is the agent harness inside the sandbox; DevClaw is the orchestration above it.
+- **Not novel reasoning.** The intelligence is Claude's, used twice: as a one-shot reasoning API for firming/decomposition/evaluation, and as the interactive worker harness inside the sandbox. DevClaw is the state machine + scheduler + persistence + prompts that make one goal span days.
+- **Not infallible.** Autonomous means "doesn't need the next prompt," not "can't ship broken work." Today's done-gate is Claude judging Claude's output; that's structurally circular and has shipped green-tests-but-broken-UI cascades. The in-progress E2E test layer exists to break that circle with mechanical browser evidence before the evaluator weighs in.
 
 ## License
 
