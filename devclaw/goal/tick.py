@@ -895,7 +895,14 @@ async def _dispatch_action(
     # re-pick them next tick before this one settles. No-op in legacy mode.
     _flag_items_in_flight(store, goal_id, list(action.addresses))
     store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}")
-    await _notify(notifier, NotifyLevel.TASK, f"🚀 [{goal_id}] {action.tool}: {action.goal}  ({ref.id})")
+    # Notify uses the short label, not the full prompt body — the raw `action.goal`
+    # is a multi-paragraph executor instruction (often 500-1500 chars) and dumping
+    # it to Telegram floods the owner with prompt boilerplate. Full text stays in
+    # log.md above for forensic readability.
+    await _notify(
+        notifier, NotifyLevel.TASK,
+        f"🚀 [{goal_id}] {action.tool}: {_action_label(action)}",
+    )
     return Outcome.DISPATCHED
 
 
