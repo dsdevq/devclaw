@@ -126,9 +126,25 @@ def build_prompt(
         parts.append(
             "\n## CONTEXT: this is the DONE-GATE.\n"
             "The next-action planner believes the goal is complete. Decide whether "
-            "done_when is TRULY satisfied. Return 'achieved' only if the evidence "
-            "and the repo review below actually show the objective met; otherwise "
-            "'off_track' with the corrections still needed."
+            "the goal is TRULY done — which means BOTH axes pass:\n"
+            "  (A) FUNCTIONAL — every clause in done_when is satisfied by specific "
+            "repo evidence in the review's ``## Per-clause evidence`` section.\n"
+            "  (B) STRUCTURAL — the review's ``## Structural health`` section "
+            "verdicts ``clean`` (or, at worst, ``concerns`` whose named items are "
+            "individually too minor to block the goal). A ``poor`` structural "
+            "verdict, OR ``concerns`` with substantive named items (god objects, "
+            "untested behaviour the new code added, coupled responsibilities "
+            "that should have been split, no-op stubs satisfying the literal "
+            "clause without doing the work), means the goal is NOT done.\n\n"
+            "Return ``achieved`` only when BOTH axes pass. If functional clauses "
+            "are unmet, return ``off_track`` with the missing-clause corrections. "
+            "If functional clauses ARE all met but structural health is poor or "
+            "has substantive concerns, return ``off_track`` with those concerns "
+            "as corrections (each one specific: file:line + the senior-eng move "
+            "the agent should make). The literal-clauses-pass-but-codebase-is-"
+            "worse failure mode (closeloop's App.tsx grew to 1827 LOC through 4 "
+            "PRs that each verdicted ``achieved`` on the functional axis) is "
+            "exactly what this second axis exists to catch."
         )
     parts += [
         "\n## What has actually shipped (grounded deliveries)",

@@ -78,11 +78,24 @@ def _done_gate_review_brief(goal: "Goal") -> str:
     symbol + test name) to count as satisfied. This closes the
     `finance-sentry-mcp-readonly` failure mode (2026-06-25), where the reviewer
     produced a vague prose report, the evaluator stamped it `achieved`, and the
-    delivered PR turned out to be 16 stub tools with zero real backend reads."""
+    delivered PR turned out to be 16 stub tools with zero real backend reads.
+
+    Two axes — both load-bearing for the verdict:
+      1. PER-CLAUSE EVIDENCE — does the code DO what the goal asked?
+      2. STRUCTURAL HEALTH   — is the code Denys would HAND TO A NEW HIRE? (added
+                               2026-06-29 after closeloop's App.tsx grew to 1827
+                               LOC through 4 PRs that each satisfied the clauses
+                               but left the codebase worse.)
+
+    A goal is only ACHIEVED when BOTH axes pass. A green Per-clause section with
+    a poor Structural section is OFF_TRACK — the agent must come back and clean
+    up before the goal closes."""
     return (
         "Read-only review of this repository to verify whether the goal is "
         "fully satisfied. You produce the GROUNDED evidence the direction "
-        "evaluator will judge against — be specific and honest, not generous.\n\n"
+        "evaluator will judge against — be specific and honest, not generous. "
+        "Two axes matter: did the code DO what was asked, AND is the codebase "
+        "in a shape a senior engineer would hand to a new hire.\n\n"
         f"Objective: {goal.objective}\n"
         f"Done when: {goal.done_when}\n\n"
         "PROCEDURE — follow in order, do NOT skip:\n\n"
@@ -113,7 +126,29 @@ def _done_gate_review_brief(goal: "Goal") -> str:
         "not the requirement).\n"
         "   - A merged PR or a passing gate alone — those prove 'behaviour "
         "doesn't break', not 'the requirement is met'.\n\n"
-        "4. Output format — your final report MUST have this structure:\n\n"
+        "4. STRUCTURAL HEALTH — grade the codebase as a senior engineer would. "
+        "This is not a checklist of rules; it is professional judgement. "
+        "Read the files this goal touched and the folders they live in, and "
+        "answer honestly: would you sign off on a PR that left the codebase "
+        "in this shape? Look for:\n"
+        "   - God objects / files that have absorbed too many responsibilities "
+        "(if everything lives in one file because the existing pattern is to "
+        "pile everything into one file, the pattern is the smell — not an "
+        "excuse).\n"
+        "   - Coupled concerns that should be split (types mixed with "
+        "implementation; UI mixed with networking; tests piling into a "
+        "catch-all spec file because there's nowhere else for them).\n"
+        "   - Dead code, no-op stubs, copy-paste, names that don't earn their "
+        "length.\n"
+        "   - Skipped tests where the comment doesn't match reality, or fixme "
+        "markers used to hide work that should have been done.\n"
+        "   - Untested behaviour the new code added — green gate is not the "
+        "same as covered.\n"
+        "   For each concern, name the file:line and what a senior engineer "
+        "would do about it. A 'partial' is fine — overall health is a "
+        "judgement call. If you would happily hand this codebase to a new "
+        "hire on Monday, say so plainly.\n\n"
+        "5. Output format — your final report MUST have this structure:\n\n"
         "   ## Per-clause evidence\n"
         "   1. <clause 1 text>\n"
         "      satisfied: yes | no | partial\n"
@@ -123,14 +158,22 @@ def _done_gate_review_brief(goal: "Goal") -> str:
         "      satisfied: ...\n"
         "      evidence: ...\n"
         "   ...\n\n"
+        "   ## Structural health\n"
+        "   verdict: clean | concerns | poor\n"
+        "   <one paragraph: would a senior engineer hand this codebase to a "
+        "new hire? if not, why not, and which file:lines would they fix first?>\n"
+        "   <bullet list of named concerns — file:line + the senior-eng move>\n\n"
         "   ## Summary\n"
-        "   <2-3 sentences: are all clauses satisfied? if not, which ones and "
-        "how serious?>\n\n"
+        "   <2-3 sentences covering BOTH axes: are all clauses satisfied, AND "
+        "is the structural health acceptable? if either is no, the goal is "
+        "NOT done — name what the agent must come back and fix>\n\n"
         "   ## Risks not in done_when\n"
         "   <anything worth raising that isn't part of done_when>\n\n"
         "Be honest. You are graded on producing a report that matches reality, "
-        "not on appearing thorough. Understating the gap means the goal will "
-        "close on incomplete work."
+        "not on appearing thorough. Understating either axis means the goal "
+        "will close on work that satisfies the literal clauses but leaves "
+        "the codebase worse than it was — which is the failure mode we are "
+        "explicitly trying to prevent."
     )
 
 

@@ -142,6 +142,28 @@ def test_done_gate_prompt_includes_spec_when_present():
 # ---- per-clause evidence contract (the 2026-06-25 trash-PR safety net) ----
 
 
+def test_done_gate_prompt_carries_structural_health_axis():
+    """The done-gate evaluator must consider TWO axes: functional clauses AND
+    structural health. Without the second axis, a goal can verdict ``achieved``
+    while leaving the codebase worse than before (closeloop App.tsx grew to
+    1827 LOC through 4 such PRs in late June 2026). The prompt now tells the
+    evaluator: both axes must pass before returning achieved."""
+    prompt = build_prompt(
+        _goal(), GoalStatus(), "log", "deliveries", at_done_gate=True,
+        review_report=(
+            "## Per-clause evidence\n1. health\n   satisfied: yes\n   evidence: app/main.py\n"
+            "## Structural health\nverdict: clean\nNo concerns.\n"
+        ),
+    )
+    text = prompt.lower()
+    assert "structural" in text
+    assert "## structural health" in prompt.lower() or "structural health" in text
+    assert "both axes" in text  # the load-bearing rule
+    # The exemplar that motivates the second axis must be named so the model
+    # remembers WHY it's grading structure, not just THAT it should.
+    assert "1827" in prompt or "monolith" in text or "closeloop" in text
+
+
 def test_goal_evaluator_prompt_carries_clause_decomposition_directive():
     """The prompt MUST tell the model to decompose done_when into atomic
     clauses and demand specific repo evidence per clause — this is the
