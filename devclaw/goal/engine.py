@@ -149,6 +149,20 @@ def _gate_passed(result_json: Optional[str]) -> Optional[bool]:
     return None
 
 
+#: How much of ``agent_output`` to keep when building task detail. For most
+#: kinds this is a work summary written to deliveries.md (which the planner
+#: reads next tick) — 6 KB is plenty. But ``review_repository`` agent_output
+#: IS the report the done-gate evaluator judges against; truncating it at 6 KB
+#: kept only the SDK's user-message panel echoing the brief (which contains
+#: literal ``<clause 1 text>`` placeholders in its format spec) plus a few
+#: early `status=pending` tool calls. The evaluator then judged the empty
+#: template, the per-clause extractor in ``evaluator._extract_review_report``
+#: never saw the filled section because it didn't exist in the truncated
+#: input. Keep the full transcript for reviews so the extractor can find the
+#: actual filled report at its end (typically 60–160 KB total).
+_TASK_DETAIL_SUMMARY_KEEP = {"review_repository": 200_000}
+
+
 def _task_detail(
     kind: str, result_json: Optional[str], error: Optional[str], pr_url: Optional[str]
 ) -> str:
@@ -167,7 +181,8 @@ def _task_detail(
         # synthesis, the direction evaluator, and deliveries.md of real signal.
         summary = data.get("agent_output") or data.get("message") or ""
         if isinstance(summary, str) and summary.strip():
-            lines.append("Agent summary:\n" + summary.strip()[:6000])
+            keep = _TASK_DETAIL_SUMMARY_KEEP.get(kind, 6000)
+            lines.append("Agent summary:\n" + summary.strip()[:keep])
         verify = data.get("verify")
         if isinstance(verify, dict) and verify.get("ran"):
             verdict = "PASSED" if verify.get("passed") else "FAILED"

@@ -103,3 +103,40 @@ def test_task_detail_prefers_agent_output_over_envelope():
     detail = _task_detail("review_repository", result, None, None)
     assert "bare scaffold" in detail
     assert "OpenHands completed." not in detail
+
+
+def test_task_detail_keeps_full_agent_output_for_review_repository():
+    """The done-gate evaluator judges the goal against the agent's report —
+    truncating ``agent_output`` at 6 KB kept only the SDK's user-message panel
+    echoing the brief (which contains ``<clause 1 text>`` placeholders in its
+    format spec) plus a handful of early `status=pending` tool calls; the
+    actual filled per-clause section lives at the END of a 60–160 KB
+    transcript. Reviews must preserve the full output."""
+    big_review = (
+        "Message from User panel\n"
+        "## Per-clause evidence\n"
+        "1. <clause 1 text>\n"
+        "   satisfied: yes | no | partial\n"
+    ) + ("ACP Tool Call decoration ls -la /workspace status=pending\n" * 600) + (
+        "## Per-clause evidence\n"
+        "1. Health endpoint exists\n"
+        "   satisfied: yes\n"
+        "   evidence: app/routes.py:42 health_handler covered by tests/test_health.py:8\n"
+        "## Summary\nAll satisfied.\n"
+    )
+    assert len(big_review) > 30_000  # confirm we're testing the truncation regime
+    result = json.dumps({"status": "ok", "agent_output": big_review})
+    detail = _task_detail("review_repository", result, None, None)
+    # the filled clause-evidence line — buried in the 30 KB+ transcript — must reach the evaluator
+    assert "app/routes.py:42 health_handler" in detail
+    assert "All satisfied." in detail
+
+
+def test_task_detail_still_truncates_other_kinds():
+    """For implement_feature / fix_bug, the ``agent_output`` is a work summary
+    that gets written to deliveries.md and fed to the planner. 6 KB is plenty
+    — bloating deliveries.md with full transcripts would hurt planner context."""
+    big_summary = "x" * 50_000
+    result = json.dumps({"status": "ok", "agent_output": big_summary})
+    detail = _task_detail("implement_feature", result, None, None)
+    assert len(detail) < 10_000  # bounded
