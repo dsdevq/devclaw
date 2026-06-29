@@ -1049,3 +1049,31 @@ async def test_ship_notification_is_concise_not_the_full_prompt(tmp_path, monkey
     assert ship, "expected a shipped+merged notification"
     assert "SECRET_DETAIL_LINE" not in ship[0]      # not the full prompt
     assert len(ship[0]) < 160                        # terse
+
+
+# ---- done-gate review brief — the two-axis structural fix -------------------
+
+
+def test_done_gate_review_brief_carries_both_axes(tmp_path):
+    """The brief must instruct the reviewer to grade TWO axes — functional
+    clauses AND structural health. Without the second axis, four PRs can each
+    satisfy the clauses while compounding bloat (closeloop App.tsx 1153 →
+    1827 LOC). The brief now demands a ``## Structural health`` section."""
+    from devclaw.goal.tick import _done_gate_review_brief
+    seed_goal(tmp_path, "g")
+    store = _store(tmp_path, Clock())
+    goal = store.load_goal("g")
+    brief = _done_gate_review_brief(goal)
+    # functional axis (pre-existing)
+    assert "## Per-clause evidence" in brief
+    # structural axis (new)
+    assert "## Structural health" in brief
+    assert "verdict: clean | concerns | poor" in brief
+    # the "what would a senior engineer do" framing — agency, not rules
+    assert "senior engineer" in brief.lower()
+    # the failure modes the structural section must catch
+    body = brief.lower()
+    for smell in ("god object", "untested behaviour", "no-op stub"):
+        assert smell in body, f"structural section should name {smell!r} as a thing to catch"
+    # the summary must speak to BOTH axes — not just clauses
+    assert "BOTH axes" in brief or "both axes" in brief or "covering BOTH" in brief
