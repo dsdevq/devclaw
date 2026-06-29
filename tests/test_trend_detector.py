@@ -370,6 +370,99 @@ async def test_signal_check_exception_is_isolated(tmp_path):
 # ---- entry parsing pins ---------------------------------------------------
 
 
+# ---- bookmark management (PR2) -------------------------------------------
+
+
+class _BookmarkAwareSignal(Signal):
+    """Stub for bookmark-management tests — fires when configured."""
+
+    id = "D1"  # match the priority entry so it isn't deprioritized
+    category = "drift"
+    scope = "per_project"
+    advances_bookmark = True
+
+    def __init__(self, will_fire: bool = True) -> None:
+        self._will_fire = will_fire
+        self.observed_bookmark: str | None = None
+
+    def check(self, ctx):
+        self.observed_bookmark = ctx.bookmark
+        return SignalResult(
+            fired=self._will_fire,
+            actual_value=99.0, threshold_value=10.0,
+            evidence={"finding": "ba-test"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_detector_seeds_bookmark_on_first_observation(tmp_path, monkeypatch):
+    """First time the detector sees a workspace, it seeds the trend bookmark
+    to current HEAD so bookmark-aware signals don't fire on full history."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr("devclaw.bookmark.git_head_sha", lambda wd: "f" * 40)
+    sig = _BookmarkAwareSignal(will_fire=False)  # no fire, just verify seed
+    caller = _CountingCaller()
+    detector, store, _, _ = _detector_for(
+        tmp_path=tmp_path, signals=[sig], caller=caller,
+    )
+
+    assert store.get_trend_bookmark(str(workspace)) is None
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    # Bookmark was seeded.
+    assert store.get_trend_bookmark(str(workspace)) == "f" * 40
+    # Signal observed the seeded bookmark in ctx.
+    assert sig.observed_bookmark == "f" * 40
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_detector_advances_bookmark_after_fire_by_bookmark_aware_signal(tmp_path, monkeypatch):
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    # First call returns the seed; later calls return a new HEAD (post-fire advance).
+    heads = iter(["a" * 40, "b" * 40])
+    monkeypatch.setattr("devclaw.bookmark.git_head_sha", lambda wd: next(heads))
+    sig = _BookmarkAwareSignal(will_fire=True)
+    caller = _CountingCaller()
+    detector, store, _, _ = _detector_for(
+        tmp_path=tmp_path, signals=[sig], caller=caller,
+    )
+
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    # Bookmark advanced from seed (a*40) to new HEAD (b*40) after fire.
+    assert store.get_trend_bookmark(str(workspace)) == "b" * 40
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_detector_does_not_advance_bookmark_for_non_bookmark_signal(tmp_path, monkeypatch):
+    """A fire by R2/D4/H4 (advances_bookmark=False) leaves the bookmark
+    untouched — D1/D2/D3's windows are protected from unrelated fires."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr("devclaw.bookmark.git_head_sha", lambda wd: "a" * 40)
+
+    # R2-style signal that fires but doesn't advance bookmarks.
+    class _PlainSig(Signal):
+        id = "R2"
+        category = "recurrence"
+        scope = "per_project"
+        advances_bookmark = False
+        def check(self, ctx):
+            return SignalResult(fired=True, actual_value=1, threshold_value=0)
+
+    caller = _CountingCaller()
+    detector, store, _, _ = _detector_for(
+        tmp_path=tmp_path, signals=[_PlainSig()], caller=caller,
+    )
+
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    # Bookmark was seeded but NOT advanced — still equals the seed value.
+    assert store.get_trend_bookmark(str(workspace)) == "a" * 40
+    store.close()
+
+
 @pytest.mark.asyncio
 async def test_entry_signal_category_and_date_are_pinned_not_trusted_from_model(tmp_path):
     """The LLM can lie about ``signal``, ``category``, AND ``date`` in its

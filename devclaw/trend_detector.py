@@ -171,13 +171,26 @@ class TrendDetector:
     async def run_per_goal(self, *, goal_id: str, workspace_dir: str) -> None:
         """Run all per-project signals scoped to one goal's workspace. Called
         inside ``goal/tick.py``'s per-goal loop. Inherits the active tracer."""
+        from .bookmark import git_head_sha
+
         scope_key = _scope_key_for_project(workspace_dir)
+        # Seed the trend bookmark on first observation of this workspace so
+        # bookmark-aware signals (D1/D2/D3) don't fire spuriously on full
+        # repo history. After this seed, bookmark-aware signals will see
+        # bookmark == HEAD and return no-fire until something changes.
+        bookmark = self._store.get_trend_bookmark(workspace_dir)
+        if bookmark is None:
+            seeded = git_head_sha(workspace_dir)
+            if seeded is not None:
+                self._store.set_trend_bookmark(workspace_dir, seeded)
+                bookmark = seeded
         ctx = SignalContext(
             scope="per_project",
             workspace_dir=workspace_dir,
             goal_id=goal_id,
             goals_dir=self._goals_dir,
             now_ms=self._now_ms(),
+            bookmark=bookmark,
         )
         await self._run_signals(
             scope_key=scope_key,
@@ -294,6 +307,17 @@ class TrendDetector:
             _trace.record_note(f"trend_detector: write failed for {signal.id}: {exc}")
 
         self._set_cooldown(scope_key, signal)
+
+        # Bookmark-aware signals reset the workspace's observation window
+        # after firing — next heartbeat compares against the new HEAD instead
+        # of stacking up further. Non-bookmark signals (R2, D4, H4) leave the
+        # bookmark alone so they don't disturb D1/D2/D3's windows.
+        if getattr(signal, "advances_bookmark", False) and ctx.workspace_dir:
+            from .bookmark import git_head_sha
+
+            head = git_head_sha(ctx.workspace_dir)
+            if head is not None:
+                self._store.set_trend_bookmark(ctx.workspace_dir, head)
 
         try:
             self._notify({
