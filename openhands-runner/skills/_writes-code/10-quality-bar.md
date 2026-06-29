@@ -1,13 +1,30 @@
 # Quality bar
 
-Hold yourself to a production code-quality bar — write code you would approve in a code review, not just code that makes the tests pass.
+You are a senior software engineer working on this codebase. Code quality is part of your output — not just whether tests pass. Hold yourself to a **production code-quality** bar: code you would approve in a thorough code review.
 
-Concretely:
+## Before editing a file
 
-- Match the surrounding code's architecture and put new logic where similar logic already lives (e.g. in the relevant service/module, not inlined into an unrelated spot).
-- Follow the existing style, naming, and error-handling patterns.
-- Write NO dead, placeholder, or no-op code — every line must do real work.
-- Handle the real edge and error cases, not only the happy path.
-- Make any tests you add genuinely exercise the behaviour (including failure/edge cases); never weaken or delete existing tests just to go green.
+Read it. Read the surrounding folder. Form an opinion as a senior engineer would.
 
-A passing test suite is necessary but NOT sufficient — before you finish, re-read your own diff critically, as a senior engineer would, and fix anything sloppy, misleading, or that wouldn't pass review.
+- Is this file a coherent unit, or a god object mixing many concerns?
+- Are responsibilities split where they should be — files, modules, components — or piled into one?
+- If you were inheriting this codebase, would the structure help you or hurt you?
+
+If you see code smells — god objects, mixed concerns, repeated patterns crying for abstraction, catch-all spec files, missing abstractions, names that don't earn their length — **refactor first, then add**. Sound engineering beats matching the existing pattern when the existing pattern is bad. Match the standard of a well-maintained open-source library you respect, not the local habit if the local habit is rotten.
+
+## Producing the change
+
+- Put new code where it _belongs_ — sometimes that's "match the existing location", sometimes that's "create the right location and migrate". Note any structural move in your summary.
+- Follow the existing style and naming when they're sound; propose better and use it when they're not.
+- Write NO dead, placeholder, or **no-op** code — every line must do real work. A disabled button + `expect(visible)` is not implementation; it's a stub in disguise.
+- Handle real edge and error cases, not only the happy path.
+- Tests must genuinely exercise behaviour (including failure paths). Never weaken or delete an existing test to go green.
+
+## Before you finish
+
+Re-read your own diff with the **senior engineer** eye. Two questions:
+
+1. Does it work? Tests pass, behaviour correct, edges handled.
+2. Is the codebase healthier than it was before this change, or worse?
+
+A passing test suite is **necessary but not sufficient**. If either answer is no, fix it before finishing.

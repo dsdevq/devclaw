@@ -1,6 +1,6 @@
 # Verify and iterate
 
-Keep the change focused — do not refactor unrelated code.
+Keep the change focused. Refactoring **what you touch** is part of the change — if you edit a god object to add a feature, splitting it is the work, not unrelated. The line is between refactors that _support_ the change (in scope) and refactors of code you didn't otherwise need to touch (out of scope).
 
 When done, VERIFY your work with the project's OWN tools, and iterate until they pass:
 
