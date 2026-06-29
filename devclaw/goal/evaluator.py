@@ -49,6 +49,42 @@ class GoalEvalError(Exception):
         self.raw = raw
 
 
+#: Headroom for the review report inside the evaluator prompt. The worker's
+#: ``agent_output`` is the SDK's full captured-stdout transcript — banners,
+#: prompt echo, per-tool-call panels (each shown twice: status=pending then
+#: status=completed) — and is regularly 60–160 KB. The actual per-clause
+#: report the brief asks for lives at the END. Truncating from the head
+#: literally kept the EMPTY template lines from the brief plus the first few
+#: `status=pending` tool-call panels — and the evaluator concluded "review
+#: was cut off mid-exploration." Keep enough tail to fit the report comfortably.
+_REVIEW_REPORT_KEEP = 20000
+
+
+def _extract_review_report(raw: str) -> str:
+    """Pull the agent's actual per-clause report out of the worker's captured
+    stdout. The brief mandates a ``## Per-clause evidence`` section followed by
+    ``## Summary`` and ``## Risks not in done_when`` — the LAST occurrence of
+    that header is the filled-in report (an earlier occurrence, if present, is
+    the prompt's own format template echoed back in the SDK's user-message
+    panel). When the header isn't present (truly cut-off run), fall back to the
+    tail — the tail still preserves any partial work, while the head was
+    always just banner + tool-call decoration.
+
+    Centralized here, not in the runner, because (a) all historical task rows
+    on disk hold the un-cleaned ``agent_output`` and the done-gate must still
+    read them correctly, and (b) the parsing is purely defensive — even a
+    future cleaner runner can only emit a best-effort extraction; the
+    evaluator should still cope with both shapes."""
+    if not raw:
+        return ""
+    header = "## Per-clause evidence"
+    idx = raw.rfind(header)
+    if idx == -1:
+        return raw[-_REVIEW_REPORT_KEEP:]
+    section = raw[idx:]
+    return section[:_REVIEW_REPORT_KEEP]
+
+
 def build_prompt(
     goal: Goal,
     status: GoalStatus,
@@ -103,7 +139,7 @@ def build_prompt(
     if review_report:
         parts += [
             "\n## Fresh read-only review of the current repo vs done_when",
-            review_report[:6000],
+            _extract_review_report(review_report),
         ]
     parts.append("\nReturn the JSON now.")
     return "\n".join(parts)
