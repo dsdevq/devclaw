@@ -607,6 +607,33 @@ async def steer_goal(goal_id: str, message: str) -> str:
 
 
 @mcp.tool
+async def evaluate_goal(goal_id: str) -> str:
+    """Force an on-demand direction evaluation NOW, grounded in the goal's
+    artifacts. Reads recent deliveries + log + spec, runs the evaluator, and
+    returns the fresh verdict (``on_track`` / ``off_track`` / ``achieved`` /
+    ``stalled`` / ``needs_human``) with the evaluator's rationale. Any
+    corrections are appended to the goal's ``inbox.md`` as steering (the
+    next-action planner picks them up) AND the heartbeat is poked.
+
+    Distinct from the per-tick evaluator (which runs on cadence inside the
+    heartbeat) — this is the surface the owner OR the operations agent calls
+    to wake a stuck goal, get a fresh direction read, or ground a
+    "should I close this?" decision in evidence on demand.
+
+    Returns::
+
+        {"goal_id": "...", "verdict": "...", "rationale": "...",
+         "corrections": [...], "question": "..."}
+    """
+    if not goal_id:
+        raise ToolError("evaluate_goal requires goal_id")
+    try:
+        return json.dumps(await goals.evaluate_goal(goal_id), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
 async def answer_unknowns(goal_id: str, answers: dict[str, str]) -> str:
     """Answer the open ``unknowns`` from a goal's firmed-draft so DevClaw can
     finish firming and start work. Synchronous: fires firming round N+1 inside
