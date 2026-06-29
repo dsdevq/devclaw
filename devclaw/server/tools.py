@@ -109,6 +109,20 @@ async def review_repository(
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
+@mcp.tool
+async def review_trends(scope: str = "harness_self", limit_chars: int = 5000) -> str:
+    """Read recent trend observations produced by devclaw's cross-session trend
+    detector. Returns the tail of the matching ``trends.md`` as JSON
+    ``{scope, path, trends}``.
+
+    Pass ``scope='harness_self'`` (default) for devclaw's own self-observability
+    file (in Denys's vault by default). Pass a workspace path for that project's
+    per-repo trends (``<workspace>/.devclaw/trends.md``). The detector observes
+    and surfaces patterns (recurring fixes, AGENTS.md drift, steering frequency,
+    etc.); humans decide which to promote into AGENTS.md."""
+    return json.dumps(goals.read_trends(scope=scope, limit_chars=limit_chars), indent=2)
+
+
 # ===== setup_cicd (pure mechanism — no cognition) ============================
 
 

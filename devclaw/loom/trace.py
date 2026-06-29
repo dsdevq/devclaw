@@ -147,6 +147,27 @@ class NoteEvent:
         return asdict(self)
 
 
+@dataclass
+class TrendCheckEvent:
+    """One trend-detector pre-filter pass — fired or not. Emitted every
+    heartbeat per (signal, scope) so the first calibration question
+    ("why didn't R2 fire last Tuesday?") has an answer in the traces table
+    instead of requiring a manual ``git log`` re-run."""
+
+    kind: str = "trend_check"
+    ts: str = field(default_factory=_now_iso)
+    signal: str = ""           # e.g. "R2"
+    scope: str = ""            # "per_project" | "harness_self"
+    fired: bool = False
+    actual: Optional[float] = None
+    threshold: Optional[float] = None
+    #: "fired" | "below_threshold" | "cooldown" | "disabled" | "error:<ExcClass>"
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
 class Tracer:
     """Append-only event recorder. Thread-safe-by-not-being-concurrent: a single
     run drives one tracer through a single asyncio loop. Tracers do NOT mutate
@@ -252,6 +273,18 @@ class Tracer:
                 lines.append(f"- `[{ts}]` **notify** ({e.get('level', '')}) — _{_preview(e.get('text', ''))}_")
             elif kind == "note":
                 lines.append(f"- `[{ts}]` **·** _{e.get('text', '')}_")
+            elif kind == "trend_check":
+                fired = e.get("fired", False)
+                sig = e.get("signal", "")
+                scope = e.get("scope", "")
+                reason = e.get("reason", "")
+                actual = e.get("actual")
+                threshold = e.get("threshold")
+                if fired:
+                    head = f"- `[{ts}]` **trend_check** `{sig}` ({scope}) **FIRED** — actual={actual} threshold={threshold}"
+                else:
+                    head = f"- `[{ts}]` **trend_check** `{sig}` ({scope}) — {reason}"
+                lines.append(head)
         return "\n".join(lines) + "\n"
 
     def dump_timeline(self, path: Path) -> Path:
@@ -376,6 +409,26 @@ def record_note(text: str) -> None:
     if t is None:
         return
     t.append(NoteEvent(text=text))
+
+
+def record_trend_check(
+    *,
+    signal: str,
+    scope: str,
+    fired: bool,
+    actual: Optional[float] = None,
+    threshold: Optional[float] = None,
+    reason: str = "",
+) -> None:
+    """Record one trend-detector pre-filter pass. No-op when no tracer is
+    attached (matches the rest of the recorder API)."""
+    t = _current.get()
+    if t is None:
+        return
+    t.append(TrendCheckEvent(
+        signal=signal, scope=scope, fired=fired,
+        actual=actual, threshold=threshold, reason=reason,
+    ))
 
 
 # ---- persistent tracer (production telemetry) ------------------------------

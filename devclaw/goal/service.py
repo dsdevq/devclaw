@@ -36,6 +36,7 @@ from ..loom import trace as _trace
 from ..state_store import StateStore
 from ..task_queue import TaskQueue
 from ..engine.workspace import prepare_workspace
+from .. import trend_detector as _trend_detector_mod
 
 
 # Telemetry: opt-out via env. Default ON in production so heartbeats leave a
@@ -107,6 +108,10 @@ class GoalService:
         #: the goal heartbeat task + its in-process wake event
         self._loop_task: Optional[asyncio.Task] = None
         self._wake: Optional[asyncio.Event] = None
+        #: trend detector — lazily constructed on first heartbeat that needs it
+        #: so tests (which set DEVCLAW_TREND_ENABLED=0 or stub differently) and
+        #: cold-starts don't import claude bindings prematurely.
+        self._trend_detector_inst: "Optional[_trend_detector_mod.TrendDetector]" = None
 
     # ---- cognition callers (bound on first real use) -----------------------
 
@@ -135,6 +140,81 @@ class GoalService:
         if not goal_merge.AUTOMERGE_ENABLED:
             return None
         return goal_merge.default_merger()
+
+    def _trend_detector(self) -> "Optional[_trend_detector_mod.TrendDetector]":
+        """The cross-session trend detector. ``None`` when disabled via
+        ``DEVCLAW_TREND_ENABLED=0``. Constructed lazily so tests / cold starts
+        don't import the claude bindings until something actually needs them.
+
+        The detector is wired with narrow handles — it can write only to
+        ``trends.md``, the sqlite ``meta`` table (cooldown timestamps), the
+        ``traces`` table (observability), and the notifier. It has no handle
+        to ``GoalStore`` writes, ``TaskQueue.submit``, or any other surface
+        that would let it modify goals or AGENTS.md. The boundary is
+        structural — see ``devclaw/trend_detector.py`` for the rule."""
+        if not _trend_detector_mod.TREND_ENABLED:
+            return None
+        if self._trend_detector_inst is None:
+            from ..planner import claude_with_model
+
+            claude_caller = claude_with_model(
+                _trend_detector_mod.TREND_MODEL, role="trend-detector",
+            )
+
+            # Fire-and-forget notify shim: TrendDetector calls notifier_send
+            # synchronously, but Notifier.send is async. asyncio.create_task
+            # detaches the send so the detector doesn't have to await; payload
+            # is rendered into a single owner-readable line.
+            notifier_inst = self._notifier
+
+            def _notify_send(payload: dict) -> None:
+                action = payload.get("proposed_action") or "(none)"
+                text = (
+                    f"📈 trend: {payload['signal']} ({payload['scope']}) — "
+                    f"{payload['observation']}\n"
+                    f"proposed action: {action}\n"
+                    f"see: {payload['path']}"
+                )
+                try:
+                    asyncio.create_task(notifier_inst.send(text))
+                except RuntimeError:
+                    # No running loop (e.g. called from sync context in tests).
+                    # Drop silently — trends.md still has the entry.
+                    pass
+
+            self._trend_detector_inst = _trend_detector_mod.TrendDetector(
+                state_store=self._store,
+                goals_dir=self._cfg.goals_dir,
+                claude_caller=claude_caller,
+                notifier_send=_notify_send,
+            )
+        return self._trend_detector_inst
+
+    def read_trends(self, scope: str = "harness_self", limit_chars: int = 5000) -> dict:
+        """Read recent trend observations from ``trends.md`` for a given scope.
+
+        ``scope='harness_self'`` → the global harness-self file (defaults into
+        Denys's vault per ``DEVCLAW_TREND_HARNESS_SELF_FILE``).
+
+        Anything else is treated as a workspace path → reads
+        ``<scope>/.devclaw/trends.md``."""
+        from ..trend_detector import HARNESS_SELF_TRENDS_PATH
+
+        if scope == "harness_self":
+            path = HARNESS_SELF_TRENDS_PATH
+        else:
+            path = Path(scope) / ".devclaw" / "trends.md"
+        text: str
+        if not path.exists():
+            text = "(no trends recorded for this scope yet)"
+        else:
+            try:
+                raw = path.read_text()
+            except OSError as exc:
+                text = f"(could not read {path}: {exc})"
+            else:
+                text = raw[-limit_chars:] if len(raw) > limit_chars else raw
+        return {"scope": scope, "path": str(path), "trends": text}
 
     # ---- the heartbeat -----------------------------------------------------
 
@@ -208,6 +288,7 @@ class GoalService:
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
             summary_caller=self._summary(), merger=self._merger(),
             tracer_factory=self._make_tracer,
+            trend_detector=self._trend_detector(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
@@ -219,6 +300,7 @@ class GoalService:
                 notifier=self._notifier, notify_url="",
                 eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
                 summary_caller=self._summary(), merger=self._merger(),
+                trend_detector=self._trend_detector(),
             )
         return outcome.value
 
