@@ -15,12 +15,19 @@ import pytest
 
 from devclaw import trend_signals
 from devclaw.trend_signals import (
+    D1DiffVolume,
+    D2FilesNotInAgentsMd,
+    D3NewArchitecturalSurface,
     D4AgentsMdStaleness,
     H4SteeringFrequency,
     R2RepeatedFixHotspot,
     SignalContext,
+    _count_added_dep_lines,
+    _new_top_level_dirs,
     _parse_git_log_name_only,
     _parse_inbox_denys_lines,
+    _parse_shortstat,
+    _path_or_parent_in_text,
     all_signals,
 )
 
@@ -321,13 +328,231 @@ def test_h4_fires_when_current_window_has_more_actively_steered_goals(tmp_path):
     assert result.evidence["goals_with_3plus_denys_steerings_prior"] == 0
 
 
+# ---- D1: diff volume ------------------------------------------------------
+
+
+def _ctx_with_bookmark(workspace: Path, bookmark: str | None) -> SignalContext:
+    return SignalContext(
+        scope="per_project", workspace_dir=str(workspace), goal_id="g",
+        goals_dir=Path("/tmp/no-such"), now_ms=int(time.time() * 1000),
+        bookmark=bookmark,
+    )
+
+
+def test_d1_no_fire_when_bookmark_missing(tmp_path):
+    # Detector hasn't seeded the bookmark yet (or seeding failed).
+    assert D1DiffVolume().check(_ctx_with_bookmark(tmp_path, None)).fired is False
+
+
+def test_d1_no_fire_when_diff_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(trend_signals, "_run_git", lambda args, cwd: "")
+    assert D1DiffVolume().check(_ctx_with_bookmark(tmp_path, "a" * 40)).fired is False
+
+
+def test_d1_no_fire_when_below_threshold(monkeypatch, tmp_path):
+    # 5 files, 100 lines — under both thresholds (10 files / 500 lines).
+    monkeypatch.setattr(
+        trend_signals, "_run_git",
+        lambda args, cwd: " 5 files changed, 60 insertions(+), 40 deletions(-)\n",
+    )
+    result = D1DiffVolume().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is False
+
+
+def test_d1_fires_on_files_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        trend_signals, "_run_git",
+        lambda args, cwd: " 12 files changed, 80 insertions(+), 20 deletions(-)\n",
+    )
+    result = D1DiffVolume().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is True
+    assert result.evidence["files_changed"] == 12
+    assert result.evidence["lines_changed"] == 100
+
+
+def test_d1_fires_on_lines_threshold(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        trend_signals, "_run_git",
+        lambda args, cwd: " 3 files changed, 600 insertions(+), 0 deletions(-)\n",
+    )
+    result = D1DiffVolume().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is True
+    assert result.evidence["lines_changed"] == 600
+
+
+def test_d1_advances_bookmark_attribute_set():
+    assert D1DiffVolume.advances_bookmark is True
+
+
+def test_parse_shortstat_handles_insertions_only():
+    f, i, d = _parse_shortstat(" 1 file changed, 3 insertions(+)\n")
+    assert (f, i, d) == (1, 3, 0)
+
+
+def test_parse_shortstat_handles_deletions_only():
+    f, i, d = _parse_shortstat(" 2 files changed, 7 deletions(-)\n")
+    assert (f, i, d) == (2, 0, 7)
+
+
+def test_parse_shortstat_empty_returns_zeros():
+    assert _parse_shortstat("") == (0, 0, 0)
+
+
+# ---- D2: files-not-in-AGENTS.md ------------------------------------------
+
+
+def test_d2_no_fire_when_agents_md_missing(monkeypatch, tmp_path):
+    # No AGENTS.md in workspace → D2 stays out (D4 handles that).
+    monkeypatch.setattr(trend_signals, "_run_git", lambda args, cwd: "abc")
+    assert D2FilesNotInAgentsMd().check(_ctx_with_bookmark(tmp_path, "a" * 40)).fired is False
+
+
+def test_d2_no_fire_when_bookmark_missing(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# AGENTS.md\nsrc/foo handles auth\n")
+    assert D2FilesNotInAgentsMd().check(_ctx_with_bookmark(tmp_path, None)).fired is False
+
+
+def test_d2_no_fire_when_files_referenced(monkeypatch, tmp_path):
+    (tmp_path / "AGENTS.md").write_text(
+        "# AGENTS\n- src/foo handles auth\n- src/bar handles api\n- src/baz handles ui\n"
+    )
+    # 3 files each touched twice, all 3 referenced in AGENTS.md.
+    fake_log = (
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "src/foo/x.py\nsrc/bar/y.py\nsrc/baz/z.py\n\n"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "src/foo/x.py\nsrc/bar/y.py\nsrc/baz/z.py\n"
+    )
+    monkeypatch.setattr(trend_signals, "_run_git", lambda args, cwd: fake_log)
+    result = D2FilesNotInAgentsMd().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is False
+
+
+def test_d2_fires_when_three_files_unreferenced(monkeypatch, tmp_path):
+    (tmp_path / "AGENTS.md").write_text("# AGENTS.md\nThis project does stuff.\n")
+    # 3 files each touched twice — none mentioned in AGENTS.md.
+    fake_log = (
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "ops/agent.py\ncore/lib.py\nweb/router.py\n\n"
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "ops/agent.py\ncore/lib.py\nweb/router.py\n"
+    )
+    monkeypatch.setattr(trend_signals, "_run_git", lambda args, cwd: fake_log)
+    result = D2FilesNotInAgentsMd().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is True
+    assert result.evidence["unreferenced_files_count"] == 3
+    files = {f["file"] for f in result.evidence["top_files"]}
+    assert files == {"ops/agent.py", "core/lib.py", "web/router.py"}
+
+
+def test_d2_skips_files_touched_only_once(monkeypatch, tmp_path):
+    """A single-commit touch isn't enough — D2 wants repeated activity."""
+    (tmp_path / "AGENTS.md").write_text("# AGENTS.md\n")
+    fake_log = (
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "ops/a.py\ncore/b.py\nweb/c.py\n"
+    )
+    monkeypatch.setattr(trend_signals, "_run_git", lambda args, cwd: fake_log)
+    result = D2FilesNotInAgentsMd().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is False
+
+
+def test_d2_advances_bookmark_attribute_set():
+    assert D2FilesNotInAgentsMd.advances_bookmark is True
+
+
+def test_path_or_parent_in_text_matches_substrings():
+    txt = "AGENTS.md\n- src/foo handles auth"
+    assert _path_or_parent_in_text("src/foo/bar.py", txt) is True
+    assert _path_or_parent_in_text("src/foo.py", txt) is True
+    assert _path_or_parent_in_text("lib/x.py", txt) is False
+
+
+# ---- D3: new dir / new dep ------------------------------------------------
+
+
+def test_d3_no_fire_when_nothing_added(monkeypatch, tmp_path):
+    monkeypatch.setattr(trend_signals, "_run_git", lambda args, cwd: "")
+    assert D3NewArchitecturalSurface().check(_ctx_with_bookmark(tmp_path, "a" * 40)).fired is False
+
+
+def test_d3_no_fire_when_bookmark_missing(tmp_path):
+    assert D3NewArchitecturalSurface().check(_ctx_with_bookmark(tmp_path, None)).fired is False
+
+
+def test_d3_fires_on_new_top_level_dir(monkeypatch, tmp_path):
+    def fake_git(args, cwd):
+        if "--diff-filter=A" in args:
+            return "ops/agent.py\nops/signals.py\n"
+        return ""  # no dep file diffs
+    monkeypatch.setattr(trend_signals, "_run_git", fake_git)
+    result = D3NewArchitecturalSurface().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is True
+    assert "ops" in result.evidence["new_directories"]
+
+
+def test_d3_fires_on_new_dep_in_requirements(monkeypatch, tmp_path):
+    (tmp_path / "requirements.txt").write_text("existing-dep==1.0\n")
+
+    def fake_git(args, cwd):
+        if "--diff-filter=A" in args:
+            return ""
+        if "requirements.txt" in args:
+            return (
+                "diff --git a/requirements.txt b/requirements.txt\n"
+                "+httpx>=0.27\n+pyyaml>=6\n"
+            )
+        return ""
+    monkeypatch.setattr(trend_signals, "_run_git", fake_git)
+    result = D3NewArchitecturalSurface().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is True
+    assert result.evidence["new_deps_per_file"]["requirements.txt"] == 2
+
+
+def test_d3_ignores_diff_noise(monkeypatch, tmp_path):
+    """The +++ header and pure-comment additions aren't counted as deps."""
+    (tmp_path / "requirements.txt").write_text("# header\n")
+
+    def fake_git(args, cwd):
+        if "--diff-filter=A" in args:
+            return ""
+        if "requirements.txt" in args:
+            return (
+                "+++ b/requirements.txt\n"
+                "+# a comment line\n"
+                "+   \n"
+            )
+        return ""
+    monkeypatch.setattr(trend_signals, "_run_git", fake_git)
+    result = D3NewArchitecturalSurface().check(_ctx_with_bookmark(tmp_path, "a" * 40))
+    assert result.fired is False
+
+
+def test_new_top_level_dirs_ignores_top_level_files():
+    nd = _new_top_level_dirs(["README.md", "ops/a.py", "Makefile", "src/b/c.py"])
+    assert nd == {"ops", "src"}
+
+
+def test_count_added_dep_lines_ignores_comments_and_blanks():
+    diff = (
+        "+++ b/requirements.txt\n"
+        "+httpx>=0.27\n"
+        "+# comment\n"
+        "+\n"
+        "+pyyaml>=6\n"
+    )
+    assert _count_added_dep_lines(diff) == 2
+
+
 # ---- registry --------------------------------------------------------------
 
 
-def test_all_signals_v1_set():
+def test_all_signals_set():
     sigs = all_signals()
     ids = {s.id for s in sigs}
-    assert ids == {"R2", "D4", "H4"}
-    # Per-project signals (R2, D4) vs harness-self (H4)
+    assert ids == {"R2", "D1", "D2", "D3", "D4", "H4"}
     by_scope = {s.scope for s in sigs}
     assert by_scope == {"per_project", "harness_self"}
+    # Bookmark-aware signals are exactly D1/D2/D3 in this PR.
+    bookmark_aware = {s.id for s in sigs if s.advances_bookmark}
+    assert bookmark_aware == {"D1", "D2", "D3"}

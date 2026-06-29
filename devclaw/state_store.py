@@ -845,6 +845,18 @@ class StateStore:
         cooldown was set / has been cleared."""
         return self.get_meta(f"trend_cooldown:{scope}:{signal_id}")
 
+    def set_trend_bookmark(self, workspace_dir: str, sha: str) -> None:
+        """Persist the trend detector's last-seen SHA for one workspace. This
+        is the DETECTOR'S OWN namespace — distinct from any future
+        engineer-brief bookmark, so D1/D2 advancing the detector's view of
+        "what changed" can't interfere with the engineer's catch-up read."""
+        self.set_meta(f"trend_bookmark:{workspace_dir}", sha)
+
+    def get_trend_bookmark(self, workspace_dir: str) -> Optional[str]:
+        """The trend detector's last-seen SHA for one workspace, or ``None``
+        if unset (first observation — bookmark-aware signals seed-and-skip)."""
+        return self.get_meta(f"trend_bookmark:{workspace_dir}")
+
     def append_note_to_pending_tasks(self, program_id: str, note: str) -> list[str]:
         """Append a steering note to every PENDING task of a program — work not
         yet started. Running/done tasks are left untouched (already handed to the
