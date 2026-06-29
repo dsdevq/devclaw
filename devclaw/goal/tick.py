@@ -412,11 +412,17 @@ async def tick_goal(
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     decomposer_caller: "ClaudeCaller | None" = None,
+    trend_detector: "object | None" = None,
 ) -> Outcome:
     """Run one heartbeat and record a single ``tick`` trace event with the
     incoming (lifecycle, phase) and outgoing outcome — the only place the trace
     sees a tick. All the cognition / dispatch / delivery / notify events fired
-    during the body land between this tick and the next."""
+    during the body land between this tick and the next.
+
+    ``trend_detector`` (typed as ``object`` to avoid an import cycle with
+    ``devclaw.trend_detector``): when set, runs per-project trend signals after
+    the tick body settles. Telemetry-shaped: a detector exception NEVER breaks
+    the tick — it is recorded as a note and swallowed."""
     status_before = store.load_status(goal_id)
     phase_before = _classify(status_before)
     lifecycle_before = status_before.lifecycle or "executing"
@@ -430,6 +436,17 @@ async def tick_goal(
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
     )
+    if trend_detector is not None:
+        try:
+            goal = store.load_goal(goal_id)
+            await trend_detector.run_per_goal(
+                goal_id=goal_id, workspace_dir=goal.workspace_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — telemetry must not break ticks
+            _trace.record_note(
+                f"trend_detector.run_per_goal failed for {goal_id}: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
     _trace.record_tick(
         goal_id=goal_id, lifecycle=lifecycle_before,
         phase=phase_before.value, outcome=outcome.value,
@@ -1230,6 +1247,7 @@ async def tick_all(
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
+    trend_detector: "object | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others, and a usage
     limit pauses the whole layer (0 tokens) rather than crashing per-goal.
@@ -1237,6 +1255,12 @@ async def tick_all(
     ``tracer_factory(goal_id) -> Tracer | None`` is the seam GoalService uses
     to attach a :class:`PersistentTracer` per goal-tick so the cascade's
     cognition / dispatch / delivery events land in the durable trace store.
+
+    ``trend_detector`` (typed as ``object`` to avoid the import cycle with
+    ``devclaw.trend_detector``): when set, runs per-project signals inside each
+    per-goal tracer scope, and runs harness-self signals once after the loop
+    inside a sentinel-keyed (``_harness_self_``) tracer scope. Telemetry-shaped
+    catches: a detector exception NEVER breaks the heartbeat.
     """
     outcomes: dict[str, Outcome] = {}
 
@@ -1259,6 +1283,7 @@ async def tick_all(
                     notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
                     eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
                     summary_caller=summary_caller, merger=merger,
+                    trend_detector=trend_detector,
                 )
         except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
             # the goal's OWN cognition (claude --print) hitting a limit pauses the
@@ -1270,6 +1295,20 @@ async def tick_all(
             else:
                 store.append_log(goal_id, f"tick error (isolated): {str(exc)[:160]}")
                 outcomes[goal_id] = Outcome.ERROR
+
+    # Harness-self trend pass — runs ONCE per heartbeat after the per-goal loop.
+    # Sentinel goal_id keeps the trace events in the same table for replay via
+    # get_trace; the detector observes devclaw itself, not any specific goal.
+    if trend_detector is not None:
+        harness_tracer = (
+            tracer_factory("_harness_self_") if tracer_factory else None
+        )
+        try:
+            with _trace.tracer_scope(harness_tracer):
+                await trend_detector.run_harness_self()
+        except Exception:  # noqa: BLE001 — telemetry must not break the heartbeat
+            pass
+
     return outcomes
 
 

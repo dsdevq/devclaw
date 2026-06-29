@@ -830,6 +830,21 @@ class StateStore:
         self.delete_meta("pause_until_ms")
         self.delete_meta("pause_reason")
 
+    # ---- trend-detector cooldowns (typed wrappers over set_meta/get_meta) -
+
+    def set_trend_cooldown(self, scope: str, signal_id: str, until_ms_str: str) -> None:
+        """Persist the cooldown for one (scope, signal) pair. ``until_ms_str``
+        is epoch milliseconds as a string — same shape as ``pause_until_ms``,
+        so the trend detector reuses the meta table instead of inventing a
+        per-repo JSON file that would recreate the write-concurrency cliff
+        WAL already solved."""
+        self.set_meta(f"trend_cooldown:{scope}:{signal_id}", until_ms_str)
+
+    def get_trend_cooldown(self, scope: str, signal_id: str) -> Optional[str]:
+        """The cooldown for one (scope, signal) pair, or ``None`` if no
+        cooldown was set / has been cleared."""
+        return self.get_meta(f"trend_cooldown:{scope}:{signal_id}")
+
     def append_note_to_pending_tasks(self, program_id: str, note: str) -> list[str]:
         """Append a steering note to every PENDING task of a program — work not
         yet started. Running/done tasks are left untouched (already handed to the
