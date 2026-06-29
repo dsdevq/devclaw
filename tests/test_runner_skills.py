@@ -83,6 +83,69 @@ def test_skill_blocks_are_separated_by_horizontal_rule(runner, skill_dir):
     assert "\n\n---\n\n" in bundle
 
 
+# ---- per-repo .agent/skills/ loading (D11) ----------------------------------
+
+
+def test_per_repo_skill_appended_when_workspace_provided(runner, skill_dir, tmp_path):
+    """A repo can carry observations the universal skills can't (e.g.
+    "App.tsx is a 1827-line monolith") in <workspace>/.agent/skills/. The
+    worker should see both the universal doctrine AND the per-repo notes."""
+    repo_skills = tmp_path / ".agent" / "skills"
+    repo_skills.mkdir(parents=True)
+    (repo_skills / "frontend-structure.md").write_text(
+        "# Frontend structure\n\nApp.tsx is a known 1827-line monolith.\n",
+        encoding="utf-8",
+    )
+    bundle = runner._load_skills("implement_feature", workspace_dir=str(tmp_path))
+    # universal skill present
+    assert "Quality bar" in bundle
+    # per-repo skill present too
+    assert "1827-line monolith" in bundle
+
+
+def test_per_repo_skill_loads_writes_code_tier(runner, skill_dir, tmp_path):
+    """Per-repo _writes-code/ skills should load for code-writing kinds, matching
+    the universal layout so a repo can add its own per-kind overrides."""
+    repo_writes = tmp_path / ".agent" / "skills" / "_writes-code"
+    repo_writes.mkdir(parents=True)
+    (repo_writes / "20-repo-rule.md").write_text(
+        "# Repo-specific rule\n\nNever import lodash.\n",
+        encoding="utf-8",
+    )
+    for kind in ("implement_feature", "fix_bug"):
+        bundle = runner._load_skills(kind, workspace_dir=str(tmp_path))
+        assert "Never import lodash" in bundle
+    # read-only kinds skip the writes-code tier per the existing rule
+    bundle = runner._load_skills("review_repository", workspace_dir=str(tmp_path))
+    assert "Never import lodash" not in bundle
+
+
+def test_per_repo_skill_universal_comes_first(runner, skill_dir, tmp_path):
+    """Universal devclaw doctrine appears BEFORE per-repo notes — the repo
+    leans on what the agent already knows, not the other way around."""
+    repo_skills = tmp_path / ".agent" / "skills"
+    repo_skills.mkdir(parents=True)
+    (repo_skills / "_common.md").write_text(
+        "# Per-repo common\n\nREPO-COMMON-MARKER\n", encoding="utf-8",
+    )
+    bundle = runner._load_skills("implement_feature", workspace_dir=str(tmp_path))
+    assert bundle.index("Common operating context") < bundle.index("REPO-COMMON-MARKER")
+
+
+def test_per_repo_skill_missing_dir_is_silent(runner, skill_dir, tmp_path):
+    """A workspace with no .agent/skills/ must not crash; loader returns
+    just the universal bundle."""
+    bundle = runner._load_skills("implement_feature", workspace_dir=str(tmp_path))
+    assert "Quality bar" in bundle  # universal still there
+
+
+def test_load_skills_default_arg_keeps_legacy_behavior(runner, skill_dir):
+    """The workspace_dir kwarg defaults to None so the loader stays
+    backward-compatible — universal-only bundle, unchanged."""
+    bundle = runner._load_skills("implement_feature")
+    assert "Quality bar" in bundle
+
+
 # ---- _wrap_goal integration -------------------------------------------------
 
 
@@ -98,6 +161,23 @@ def test_wrap_goal_falls_back_when_skill_dir_missing(runner, monkeypatch, tmp_pa
     wrapped = runner._wrap_goal("implement_feature", "GOAL-TOKEN")
     # Legacy embedded preamble still works in degraded mode (host-side dev).
     assert "GOAL-TOKEN" in wrapped
+
+
+def test_wrap_goal_threads_workspace_dir_to_per_repo_skills(runner, skill_dir, tmp_path):
+    """The full integration path: a repo carrying .agent/skills/ + a wrapped
+    goal must produce a prompt containing BOTH the universal skill and the
+    per-repo observation — proving D11 is wired end-to-end through _wrap_goal."""
+    repo_skills = tmp_path / ".agent" / "skills"
+    repo_skills.mkdir(parents=True)
+    (repo_skills / "structure.md").write_text(
+        "# Repo structure\n\nREPO-OBSERVATION-MARKER\n", encoding="utf-8",
+    )
+    wrapped = runner._wrap_goal(
+        "implement_feature", "GOAL-TOKEN", workspace_dir=str(tmp_path),
+    )
+    assert "Quality bar" in wrapped  # universal reaches the prompt
+    assert "REPO-OBSERVATION-MARKER" in wrapped  # so does per-repo
+    assert wrapped.rstrip().endswith("GOAL-TOKEN")  # goal still lands last
     assert wrapped != "GOAL-TOKEN"
     assert "AGENTS.md" in wrapped  # from embedded _CONTEXT_PREAMBLE
 
