@@ -55,20 +55,53 @@ def _read_skill(path: str) -> str:
         return ""
 
 
-def _load_skills(kind: str) -> str:
-    """Concatenate the skill bundle for a given task kind.
+def _skill_paths_for_root(root: str, kind: str) -> list[str]:
+    """Return the ordered list of skill files under a given root, for a kind.
 
-    Order: _common.md → _writes-code/*.md (only for code-writing kinds) → <kind>/*.md.
-    Empty paths and missing files are tolerated so a partial skill dir can't
-    crash the runner — at worst the agent just gets less briefing.
+    Order: ``_common.md`` → ``_writes-code/*.md`` (only for kinds that write
+    code) → ``<kind>/*.md`` → any other ``*.md`` at the root (catch-all for
+    per-repo observation files that don't fit a tier, e.g. closeloop's
+    ``frontend-structure.md``). Files within a tier are sorted
+    lexicographically so a leading number controls order. Missing tiers are
+    silently skipped — a partial layout can't crash the runner.
     """
     paths: list[str] = []
-    common = os.path.join(_SKILLS_DIR, "_common.md")
+    common = os.path.join(root, "_common.md")
     if os.path.exists(common):
         paths.append(common)
     if kind in _WRITES_CODE_KINDS:
-        paths.extend(sorted(_glob.glob(os.path.join(_SKILLS_DIR, "_writes-code", "*.md"))))
-    paths.extend(sorted(_glob.glob(os.path.join(_SKILLS_DIR, kind, "*.md"))))
+        paths.extend(sorted(_glob.glob(os.path.join(root, "_writes-code", "*.md"))))
+    paths.extend(sorted(_glob.glob(os.path.join(root, kind, "*.md"))))
+    # Catch-all: any *.md at the skill root not already picked up. Useful for
+    # per-repo observation files that aren't per-kind (the project's overall
+    # state, e.g. "App.tsx is a known monolith"). _common.md is already
+    # included above; skip it here to avoid double-loading.
+    already = set(paths)
+    for path in sorted(_glob.glob(os.path.join(root, "*.md"))):
+        if path not in already and os.path.basename(path) != "_common.md":
+            paths.append(path)
+    return paths
+
+
+def _load_skills(kind: str, workspace_dir: str | None = None) -> str:
+    """Concatenate the skill bundle for a given task kind.
+
+    Loads universal devclaw skills from ``/opt/devclaw/skills/`` (baked into
+    the image), then appends per-repo skills from ``<workspace>/.agent/skills/``
+    if a workspace is provided. The per-repo layer carries project-specific
+    observations the universal skills can't (e.g. "App.tsx is a 1827-line
+    monolith") and evolves at the repo's pace — symmetric with the per-repo
+    hook discovery in :func:`_run_hook`. Universal skills come FIRST so the
+    repo can lean on doctrine the agent already has.
+
+    Empty paths and missing files are tolerated; at worst the agent just
+    gets less briefing.
+    """
+    paths: list[str] = _skill_paths_for_root(_SKILLS_DIR, kind)
+    if workspace_dir:
+        paths.extend(_skill_paths_for_root(
+            os.path.join(workspace_dir, ".agent", "skills"), kind,
+        ))
     blocks = [b for b in (_read_skill(p) for p in paths) if b]
     return "\n\n---\n\n".join(blocks)
 
@@ -262,14 +295,17 @@ _KIND_WRAPPERS = {
 }
 
 
-def _wrap_goal(kind: str, goal: str) -> str:
+def _wrap_goal(kind: str, goal: str, workspace_dir: str | None = None) -> str:
     """Skills prepended, then the goal under a clear marker.
 
-    Falls back to the legacy embedded _KIND_WRAPPERS only when the baked skill
-    dir is missing (host-side dev, fresh image without skills/ baked in). Once
-    the sandbox image ships skills, that fallback is dead path.
+    Loads universal skills from /opt/devclaw/skills/ plus per-repo skills from
+    ``<workspace>/.agent/skills/`` when ``workspace_dir`` is provided. Falls
+    back to the legacy embedded ``_KIND_WRAPPERS`` only when no skill files at
+    all are found (host-side dev, fresh image without skills/ baked in, AND
+    the repo also has no .agent/skills). Once the sandbox image ships skills,
+    that fallback is dead path.
     """
-    skills = _load_skills(kind)
+    skills = _load_skills(kind, workspace_dir=workspace_dir)
     if skills:
         return f"{skills}\n\n---\n\n## Goal\n\n{goal}"
     template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
@@ -395,7 +431,7 @@ def main() -> None:
     # so prepending instructions here is the cheapest way to bias behavior
     # without a custom system prompt. Skills now live in /opt/devclaw/skills/
     # and are loaded per-kind by _wrap_goal.
-    wrapped_goal = _wrap_goal(kind, goal)
+    wrapped_goal = _wrap_goal(kind, goal, workspace_dir=workspace_dir)
 
     os.makedirs(workspace_dir, exist_ok=True)
 
