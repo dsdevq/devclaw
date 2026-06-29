@@ -371,13 +371,17 @@ async def test_signal_check_exception_is_isolated(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_entry_signal_and_category_are_pinned_not_trusted_from_model(tmp_path):
-    """The LLM can lie about ``signal`` and ``category`` in its JSON output —
-    the detector pins both to what the pre-filter actually fired."""
+async def test_entry_signal_category_and_date_are_pinned_not_trusted_from_model(tmp_path):
+    """The LLM can lie about ``signal``, ``category``, AND ``date`` in its
+    JSON output — the detector pins all three to harness-supplied values.
+
+    The date-pin landed after the 2026-06-29 live smoke caught the model
+    stamping midnight instead of the actual fire time; without the override
+    the entry timestamps drift away from when the fire really happened."""
     workspace = tmp_path / "repo"
     workspace.mkdir()
     caller = _CountingCaller(payload={
-        "date": "2026-06-29T18:00:00+00:00",
+        "date": "2099-12-31T18:00:00+00:00",  # model lies about date too
         "signal": "WRONG",       # model lies
         "category": "wrong_cat", # model lies
         "observation": "obs",
@@ -392,11 +396,13 @@ async def test_entry_signal_and_category_are_pinned_not_trusted_from_model(tmp_p
 
     await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
 
-    # The written entry's header reflects the pinned signal/category — not
-    # what the model said.
     content = (workspace / ".devclaw" / "trends.md").read_text()
+    # Pinned signal/category land in the header.
     assert "S1 — drift" in content
     assert "WRONG" not in content
     assert "wrong_cat" not in content
+    # Date pin: the model's 2099 fabrication does NOT appear; the detector's
+    # harness-supplied now_ms (lambda: 1750000000000) wins.
+    assert "2099" not in content
     assert sent[0]["signal"] == "S1"
     store.close()

@@ -428,12 +428,14 @@ Return the JSON now.
         if not isinstance(parsed, dict):
             raise _TrendParseError("entry must be a JSON object")
 
-        # Pin the load-bearing fields to what the pre-filter said.
+        # Pin the load-bearing fields to what the pre-filter said. The model
+        # can technically supply ``signal`` / ``category`` / ``date`` in its
+        # JSON; we override all three. Live smoke 2026-06-29 caught the model
+        # stamping the date at midnight when the fire actually happened at
+        # 12:05 — pinning prevents that drift from accumulating across entries.
         parsed["signal"] = signal.id
         parsed["category"] = signal.category
-
-        # Defaults for missing fields.
-        parsed.setdefault("date", _iso_now(self._now_ms()))
+        parsed["date"] = _iso_now(self._now_ms())
         if not isinstance(parsed.get("observation"), str) or not parsed["observation"].strip():
             parsed["observation"] = "(no observation provided)"
         evidence_refs = parsed.get("evidence_refs")
