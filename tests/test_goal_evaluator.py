@@ -70,6 +70,66 @@ async def test_evaluate_roundtrip_with_injected_caller():
     assert calls["n"] == 1
 
 
+def test_review_report_extraction_skips_prompt_template_and_uses_filled_section():
+    """The worker's captured stdout starts with a panel echoing the agent's
+    brief — which itself contains the literal template ``## Per-clause
+    evidence`` followed by ``1. <clause 1 text>`` placeholders. The truncation
+    must skip past that template and find the LAST (filled-in) per-clause
+    section. Otherwise the evaluator reads the empty template + early
+    `status=pending` tool-calls and reports 'review was cut off
+    mid-exploration' (closeloop-ui-coverage 2026-06-28 incident)."""
+    template = (
+        "Message from User panel\n"
+        "## Per-clause evidence\n"
+        "1. <clause 1 text>\n"
+        "   satisfied: yes | no | partial\n"
+        "   evidence: <specific files/symbols/tests>\n"
+    )
+    decoration = "ACP Tool Call\nls -la /workspace\nstatus=pending\n" * 50
+    actual_report = (
+        "## Per-clause evidence\n"
+        "1. /health endpoint exists\n"
+        "   satisfied: yes\n"
+        "   evidence: app/routes.py:42 health_handler covered by tests/test_health.py:8\n"
+        "\n## Summary\nAll clauses satisfied.\n"
+    )
+    raw = template + decoration + actual_report
+    prompt = build_prompt(
+        _goal(), GoalStatus(), "log", "deliveries",
+        review_report=raw, at_done_gate=True,
+    )
+    # the actual evidence — specific file/line — reaches the evaluator
+    assert "app/routes.py:42 health_handler" in prompt
+    assert "Summary" in prompt
+    # the early `status=pending` decoration is excluded from the head-truncation
+    assert "status=pending" not in prompt
+
+
+def test_review_report_extraction_falls_back_to_tail_when_no_header():
+    """Truly cut-off runs (no ``## Per-clause evidence`` ever emitted) must
+    still surface SOME signal — the tail, where the most recent tool-call
+    output and any partial work-in-progress lives. Head-truncation always
+    showed only banner + prompt echo, never the agent's actual exploration."""
+    early_banner = "Message from User\n" + ("x" * 5000)
+    actual_work_at_end = (
+        "I started exploring but ran into a permissions error reading "
+        "/workspace/.env — DETAILS HERE for the evaluator to act on."
+    )
+    raw = early_banner + actual_work_at_end
+    prompt = build_prompt(
+        _goal(), GoalStatus(), "log", "deliveries",
+        review_report=raw, at_done_gate=True,
+    )
+    assert "DETAILS HERE for the evaluator to act on" in prompt
+
+
+def test_review_report_extraction_handles_empty_input():
+    """Defensive: an empty / None review_report path must not crash and must
+    not inject an empty section header into the prompt."""
+    from devclaw.goal.evaluator import _extract_review_report
+    assert _extract_review_report("") == ""
+
+
 def test_done_gate_prompt_includes_spec_when_present():
     prompt = build_prompt(
         _goal(), GoalStatus(), "log", "deliveries",
