@@ -211,31 +211,51 @@ async def _walk_chain(gaps: list[str]) -> None:
         print("\n(no spec produced)")
         gaps.append("scope_grill produced no spec — downstream links cannot be exercised honestly")
 
-    # ---- Link 4: user-agreement (implicit today) ----------------------------
+    # ---- Link 4: user-agreement (waiter responsibility — decided 2026-06-30) -
     print(_hr("LINK 4: user-agreement gate"))
     print(
-        "\n  IMPLICIT in the current chef. The waiter is trusted to only call create_goal\n"
-        "  after the user approves the spec. The chef has no enforcement.\n"
-        "  Tagging as a SOFT gap — may be the waiter's job, not the chef's."
-    )
-    gaps.append(
-        "user-agreement gate is implicit (chef trusts the waiter). Decide: enforce "
-        "chef-side, or document as waiter responsibility and stop calling it a gap."
+        "\n  Decided 2026-06-30: WAITER RESPONSIBILITY, not chef's. The spec →\n"
+        "  user-approve → create_goal sequence happens in Telegram; the chef\n"
+        "  receives a filed order via the MCP tool boundary. Admission control\n"
+        "  (link 18) now provides the structural backstop — a goal whose spec\n"
+        "  the user didn't approve will be missing the spec-derived shape\n"
+        "  admission requires. See ~/memory/projects/devclaw/chain-map-2026-06-30.md."
     )
 
     # ---- Link 9: domain research --------------------------------------------
     print(_hr("LINK 9: domain research (look at real CRMs, distill MVP)"))
-    print(
-        "\n  NOT IMPLEMENTED. For a from-scratch CRM goal, devclaw should fire a\n"
-        "  domain-research step here: look at HubSpot/Pipedrive/Salesforce, list what\n"
-        "  good CRMs do, distill an MVP-scope brief the decomposer can plan against.\n"
-        "  Today this step does not exist — goal/research.py is repo-research only."
+    from devclaw.goal.world_research import (
+        default_caller as world_research_caller,
+        should_fire as world_research_should_fire,
+        world_brief,
     )
-    gaps.append(
-        "domain research module missing — should fire for from-scratch goals (no "
-        "repo_url) and produce a 'what good looks like in the world' brief naming "
-        "real exemplars and an MVP-scope checklist."
+
+    # Build the same Goal we'll later hand to the decomposer so should_fire's
+    # from-scratch rule sees the actual shape.
+    _wr_goal = Goal(
+        id="chain-crm-fixture",
+        objective="Build a minimal CRM for one user (consultancy use). "
+                  "React frontend, .NET backend, SQLite, self-hosted on one VPS. "
+                  "MVP scope only.",
+        cadence="1d", engine="openhands", workspace_dir="/tmp/chain-crm",
+        repo_url=None, verify_cmd=None, open_pr=True,
+        done_when="", backlog=[], stub_acceptable=[],
     )
+    world_brief_text = ""
+    if not world_research_should_fire(_wr_goal):
+        print("\n  should_fire=False — goal has a repo_url, world-research skipped.")
+    else:
+        print("\n  should_fire=True — firing world-research (from-scratch CRM goal).")
+        try:
+            world_brief_text = await world_brief(
+                _wr_goal, spec=spec, caller=world_research_caller(),
+            )
+        except Exception as err:  # noqa: BLE001
+            gaps.append(f"world-research raised: {err!r}")
+            print(f"\n  world-research FAILED: {err!r}")
+        else:
+            print("\nWORLD-RESEARCH BRIEF:\n")
+            print(textwrap.indent(world_brief_text, "  "))
 
     # ---- Link 18: chef admission control ------------------------------------
     print(_hr("LINK 18: chef admission control (verified on all sides)"))
@@ -289,14 +309,10 @@ async def _walk_chain(gaps: list[str]) -> None:
     # ---- Links 5/7/8: repo init, AGENTS.md, CI/CD ---------------------------
     print(_hr("LINKS 5/7/8: create_repo, onboard (AGENTS.md), setup_cicd"))
     print(
-        "\n  EXIST as separate MCP tools but are NOT auto-fired on goal lock. The\n"
-        "  waiter is expected to chain them. For honest coverage the chain test\n"
-        "  should drive these MCP calls in sequence — DEFERRED to v2 of this test\n"
-        "  (would require a temp gh-authed environment + workspace setup)."
-    )
-    gaps.append(
-        "chain test does not yet drive create_repo/onboard/setup_cicd at MCP-tool "
-        "altitude (deferred to v2). Today these links are noted but unexercised."
+        "\n  EXIST as separate MCP tools. v2 of this chain test will drive them in\n"
+        "  sequence (gh-authed environment + workspace setup required). Decided\n"
+        "  2026-06-30: this is intentional v2 scope, NOT an unfilled chain gap.\n"
+        "  Tracked in chain-map row 18 + a separate task for the v2 harness."
     )
 
     # ---- Link 11: decomposition (the load-bearing eyeball checkpoint) -------
@@ -328,11 +344,21 @@ async def _walk_chain(gaps: list[str]) -> None:
     print(f"  objective: {goal.objective}")
     print(f"  done_when: (empty — see admission/firming gaps)")
 
+    # Combine the spec + the world-research brief as the decomposer's
+    # discovery context. For from-scratch goals the world brief is what
+    # plays the role the repo analysis plays for existing-repo goals.
+    combined_brief = spec
+    if world_brief_text:
+        combined_brief = (
+            f"{spec}\n\n## World research — exemplars + MVP bar + defer list\n\n"
+            f"{world_brief_text}"
+        )
+
     try:
         checklist = await decompose(
             goal,
             claude_caller=decomposer_caller(),
-            discovery_brief=spec,  # using spec as a stand-in for the missing domain-research brief
+            discovery_brief=combined_brief,
             repo_digest="",  # from-scratch — no repo yet
         )
     except Exception as err:  # noqa: BLE001
