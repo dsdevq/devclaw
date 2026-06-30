@@ -36,6 +36,7 @@ class Cognition(Protocol):
 
     async def __call__(
         self, prompt: str, *, role: str = "unknown", model: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> str: ...
 
 
@@ -46,12 +47,13 @@ class ClaudeCognition:
 
     async def __call__(
         self, prompt: str, *, role: str = "unknown", model: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> str:
         # Local import: planner imports from this module would cycle on the
         # `claude_with_model` shim that delegates back here.
         from .planner import call_claude
 
-        return await call_claude(prompt, model=model, role=role)
+        return await call_claude(prompt, model=model, role=role, timeout_ms=timeout_ms)
 
 
 class StubCognition:
@@ -75,7 +77,9 @@ class StubCognition:
 
     async def __call__(
         self, prompt: str, *, role: str = "unknown", model: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
     ) -> str:
+        # timeout_ms is accepted for protocol parity; the stub never times out.
         from .loom import trace as _trace
 
         response = self.responses.get(role, self.default)
@@ -119,12 +123,20 @@ def _from_env() -> Cognition:
     )
 
 
-def bind(model: Optional[str], *, role: str = "unknown") -> Callable[[str], Awaitable[str]]:
-    """Convenience: return a one-arg caller bound to (model, role) via the
-    configured cognition. Each role's ``default_caller`` uses this so the
-    swap point is centralized."""
+def bind(
+    model: Optional[str],
+    *,
+    role: str = "unknown",
+    timeout_ms: Optional[int] = None,
+) -> Callable[[str], Awaitable[str]]:
+    """Convenience: return a one-arg caller bound to (model, role, timeout_ms)
+    via the configured cognition. Each role's ``default_caller`` uses this so
+    the swap point is centralized. ``timeout_ms`` is threaded through to
+    :meth:`Cognition.__call__` — claude backend honors it, stub ignores it."""
 
     async def _caller(prompt: str) -> str:
-        return await get_cognition()(prompt, role=role, model=model)
+        return await get_cognition()(
+            prompt, role=role, model=model, timeout_ms=timeout_ms,
+        )
 
     return _caller

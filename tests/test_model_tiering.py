@@ -41,17 +41,36 @@ def test_argv_omits_model_when_none():
 async def test_claude_with_model_forwards_model(monkeypatch):
     captured = {}
 
-    async def fake_call(prompt, model=None, *, role="unknown"):
+    async def fake_call(prompt, model=None, *, role="unknown", timeout_ms=None):
         captured["prompt"] = prompt
         captured["model"] = model
         captured["role"] = role
+        captured["timeout_ms"] = timeout_ms
         return "ok"
 
     monkeypatch.setattr(planner, "call_claude", fake_call)
     caller = claude_with_model("claude-opus-4-8", role="planner")
     out = await caller("hello")
     assert out == "ok"
-    assert captured == {"prompt": "hello", "model": "claude-opus-4-8", "role": "planner"}
+    assert captured == {
+        "prompt": "hello", "model": "claude-opus-4-8", "role": "planner",
+        "timeout_ms": None,  # default: caller passed no override → falls to PLANNER_TIMEOUT_MS
+    }
+
+
+async def test_claude_with_model_forwards_timeout(monkeypatch):
+    """Per-role timeout override threads through bind → ClaudeCognition →
+    call_claude. The decomposer is the canonical user."""
+    captured = {}
+
+    async def fake_call(prompt, model=None, *, role="unknown", timeout_ms=None):
+        captured["timeout_ms"] = timeout_ms
+        return "ok"
+
+    monkeypatch.setattr(planner, "call_claude", fake_call)
+    caller = claude_with_model("opus", role="goal_decomposer", timeout_ms=300000)
+    await caller("hi")
+    assert captured["timeout_ms"] == 300000
 
 
 # ---- shipped per-role defaults (intent, and a guard against accidental change) ----

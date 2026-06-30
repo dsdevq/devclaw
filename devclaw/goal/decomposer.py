@@ -54,6 +54,12 @@ ClaudeCaller = Callable[[str], Awaitable[str]]
 #: the DAG planner. Override per-goal via env when you want Sonnet's speed.
 DECOMPOSER_MODEL = os.environ.get("DEVCLAW_GOAL_DECOMPOSER_MODEL", "opus") or None
 
+#: per-call timeout. Decomposition routinely emits multi-KB structured YAML
+#: (a whole-CRM goal measured at ~18 KB / ~2 min on opus), well past the global
+#: 90s ceiling. Override via env if the goal is unusually large/small. The
+#: global ``PLANNER_TIMEOUT_MS`` ceiling does NOT apply when this is set.
+DECOMPOSER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_GOAL_DECOMPOSER_TIMEOUT_MS", "300000"))
+
 
 class GoalDecomposerError(Exception):
     """Decomposition produced no usable checklist. Carries the raw output on
@@ -132,7 +138,11 @@ async def decompose(
 
 def default_caller() -> ClaudeCaller:
     """Production cognition caller bound to the decomposer tier (lazy import
-    so tests that inject a fake never touch the subprocess)."""
+    so tests that inject a fake never touch the subprocess). Passes the
+    decomposer's larger timeout because opus on a real goal routinely emits
+    multi-KB YAML that exceeds the global 90s ceiling."""
     from ..planner import claude_with_model
 
-    return claude_with_model(DECOMPOSER_MODEL, role="goal_decomposer")
+    return claude_with_model(
+        DECOMPOSER_MODEL, role="goal_decomposer", timeout_ms=DECOMPOSER_TIMEOUT_MS,
+    )

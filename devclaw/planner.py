@@ -21,6 +21,11 @@ from typing import Awaitable, Callable
 from .loom import trace as _trace
 from .state_store import TaskKind
 
+#: default ceiling for any cognition call when the caller doesn't supply its
+#: own. Each role's ``default_caller`` may pass a larger value via
+#: :func:`claude_with_model` when its expected output volume warrants — the
+#: decomposer is the canonical example (opus generating multi-KB YAML
+#: routinely exceeds 90s).
 PLANNER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_PLANNER_TIMEOUT_MS", "90000"))
 CLAUDE_BIN = os.environ.get("DEVCLAW_CLAUDE_BIN", "claude")
 MAX_TASKS_PER_PLAN = 20
@@ -180,13 +185,22 @@ def _build_claude_argv(prompt: str, model: str | None) -> list[str]:
     return argv
 
 
-async def call_claude(prompt: str, model: str | None = None, *, role: str = "unknown") -> str:
+async def call_claude(
+    prompt: str,
+    model: str | None = None,
+    *,
+    role: str = "unknown",
+    timeout_ms: int | None = None,
+) -> str:
     """Spawn ``claude --print`` with the prompt and return its stdout. ``model``
     picks the tier (alias or full id); None → account default. ``role`` labels
     the cognition site (planner / evaluator / grill / judge / summary / review /
-    research) for the trace recorder. Injected into cognition roles so tests can
-    stub the subprocess; each role binds its own model+role via
-    :func:`claude_with_model`."""
+    research) for the trace recorder. ``timeout_ms`` overrides
+    :data:`PLANNER_TIMEOUT_MS` for this call — roles whose output volume warrants
+    a larger budget (decomposer) pass their own value. Injected into cognition
+    roles so tests can stub the subprocess; each role binds its own
+    model+role+timeout via :func:`claude_with_model`."""
+    effective_timeout_ms = timeout_ms if timeout_ms is not None else PLANNER_TIMEOUT_MS
     env = dict(os.environ)
     # Belt + suspenders: never let an API key override the OAuth session.
     env.pop("ANTHROPIC_API_KEY", None)
@@ -198,6 +212,10 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
+            # stdin=DEVNULL: the prompt rides on argv; without this, the CLI
+            # waits ~3s for stdin before proceeding and emits a "no stdin data
+            # received in 3s" warning into stdout that pollutes parsing.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -216,7 +234,7 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
 
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=PLANNER_TIMEOUT_MS / 1000
+            proc.communicate(), timeout=effective_timeout_ms / 1000
         )
     except asyncio.TimeoutError:
         proc.kill()
@@ -230,7 +248,7 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
             cmd="claude --print", argv_head=argv_head, latency_ms=latency,
             exit_code=None, error="timeout",
         )
-        raise PlannerError(f"claude --print timed out after {PLANNER_TIMEOUT_MS}ms")
+        raise PlannerError(f"claude --print timed out after {effective_timeout_ms}ms")
 
     stdout = stdout_b.decode("utf-8", "replace")
     stderr = stderr_b.decode("utf-8", "replace")
@@ -258,15 +276,22 @@ async def call_claude(prompt: str, model: str | None = None, *, role: str = "unk
     return stdout
 
 
-def claude_with_model(model: str | None, *, role: str = "unknown") -> Callable[[str], Awaitable[str]]:
+def claude_with_model(
+    model: str | None,
+    *,
+    role: str = "unknown",
+    timeout_ms: int | None = None,
+) -> Callable[[str], Awaitable[str]]:
     """A one-argument cognition caller bound to a model + role label. Routes
     through the configured :class:`~devclaw.cognition.Cognition` (claude by
-    default; ``DEVCLAW_COGNITION=stub`` for offline harnesses). Backend-swap
-    happens at that seam — this factory keeps its historical name + signature
-    so every caller (planner, evaluator, grill, judge, …) stays untouched."""
+    default; ``DEVCLAW_COGNITION=stub`` for offline harnesses). ``timeout_ms``
+    overrides the default ceiling for this role — pass it when the role's
+    expected output volume routinely exceeds the global default (decomposer).
+    Backend-swap happens at the cognition seam — this factory keeps its
+    historical name + signature so existing callers stay untouched."""
     from .cognition import bind
 
-    return bind(model, role=role)
+    return bind(model, role=role, timeout_ms=timeout_ms)
 
 
 #: planning (plan_goal + plan_spec) runs at the planner tier

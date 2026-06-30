@@ -27,6 +27,11 @@ from .planner import PlannerError, claude_with_model, extract_json
 #: account default. Read at call time so the env stays the single source.
 GRILL_MODEL = os.environ.get("DEVCLAW_GRILL_MODEL", "sonnet") or None
 
+#: per-call timeout. The finalize turn emits a full multi-section spec (3–6 KB
+#: of markdown) that routinely exceeds the global 90s ceiling on sonnet — chain
+#: test caught a 90s timeout on the second turn. Override via env when needed.
+GRILL_TIMEOUT_MS = int(os.environ.get("DEVCLAW_GRILL_TIMEOUT_MS", "180000"))
+
 #: hard cap so a grill can't loop forever — after this many answered turns the
 #: model is forced to finalize the spec from what it has.
 MAX_GRILL_QUESTIONS = int(os.environ.get("DEVCLAW_MAX_GRILL_QUESTIONS", "20"))
@@ -83,8 +88,10 @@ def validate_step(parsed: object) -> dict:
 
 
 def default_caller() -> Callable[[str], Awaitable[str]]:
-    """Production cognition caller bound to the grill tier (lazy, env-current)."""
-    return claude_with_model(GRILL_MODEL, role="grill")
+    """Production cognition caller bound to the grill tier (lazy, env-current).
+    Uses the grill-specific timeout because finalize turns emit multi-KB spec
+    markdown that can exceed the global 90s ceiling on sonnet."""
+    return claude_with_model(GRILL_MODEL, role="grill", timeout_ms=GRILL_TIMEOUT_MS)
 
 
 async def next_step(
