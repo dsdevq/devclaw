@@ -437,7 +437,7 @@ async def test_dispatch_uses_goal_branch_when_checklist_exists(tmp_path):
 
     calls: list = []
 
-    async def rec_prepare(ws, repo_url=None, branch=None):
+    async def rec_prepare(ws, repo_url=None, branch=None, skills_required=None):
         calls.append(branch)
         return branch or "main"
 
@@ -463,7 +463,7 @@ async def test_dispatch_uses_default_branch_when_no_checklist(tmp_path):
 
     calls: list = []
 
-    async def rec_prepare(ws, repo_url=None, branch=None):
+    async def rec_prepare(ws, repo_url=None, branch=None, skills_required=None):
         calls.append(branch)
         return branch or "main"
 
@@ -494,7 +494,7 @@ async def test_review_repository_dispatch_does_not_use_goal_branch(tmp_path):
 
     calls: list = []
 
-    async def rec_prepare(ws, repo_url=None, branch=None):
+    async def rec_prepare(ws, repo_url=None, branch=None, skills_required=None):
         calls.append(branch)
         return branch or "main"
 
@@ -527,7 +527,7 @@ async def test_done_gate_review_uses_goal_branch_when_checklist_exists(tmp_path)
 
     calls: list = []
 
-    async def rec_prepare(ws, repo_url=None, branch=None):
+    async def rec_prepare(ws, repo_url=None, branch=None, skills_required=None):
         calls.append(branch)
         return branch or "main"
 

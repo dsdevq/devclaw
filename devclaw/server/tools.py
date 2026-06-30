@@ -513,6 +513,7 @@ async def create_goal(
     verify_cmd: Optional[str] = None,
     open_pr: bool = True,
     spec: str = "",
+    skills_required: Optional[list[str]] = None,
 ) -> str:
     """Register a DURABLE goal that DevClaw drives over time. Unlike start_program
     (a one-shot DAG that runs to completion), a goal persists: on each heartbeat
@@ -540,7 +541,7 @@ async def create_goal(
                 goal_id, objective=objective, workspace_dir=workspace_dir,
                 done_when=done_when, backlog=backlog, cadence=cadence,
                 repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
-                spec=spec,
+                spec=spec, skills_required=skills_required,
             ),
             indent=2,
         )
@@ -561,6 +562,7 @@ async def verify_goal(
     repo_url: Optional[str] = None,
     verify_cmd: Optional[str] = None,
     spec: str = "",
+    skills_required: Optional[list[str]] = None,
 ) -> str:
     """Pre-flight check for a goal BEFORE you call create_goal. Runs the same
     structural validations the chef applies at goal-creation time and returns
@@ -581,6 +583,7 @@ async def verify_goal(
         goals.verify_goal(
             objective=objective, workspace_dir=workspace_dir, done_when=done_when,
             backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
+            skills_required=skills_required,
         ),
         indent=2,
     )

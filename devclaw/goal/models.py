@@ -65,6 +65,13 @@ class Goal:
     #: unless one of these names appears in the clause/evidence text. Empty
     #: list (the default) means "no stubs allowed — plan real work."
     stub_acceptable: list[str] = field(default_factory=list)
+    #: slugs of skills from the host's skill library (``devclaw.skill_library``)
+    #: that should be provisioned into ``<workspace>/.agent/skills/`` before the
+    #: executor runs against this goal. Per-project tech-stack briefings the
+    #: agent loads on each task. Empty list (default) = no extras beyond the
+    #: universal devclaw skill bundle + any repo-committed ``.agent/skills/``
+    #: contents. Admission validates each slug exists in the library.
+    skills_required: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

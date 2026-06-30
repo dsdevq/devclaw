@@ -51,6 +51,7 @@ async def prepare_workspace(
     workspace_dir: str,
     repo_url: str | None = None,
     branch: str | None = None,
+    skills_required: list[str] | None = None,
 ) -> str:
     """Ensure ``workspace_dir`` is a pristine checkout of either the repo's
     default branch (when ``branch`` is None) OR the named ``branch`` at its
@@ -67,6 +68,12 @@ async def prepare_workspace(
     branch at latest origin; otherwise it is fetched + fast-forwarded to its
     own remote tip (preserving the agent's accumulated work) and rebased onto
     the latest default-branch tip so a long-running goal still tracks main.
+
+    ``skills_required``: when non-empty, the named skills are PROVISIONED into
+    ``<workspace>/.agent/skills/<slug>.md`` AFTER the git operations (so they
+    survive the ``git clean -fdx`` that pristine-resets the tree). The
+    runner's per-repo loader then picks them up on every task dispatch. See
+    :mod:`devclaw.skill_library`.
 
     Injected into the goal tick so unit tests pass a no-op.
     """
@@ -99,6 +106,7 @@ async def prepare_workspace(
             rc, out = await _run(*cmd, cwd=workspace_dir)
             if rc != 0:
                 raise WorkspaceError(f"{' '.join(cmd)} failed: {out[-300:]}")
+        _provision_skills(workspace_dir, skills_required)
         return default_branch
 
     # Goal-branch path. Start clean (drop any untracked debris from a prior
@@ -132,4 +140,15 @@ async def prepare_workspace(
         )
         if rc != 0:
             raise WorkspaceError(f"create goal branch {branch} failed: {out[-300:]}")
+    _provision_skills(workspace_dir, skills_required)
     return branch
+
+
+def _provision_skills(workspace_dir: str, skills_required: list[str] | None) -> None:
+    """Hand-off to the skill library. Lazy import so this module stays
+    importable in environments where the library lookup never runs."""
+    if not skills_required:
+        return
+    from ..skill_library import provision
+
+    provision(workspace_dir, list(skills_required))
