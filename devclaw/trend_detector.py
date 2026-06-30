@@ -120,6 +120,32 @@ def _scope_key_for_project(workspace_dir: str) -> str:
 _HARNESS_SELF_SCOPE_KEY = "harness_self"
 
 
+def read_trends_text(scope: str, limit_chars: int = 5000) -> str:
+    """Read the tail of ``trends.md`` for a scope and return raw text.
+
+    ``scope='harness_self'`` → the global harness-self file. Anything else is
+    treated as a workspace path → ``<scope>/.devclaw/trends.md``.
+
+    Tail-truncated to ``limit_chars`` (trends files only grow; recent is what
+    matters for next-tick consumption). Returns a placeholder string when the
+    file is missing or unreadable — callers that want a "no trends → skip
+    section" UX should check against the placeholder OR pass the return to a
+    section that guards on truthiness of real content. ``GoalService.read_trends``
+    wraps this for the ``review_trends`` MCP tool (which expects the placeholder
+    text so the human reader sees the discipline is wired)."""
+    if scope == "harness_self":
+        path = HARNESS_SELF_TRENDS_PATH
+    else:
+        path = Path(scope) / ".devclaw" / "trends.md"
+    if not path.exists():
+        return "(no trends recorded for this scope yet)"
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        return f"(could not read {path}: {exc})"
+    return raw[-limit_chars:] if len(raw) > limit_chars else raw
+
+
 class TrendDetector:
     """Heartbeat-driven orchestrator. See module docstring for boundary rules
     and hook points. The class is intentionally narrow — the only writes it can

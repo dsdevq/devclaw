@@ -197,23 +197,18 @@ class GoalService:
         Denys's vault per ``DEVCLAW_TREND_HARNESS_SELF_FILE``).
 
         Anything else is treated as a workspace path → reads
-        ``<scope>/.devclaw/trends.md``."""
-        from ..trend_detector import HARNESS_SELF_TRENDS_PATH
+        ``<scope>/.devclaw/trends.md``.
+
+        The actual read is delegated to ``trend_detector.read_trends_text`` so
+        the same primitive feeds both this MCP wrapper and the per-tick prompt
+        injection in ``goal/tick.py``."""
+        from ..trend_detector import HARNESS_SELF_TRENDS_PATH, read_trends_text
 
         if scope == "harness_self":
             path = HARNESS_SELF_TRENDS_PATH
         else:
             path = Path(scope) / ".devclaw" / "trends.md"
-        text: str
-        if not path.exists():
-            text = "(no trends recorded for this scope yet)"
-        else:
-            try:
-                raw = path.read_text()
-            except OSError as exc:
-                text = f"(could not read {path}: {exc})"
-            else:
-                text = raw[-limit_chars:] if len(raw) > limit_chars else raw
+        text = read_trends_text(scope, limit_chars)
         return {"scope": scope, "path": str(path), "trends": text}
 
     # ---- the heartbeat -----------------------------------------------------
