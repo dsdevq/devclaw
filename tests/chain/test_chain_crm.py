@@ -235,21 +235,40 @@ async def _walk_chain(gaps: list[str]) -> None:
 
     # ---- Link 18: chef admission control ------------------------------------
     print(_hr("LINK 18: chef admission control (verified on all sides)"))
-    print(
-        "\n  WARN-ONLY today. create_goal emits warnings but accepts the goal. For\n"
-        "  this CRM fixture, admission SHOULD reject because:\n"
-        "    - no done_when has been derived from the spec yet (still raw prose)\n"
-        "    - no MVP-scope checklist exists from domain research\n"
-        "    - the chain has not produced verifiable acceptance clauses\n"
-        "  The chef should refuse with structured conditions; the waiter (or\n"
-        "  upstream chain) loops back to fix them, then re-files."
+    from devclaw.goal.admission import verify_goal as _verify
+
+    # The CRM fixture is from-scratch (no repo_url) with no done_when set on
+    # the goal — but the grill produced a spec carrying acceptance criteria,
+    # so admission's done_when-or-spec check should pass on the spec path.
+    admission = _verify(
+        objective="Build a minimal CRM for one user (consultancy use). "
+                  "React frontend, .NET backend, SQLite, self-hosted on one VPS. "
+                  "MVP scope only.",
+        workspace_dir="/tmp/chain-crm",
+        done_when="",  # intentionally — admission allows spec to carry it
+        backlog=[],
+        repo_url=None,
+        spec=spec,
     )
-    gaps.append(
-        "chef-side admission control is warn-only — should reject with structured "
-        "conditions (no_done_when / undecomposable_done_when / missing_mvp_scope_for_"
-        "from_scratch_goal / missing_domain_research_evidence / etc.). Also expose as "
-        "verify_goal MCP tool for pre-flight checks."
-    )
+    print(f"\n  admitted: {admission.admitted}")
+    print(f"  conditions: {len(admission.conditions)}")
+    for c in admission.conditions:
+        print(f"    [{c.severity}] {c.code}: {c.message[:100]}{'...' if len(c.message) > 100 else ''}")
+    if not admission.admitted:
+        codes = ", ".join(c.code for c in admission.rejections)
+        gaps.append(
+            f"chef admission rejected the CRM fixture: {codes}. Either the "
+            "fixture is malformed, or admission is over-rejecting. Decide which."
+        )
+    else:
+        print("\n  Goal admitted — admission gap (formerly gap #3) is CLOSED.")
+        # The waiter-altitude question — should admission ALSO require domain-
+        # research evidence for from-scratch goals? Defer that decision until
+        # the domain-research module exists.
+        print(
+            "  (Note: admission does NOT yet require domain-research evidence "
+            "for from-scratch goals — deferred until that module exists.)"
+        )
 
     # ---- Link 6: skills install ---------------------------------------------
     print(_hr("LINK 6: per-project skills install"))

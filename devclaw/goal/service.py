@@ -50,8 +50,10 @@ _BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")
 
 
 def _bare_verify_cmd_warning(cmd: str) -> Optional[str]:
-    """Return a warning if cmd is a bare tool name (single token, no path separators).
-    A name like 'pytest' or 'python' may not be on PATH inside the sandbox."""
+    """DEPRECATED — kept temporarily for external callers / back-compat.
+    The check moved into :mod:`devclaw.goal.admission` as one of several
+    structured conditions ``verify_goal`` returns. New code should call
+    ``verify_goal`` directly and route on the ``bare_verify_cmd`` code."""
     stripped = cmd.strip()
     if stripped and _BARE_TOOL_RE.match(stripped):
         return (
@@ -308,6 +310,19 @@ class GoalService:
         done_when: str = "", backlog: Optional[list[str]] = None,
         spec: str = "",
     ) -> dict:
+        # Chef admission ("verified on all sides"). Goals that fail structural
+        # checks are REJECTED with a structured condition list — the caller
+        # (waiter or upstream chain) must fix and re-file. Warnings still flow
+        # through to the result dict as before. See devclaw/goal/admission.py.
+        from .admission import GoalAdmissionRejected, verify_goal as _verify
+
+        admission = _verify(
+            objective=objective, workspace_dir=workspace_dir, done_when=done_when,
+            backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
+        )
+        if not admission.admitted:
+            raise GoalAdmissionRejected(admission)
+
         goal = self._goal_store.create_goal(
             goal_id, objective=objective, workspace_dir=workspace_dir, cadence=cadence,
             repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
@@ -324,11 +339,28 @@ class GoalService:
         self._goal_store.append_log(goal_id, "goal created")
         self.poke()  # advance it on the next loop turn without waiting a full interval
         result = self.get_goal(goal_id)
-        if verify_cmd:
-            warning = _bare_verify_cmd_warning(verify_cmd)
-            if warning:
-                result["warnings"] = [warning]
+        if admission.warnings:
+            # Keep the historical string-list shape so existing callers /
+            # tests / dashboards don't break — warnings were already prose.
+            result["warnings"] = [c.message for c in admission.warnings]
         return result
+
+    def verify_goal(
+        self, *, objective: str, workspace_dir: str,
+        repo_url: Optional[str] = None, verify_cmd: Optional[str] = None,
+        done_when: str = "", backlog: Optional[list[str]] = None,
+        spec: str = "",
+    ) -> dict:
+        """Pre-flight check the waiter calls before ``create_goal`` so the
+        customer sees fixable conditions BEFORE thinking the order was filed.
+        Same validations as ``create_goal`` runs internally; never mutates
+        state; returns the structured :class:`AdmissionResult` as a dict."""
+        from .admission import verify_goal as _verify
+
+        return _verify(
+            objective=objective, workspace_dir=workspace_dir, done_when=done_when,
+            backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
+        ).to_dict()
 
     def get_goal(self, goal_id: str) -> dict:
         if not self._goal_store.exists(goal_id):
