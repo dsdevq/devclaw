@@ -141,7 +141,9 @@ async def test_workspace_prepped_before_dispatch(tmp_path):
         notifier=notifier, notify_url="", prepare_ws=rec_prepare, eval_every=99,
     )
     assert out is Outcome.DISPATCHED
-    assert calls == [("/repos/demo", None, None)]  # legacy mode, no goal branch
+    # seed_goal now sets a fake repo_url so the investigating phase takes the
+    # repo-research path (vs world-research, which fires for from-scratch only).
+    assert calls == [("/repos/demo", "https://example.com/demo.git", None)]  # legacy mode, no goal branch
     assert len(engine.dispatched) == 1
 
 

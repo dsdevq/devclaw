@@ -33,6 +33,7 @@ from ..delivery import deploy as _deploy
 from . import merge as _merge
 from . import planner as _planner
 from . import research as _research
+from . import world_research as _world_research
 from . import summary as _goal_summary
 from .engine import GoalEngine
 from .models import Action, Checklist, EvalResult, Goal, GoalStatus, PollResult
@@ -346,6 +347,11 @@ class TickContext:
     #: ``planner_caller`` (both default to opus); explicit injection lets tests
     #: stub the decomposer without touching the planner stub.
     decomposer_caller: "ClaudeCaller | None" = None
+    #: cognition caller for world-research (from-scratch goal grounding —
+    #: real-world exemplars + MVP bar + defer list). None → handlers use
+    #: ``world_research.default_caller()``; explicit injection lets tests stub
+    #: the brief without touching subprocess.
+    world_research_caller: "ClaudeCaller | None" = None
 
 
 class Phase(str, Enum):
@@ -412,6 +418,7 @@ async def tick_goal(
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     decomposer_caller: "ClaudeCaller | None" = None,
+    world_research_caller: "ClaudeCaller | None" = None,
     trend_detector: "object | None" = None,
 ) -> Outcome:
     """Run one heartbeat and record a single ``tick`` trace event with the
@@ -435,6 +442,7 @@ async def tick_goal(
         decompose_enabled=decompose_enabled,
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
+        world_research_caller=world_research_caller,
     )
     if trend_detector is not None:
         try:
@@ -471,6 +479,7 @@ async def _tick_goal_impl(
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     decomposer_caller: "ClaudeCaller | None" = None,
+    world_research_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
     """Run one heartbeat. Reads the goal's status, classifies it into a
     :class:`Phase`, dispatches to the matching handler.
@@ -492,6 +501,7 @@ async def _tick_goal_impl(
         decompose_enabled=decompose_enabled,
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
+        world_research_caller=world_research_caller,
     )
 
     # Effective goal = goal.yaml overlaid with firmed.yaml outputs when firming
@@ -538,6 +548,7 @@ async def _tick_goal_impl(
             goal_id, goal, status,
             store=store, engine=engine, notifier=notifier,
             notify_url=notify_url, prepare_ws=prepare_ws, summarize=summary_caller,
+            world_research_caller=world_research_caller,
         )
     if phase is Phase.FIRMING:
         return await _dispatch_phase_handler(goal_id, goal, status, ctx, "firming")
@@ -701,18 +712,96 @@ async def _open_done_gate(
     )
 
 
+async def _open_world_research(
+    goal_id: str, goal: Goal, status: GoalStatus,
+    *, store: GoalStore, notifier: Notifier,
+    world_research_caller: "ClaudeCaller | None",
+    summarize: "ClaudeCaller | None" = None,
+) -> Outcome:
+    """From-scratch investigation path — world-research instead of repo-research.
+
+    Synchronous (no engine dispatch): one cognition call, write the brief to
+    ``discovery.md``, transition the lifecycle the same way ``_resolve_discovery``
+    does after a repo-research analysis completes.
+
+    Failure is non-fatal — an empty brief means we proceed without one rather
+    than wedging the goal. The owner sees the failure in the log.
+    """
+    caller = world_research_caller or _world_research.default_caller()
+    spec = store.read_spec(goal_id)
+    try:
+        brief = await _world_research.world_brief(goal, spec, caller=caller)
+        store.write_discovery(goal_id, brief)
+        store.append_log(goal_id, "world-research brief written")
+        synth_ok = True
+    except Exception as exc:  # noqa: BLE001 — world-research must not wedge the goal
+        store.append_log(goal_id, f"world-research failed ({exc}) — proceeding without brief")
+        synth_ok = False
+
+    # Same lifecycle transition logic as _resolve_discovery (repo-research's
+    # resolution): firming sits between investigating and executing when
+    # enabled. The decomposer runs against the FIRMED goal in that case, so
+    # we don't fire it here.
+    from .phases.firming import FIRMING_ENABLED as _FIRMING_ENABLED
+
+    next_lifecycle = "firming" if _FIRMING_ENABLED else "executing"
+    next_note = (
+        "world-research done → firming" if _FIRMING_ENABLED
+        else "world-research done → executing"
+    )
+    store.save_status(
+        goal_id, replace(status, lifecycle=next_lifecycle, phase="idle", next=next_note),
+    )
+    msg = (
+        f"🌍 [{goal_id}] researched what good looks like for \"{goal.objective}\""
+        f" — written exemplars + MVP bar + defer list. Starting work."
+        if synth_ok
+        else f"🌍 [{goal_id}] starting work on \"{goal.objective}\""
+    )
+    await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summarize)
+    return Outcome.ADVANCED
+
+
 async def _open_investigation(
     goal_id: str, goal: Goal, status: GoalStatus,
     *, store: GoalStore, engine: GoalEngine, notifier: Notifier,
     notify_url: str, prepare_ws: WorkspacePrep, summarize: "ClaudeCaller | None" = None,
+    world_research_caller: "ClaudeCaller | None" = None,
 ) -> Outcome:
-    """A new outcome goal investigates before it executes: dispatch a read-only
-    analysis of the repo as it is today. Its terminal result feeds the discovery
-    synthesis (``_resolve_discovery``), not the planner. Research, then act — the
-    senior-dev move. A *dispatch* failure skips straight to executing — the
-    investigation is an enhancement, not a gate. A *prep* failure does NOT skip:
-    the workspace it couldn't build is the same one executing needs, so deferring
-    just hides the error one tick longer. Block on it instead (legibly)."""
+    """A new outcome goal investigates before it executes.
+
+    Two paths, branched on ``world_research.should_fire(goal)``:
+
+    1. **From-scratch goal** (no ``repo_url``): fire WORLD-research
+       synchronously. There's no repo to analyze, but the model's training
+       knowledge of real software in this category gives the chain something
+       concrete to align against (real exemplars, MVP bar, deliberately-defer
+       list). Synthesis writes ``discovery.md`` and transitions the
+       lifecycle the same way ``_resolve_discovery`` does after repo-research.
+
+    2. **Existing-repo goal**: dispatch a read-only ``review_repository``
+       analysis. Its terminal result feeds the discovery synthesis
+       (``_resolve_discovery``) — repo-research, not world-research, because
+       the ground truth is in the codebase. This is the senior-dev move:
+       research, then act.
+
+    A *dispatch* failure skips straight to executing — investigation is an
+    enhancement, not a gate. A *prep* failure does NOT skip: the workspace it
+    couldn't build is the same one executing needs, so deferring just hides
+    the error one tick longer. Block on it instead (legibly).
+    """
+    # Branch 1: from-scratch goal → world-research, no engine dispatch.
+    if _world_research.should_fire(goal):
+        return await _open_world_research(
+            goal_id, goal, status,
+            store=store, notifier=notifier,
+            world_research_caller=world_research_caller,
+            summarize=summarize,
+        )
+
+    # Branch 2: existing-repo goal → today's path (prep workspace, dispatch
+    # review_repository, await terminal, _resolve_discovery turns it into a
+    # brief).
     try:
         await prepare_ws(goal.workspace_dir, goal.repo_url, None, goal.skills_required)
     except WorkspaceError as exc:

@@ -88,9 +88,16 @@ class Clock:
 
 
 def seed_goal(
-    goals_dir, goal_id: str = "demo", *, cadence: str = "1d", backlog: list[str] | None = None
+    goals_dir, goal_id: str = "demo", *, cadence: str = "1d", backlog: list[str] | None = None,
+    repo_url: str | None = "https://example.com/demo.git",
 ) -> None:
-    """Write a minimal goal.yaml under goals_dir/<goal_id>/."""
+    """Write a minimal goal.yaml under goals_dir/<goal_id>/.
+
+    ``repo_url`` defaults to a fake existing-repo URL so the investigating
+    phase takes the repo-research path (which most tests historically
+    exercise). Pass ``repo_url=None`` to seed a from-scratch goal that
+    triggers the world-research path instead.
+    """
     import yaml
 
     d = goals_dir / goal_id
@@ -102,6 +109,7 @@ def seed_goal(
                 "cadence": cadence,
                 "engine": "devclaw",
                 "workspace_dir": "/repos/demo",
+                "repo_url": repo_url,
                 "verify_cmd": "pytest -q",
                 "open_pr": True,
                 "done_when": "all backlog items merged",
