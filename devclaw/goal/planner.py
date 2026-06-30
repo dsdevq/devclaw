@@ -86,6 +86,7 @@ def build_prompt(
     finished_detail: str,
     discovery: str = "",
     checklist: Checklist | None = None,
+    trends: str = "",
 ) -> str:
     from ..prompts import load_prompt
 
@@ -115,6 +116,18 @@ def build_prompt(
             "\n## Discovery brief (from investigating the repo — current state · "
             "gap-to-good · what good looks like; draw the next action from this)",
             discovery,
+        ]
+    # Trend signals: per-project retrospective findings the detector wrote to
+    # ``<workspace>/.devclaw/trends.md``. Surfaced AFTER discovery (which is
+    # current-state framing) and BEFORE the checklist (which is the action
+    # menu) so the planner can let the retrospective inform the pick. Caller
+    # passes "" when the file is missing OR holds only the "(no trends yet)"
+    # placeholder — keeps the prompt clean rather than telegraphing an empty
+    # discipline (trend-PR3 design choice).
+    if trends:
+        parts += [
+            "\n## Trend signals (recent retrospective findings for this project)",
+            trends,
         ]
     if checklist is not None and checklist.items:
         parts += [
@@ -202,12 +215,17 @@ async def plan(
     claude_caller: ClaudeCaller,
     discovery: str = "",
     checklist: Checklist | None = None,
+    trends: str = "",
 ) -> PlanResult:
     """Run the next-action plan step. ``claude_caller`` is injected so tests stub
     the LLM. ``discovery`` is the investigating-phase brief, when present.
     ``checklist`` is the decomposer's structured plan — when present, the
-    prompt enters checklist mode and the planner picks one ready item."""
-    prompt = build_prompt(goal, status, recent_log, steering, finished_detail, discovery, checklist)
+    prompt enters checklist mode and the planner picks one ready item.
+    ``trends`` is the per-project trend retrospective tail (closes the
+    detector → consumer loop; see trend-PR3)."""
+    prompt = build_prompt(
+        goal, status, recent_log, steering, finished_detail, discovery, checklist, trends,
+    )
     raw = await claude_caller(prompt)
     try:
         parsed = json.loads(extract_json(raw))

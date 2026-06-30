@@ -1172,12 +1172,22 @@ async def _handle_executing(
         steering = ctx.store.unread_steering(goal_id, status)  # re-read
 
     # Plan one next action. Pass the checklist if one exists — the planner
-    # then runs in checklist mode and picks one ready item.
+    # then runs in checklist mode and picks one ready item. Also surface the
+    # per-project trend retrospective (trend-PR3 — closes the cross-session
+    # loop: the detector writes into <workspace>/.devclaw/trends.md; here we
+    # feed the tail back into the planner so it can act on its own findings).
+    # Pass "" when the file is missing OR holds only the placeholder so the
+    # prompt skips the section entirely.
+    from ..trend_detector import read_trends_text
+    trends_text = read_trends_text(goal.workspace_dir, limit_chars=2000)
+    if trends_text.startswith("(no trends recorded") or trends_text.startswith("(could not read"):
+        trends_text = ""
     try:
         result = await _planner.plan(
             goal, status, ctx.store.recent_log(goal_id), steering, finished_detail,
             claude_caller=ctx.planner_caller, discovery=ctx.store.read_discovery(goal_id),
             checklist=ctx.store.read_checklist(goal_id),
+            trends=trends_text,
         )
     except (_planner.GoalPlannerError, PlannerError) as exc:
         # A usage/rate limit at the PLANNER must pause the layer, not be logged

@@ -499,3 +499,33 @@ async def test_entry_signal_category_and_date_are_pinned_not_trusted_from_model(
     assert "2099" not in content
     assert sent[0]["signal"] == "S1"
     store.close()
+
+
+# ---- read_trends_text helper (trend-PR3) ----------------------------------
+
+
+def test_read_trends_text_missing_file_returns_placeholder(tmp_path):
+    # No .devclaw/trends.md exists at the workspace yet.
+    text = _td_mod.read_trends_text(str(tmp_path))
+    assert text == "(no trends recorded for this scope yet)"
+
+
+def test_read_trends_text_returns_file_contents(tmp_path):
+    devclaw_dir = tmp_path / ".devclaw"
+    devclaw_dir.mkdir()
+    body = "# trends\n\n## [2026-06-29] R2 — recurrence\n\nobservation body\n"
+    (devclaw_dir / "trends.md").write_text(body)
+    text = _td_mod.read_trends_text(str(tmp_path))
+    assert text == body
+
+
+def test_read_trends_text_tail_truncates_when_over_limit(tmp_path):
+    devclaw_dir = tmp_path / ".devclaw"
+    devclaw_dir.mkdir()
+    # 5kB of filler followed by a tail marker — we want the tail kept, head dropped.
+    body = ("X" * 5000) + "\nTAIL_MARKER\n"
+    (devclaw_dir / "trends.md").write_text(body)
+    text = _td_mod.read_trends_text(str(tmp_path), limit_chars=100)
+    assert len(text) == 100
+    assert "TAIL_MARKER" in text
+    assert "X" * 5000 not in text

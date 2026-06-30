@@ -22,6 +22,48 @@ def test_build_prompt_omits_discovery_section_when_absent():
     assert "Discovery brief" not in p
 
 
+# ---- trend signals (trend-PR3) --------------------------------------------
+
+
+def test_build_prompt_includes_trends_when_present():
+    trend = (
+        "## [2026-06-29T15:00:00+00:00] R2 — reactive_agents_md_change\n\n"
+        "AGENTS.md was patched only after the failure surfaced — reactive pattern."
+    )
+    p = build_prompt(
+        _goal(), GoalStatus(), "", "", "",
+        discovery="## Current state\nbare API",
+        trends=trend,
+    )
+    assert "Trend signals (recent retrospective findings for this project)" in p
+    assert "reactive_agents_md_change" in p
+    # Ordering: after Discovery, before Checklist (rendered or not — we still
+    # check trends comes after the discovery section header).
+    assert p.index("Discovery brief") < p.index("Trend signals")
+
+
+def test_build_prompt_omits_trends_section_when_empty():
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", trends="")
+    assert "Trend signals" not in p
+
+
+def test_build_prompt_trends_renders_between_discovery_and_checklist():
+    cl = _cl(ChecklistItem(id="a", requirement="r", evidence_target="t"))
+    p = build_prompt(
+        _goal(), GoalStatus(), "", "", "",
+        discovery="state",
+        trends="## [t] R2 — recurrence\n\nbody",
+        checklist=cl,
+    )
+    # All three sections rendered in the expected order. ``Checklist (ready
+    # items)`` also appears in the loaded system prompt header — use rindex
+    # to pin the rendered SECTION header, not the system-prompt mention.
+    i_disc = p.index("Discovery brief")
+    i_trend = p.index("Trend signals")
+    i_check = p.rindex("Checklist (ready items)")
+    assert i_disc < i_trend < i_check
+
+
 # ---- checklist mode (Pillar 1) --------------------------------------------
 
 
