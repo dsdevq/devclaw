@@ -192,6 +192,14 @@ class ChecklistItem:
     #: ``legit_stub: `` marks the item as a deliberate not_yet_available
     #: stub rather than work-to-do.
     note: str = ""
+    #: the milestone (phase) this item rolls up to, matching one of the
+    #: heading strings under the spec's ``## Milestones`` section. Lets the
+    #: planner pick a coherent set of next items, the dashboard render
+    #: milestone-grouped progress, and the evaluator judge milestone-level
+    #: completion. ``None`` is valid — small checklists may omit milestones
+    #: entirely, and legacy decomposer output that pre-dated this field
+    #: still parses cleanly without it.
+    milestone: Optional[str] = None
 
 
 @dataclass(frozen=True)

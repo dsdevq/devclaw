@@ -111,6 +111,11 @@ def _parse_item(raw: object) -> ChecklistItem | None:
     if isinstance(evidence_raw, str) and evidence_raw.strip():
         evidence = evidence_raw.strip()
 
+    milestone_raw = raw.get("milestone")
+    milestone: str | None = None
+    if isinstance(milestone_raw, str) and milestone_raw.strip():
+        milestone = milestone_raw.strip()
+
     return ChecklistItem(
         id=id_,
         requirement=requirement,
@@ -122,6 +127,7 @@ def _parse_item(raw: object) -> ChecklistItem | None:
         effort_minutes=effort,
         model_tier=tier,
         note=str(raw.get("note", "")).strip(),
+        milestone=milestone,
     )
 
 
@@ -183,6 +189,7 @@ def validate_checklist(parsed: object) -> Checklist:
                 effort_minutes=item.effort_minutes,
                 model_tier=item.model_tier,
                 note=item.note,
+                milestone=item.milestone,
             )
         )
 
@@ -225,6 +232,8 @@ def dump_checklist(checklist: Checklist) -> str:
             d["model_tier"] = item.model_tier
         if item.note:
             d["note"] = item.note
+        if item.milestone:
+            d["milestone"] = item.milestone
         return d
 
     payload: dict[str, object] = {
@@ -278,6 +287,7 @@ def update_item(
                 effort_minutes=item.effort_minutes,
                 model_tier=item.model_tier,
                 note=item.note,
+                milestone=item.milestone,
             )
         )
     if not found:

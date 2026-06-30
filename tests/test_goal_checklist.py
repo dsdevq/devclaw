@@ -305,3 +305,82 @@ def test_update_item_preserves_other_items():
     cl2 = update_item(cl, "b", status="in_flight")
     assert cl2.items[0] == cl.items[0]
     assert cl2.items[1].status == "in_flight"
+
+
+# ---- milestone field --------------------------------------------------------
+# Added 2026-06-30 — decomposer's spec input carries an `## Milestones` section
+# but the checklist output flattened them away. milestone is now first-class.
+
+
+_WITH_MILESTONES = """\
+checklist:
+  - id: scaffold-backend
+    requirement: Scaffold the API project.
+    evidence_target: backend/Crm.Api.csproj
+    addresses_files: []
+    depends_on: []
+    status: not_started
+    evidence: null
+    milestone: "M1 — Skeleton"
+  - id: contacts-crud
+    requirement: Implement contacts CRUD endpoints.
+    evidence_target: backend/Controllers/ContactsController.cs
+    addresses_files: []
+    depends_on: [scaffold-backend]
+    status: not_started
+    evidence: null
+    milestone: "M2 — Contacts CRUD"
+open_questions: []
+notes: []
+"""
+
+
+def test_milestone_parses_when_present():
+    cl = parse_checklist(_WITH_MILESTONES)
+    assert cl.items[0].milestone == "M1 — Skeleton"
+    assert cl.items[1].milestone == "M2 — Contacts CRUD"
+
+
+def test_milestone_omitted_yields_none():
+    """Items WITHOUT a milestone: key parse cleanly with milestone=None.
+    Legacy decomposer output (pre-this-field) keeps working."""
+    cl = parse_checklist(_GOOD)
+    for item in cl.items:
+        assert item.milestone is None
+
+
+def test_milestone_non_string_dropped_to_none():
+    """Defensive: a numeric or null milestone value is ignored, not propagated."""
+    bad = _WITH_MILESTONES.replace('milestone: "M1 — Skeleton"', "milestone: 42")
+    cl = parse_checklist(bad)
+    assert cl.items[0].milestone is None
+
+
+def test_milestone_blank_string_dropped_to_none():
+    bad = _WITH_MILESTONES.replace('milestone: "M1 — Skeleton"', 'milestone: "   "')
+    cl = parse_checklist(bad)
+    assert cl.items[0].milestone is None
+
+
+def test_dump_round_trip_preserves_milestone():
+    cl = parse_checklist(_WITH_MILESTONES)
+    cl2 = parse_checklist(dump_checklist(cl))
+    assert cl == cl2
+
+
+def test_dump_omits_milestone_when_none():
+    cl = Checklist(items=[
+        ChecklistItem(id="a", requirement="r", evidence_target="t"),
+    ])
+    out = dump_checklist(cl)
+    assert "milestone" not in out
+
+
+def test_update_item_preserves_milestone():
+    """The settle hook flipping status/evidence must not blow away milestone."""
+    cl = _cl(
+        ChecklistItem(id="a", requirement="r", evidence_target="t",
+                      milestone="M1 — Skeleton"),
+    )
+    cl2 = update_item(cl, "a", status="done", evidence="src/A.cs:12")
+    assert cl2.items[0].milestone == "M1 — Skeleton"

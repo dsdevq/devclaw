@@ -109,25 +109,29 @@ def _hr(title: str) -> str:
 
 
 def _format_checklist(checklist) -> str:
-    """Render a Checklist for stdout — flat list with dependency edges.
-
-    The current ChecklistItem schema (devclaw/goal/models.py) has NO
-    ``milestone`` field; items are linked only by ``depends_on``. That's a
-    separate finding worth surfacing — the spec carries milestones, the
-    checklist drops them. Print flat for now.
-    """
+    """Render a Checklist for stdout — milestone-grouped (when milestones are
+    tagged), with each item's requirement + evidence target. Falls back to a
+    single ``(no milestone)`` bucket when items are flat."""
     if not checklist or not checklist.items:
         return "(empty checklist)"
-    lines = []
+
+    by_ms: dict[str, list] = {}
     for item in checklist.items:
-        tier = f" [{item.model_tier}]" if getattr(item, "model_tier", None) else ""
-        deps = f"  deps: {item.depends_on}" if item.depends_on else ""
-        effort = f"  ~{item.effort_minutes}m" if item.effort_minutes else ""
-        lines.append(f"  - {item.id}{tier}{effort}{deps}")
-        lines.append(f"      requirement: {item.requirement}")
-        lines.append(f"      evidence_target: {item.evidence_target}")
-        if item.note:
-            lines.append(f"      note: {item.note}")
+        ms = item.milestone or "(no milestone)"
+        by_ms.setdefault(ms, []).append(item)
+
+    lines = []
+    for ms, items in by_ms.items():
+        lines.append(f"\n  ## {ms}")
+        for item in items:
+            tier = f" [{item.model_tier}]" if getattr(item, "model_tier", None) else ""
+            deps = f"  deps: {item.depends_on}" if item.depends_on else ""
+            effort = f"  ~{item.effort_minutes}m" if item.effort_minutes else ""
+            lines.append(f"    - {item.id}{tier}{effort}{deps}")
+            lines.append(f"        requirement: {item.requirement}")
+            lines.append(f"        evidence_target: {item.evidence_target}")
+            if item.note:
+                lines.append(f"        note: {item.note}")
     if checklist.open_questions:
         lines.append("\n  OPEN QUESTIONS for the owner:")
         for q in checklist.open_questions:
@@ -341,6 +345,8 @@ async def _walk_chain(gaps: list[str]) -> None:
     print(f"\n  total items: {len(checklist.items)}")
     items_with_deps = sum(1 for i in checklist.items if i.depends_on)
     print(f"  items with depends_on edges: {items_with_deps} / {len(checklist.items)}")
+    milestones = {i.milestone for i in checklist.items if i.milestone}
+    print(f"  distinct milestones tagged: {len(milestones)}")
 
     # Structural sanity checks — programmable, no model judgment.
     if not checklist.items:
@@ -351,14 +357,12 @@ async def _walk_chain(gaps: list[str]) -> None:
             "MVP — looks under-decomposed. Expected at least a handful covering "
             "repo setup, backend, frontend, and tests."
         )
-    # ChecklistItem has NO milestone field today; the decomposer's input
-    # carries milestones (the spec's "Milestones" section), but the output
-    # schema flattens them away. Surface this as a separate gap — execution
-    # in coherent phases is harder when the data model has no concept of one.
-    gaps.append(
-        "ChecklistItem schema has no `milestone` field — the decomposer drops "
-        "spec-defined milestones into a flat item list linked only by "
-        "`depends_on`. Decide: add `milestone: Optional[str]` to ChecklistItem "
-        "+ schema + prompt, or accept that milestones are derivable from "
-        "depends_on roots and document that explicitly."
-    )
+    # The spec we fed in carries 4 milestones (M1–M4); we now expect the
+    # decomposer to tag items with them. If the milestone tagging didn't
+    # land, surface that — the schema accepts the field but the prompt may
+    # have been ignored.
+    if not milestones:
+        gaps.append(
+            "decomposer produced no milestone tags despite the spec listing "
+            "milestones — prompt instruction may need strengthening."
+        )

@@ -152,12 +152,22 @@ checklist:
     effort_minutes: <int, optional>
     model_tier: <haiku|sonnet|opus, optional>
     note: <optional one-liner of context>
+    milestone: <one of the spec's milestone headings, e.g. "M1 — Skeleton">
   - ...
 open_questions:
   - <question for the owner, only if needed; empty list ok>
 notes:
   - <free-form one-liner observation for the planner, only if needed>
 ```
+
+**Milestones.** When the spec (or discovery brief) lists milestones (an
+`## Milestones` section or numbered phases like "M1 / M2 / M3"), tag every
+item with the milestone it rolls up to via the `milestone:` field — copy the
+milestone's heading text verbatim (e.g. `milestone: "M1 — Skeleton"`). Tags
+let the planner pick a coherent set of next items, the dashboard render
+milestone-grouped progress, and the evaluator judge phase-by-phase
+completion. If the spec lists no milestones, omit the `milestone:` key on
+items rather than inventing one.
 
 The schema is a contract — extra top-level keys are dropped, missing
 required fields on an item make the item invalid. The shown schema block
