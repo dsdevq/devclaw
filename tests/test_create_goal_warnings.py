@@ -1,4 +1,6 @@
-"""Warn on bare verify_cmd at create_goal time."""
+"""Warn on bare verify_cmd at create_goal time. (Warnings now flow through
+the structured admission framework; rejection-class admission tests live in
+``test_goal_admission.py``.)"""
 
 from __future__ import annotations
 
@@ -7,6 +9,26 @@ import pytest
 from devclaw.goal.service import GoalConfig, GoalService
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
+
+#: Minimal admittable goal scaffolding. Every test in this file is exercising
+#: WARNING behavior (bare verify_cmd), so we hand each create_goal call a
+#: done_when that's substantive enough to pass admission and a backlog so the
+#: from-scratch anchor check passes too. Adjust here, not per-test, when
+#: admission requirements widen.
+_OK_DONE_WHEN = "the test command exits 0 and at least one assertion runs."
+_OK_BACKLOG = ["scaffold project", "wire the verify_cmd"]
+
+
+def _ok(svc, goal_id: str, **overrides):
+    """Create a minimally-admittable goal, applying caller overrides."""
+    kw = dict(
+        objective="ship it",
+        workspace_dir="/ws",
+        done_when=_OK_DONE_WHEN,
+        backlog=_OK_BACKLOG,
+    )
+    kw.update(overrides)
+    return svc.create_goal(goal_id, **kw)
 
 
 @pytest.fixture()
@@ -26,10 +48,7 @@ def svc(tmp_path):
 
 
 def test_bare_tool_name_returns_warning(svc):
-    result = svc.create_goal(
-        "g-bare", objective="ship it", workspace_dir="/ws",
-        verify_cmd="pytest",
-    )
+    result = _ok(svc, "g-bare", verify_cmd="pytest")
     assert "warnings" in result
     assert len(result["warnings"]) == 1
     w = result["warnings"][0]
@@ -38,42 +57,28 @@ def test_bare_tool_name_returns_warning(svc):
 
 
 def test_python_m_pytest_returns_no_warning(svc):
-    result = svc.create_goal(
-        "g-ok", objective="ship it too", workspace_dir="/ws",
-        verify_cmd="python -m pytest",
-    )
+    result = _ok(svc, "g-ok", verify_cmd="python -m pytest")
     assert result.get("warnings", []) == []
 
 
 def test_no_verify_cmd_returns_no_warning(svc):
-    result = svc.create_goal(
-        "g-none", objective="no gate", workspace_dir="/ws",
-    )
+    result = _ok(svc, "g-none")
     assert result.get("warnings", []) == []
 
 
 def test_full_path_cmd_returns_no_warning(svc):
-    result = svc.create_goal(
-        "g-full", objective="full path", workspace_dir="/ws",
-        verify_cmd="/usr/bin/pytest",
-    )
+    result = _ok(svc, "g-full", verify_cmd="/usr/bin/pytest")
     assert result.get("warnings", []) == []
 
 
 def test_dotnet_test_returns_no_warning(svc):
-    result = svc.create_goal(
-        "g-dotnet", objective="dotnet test", workspace_dir="/ws",
-        verify_cmd="dotnet test",
-    )
+    result = _ok(svc, "g-dotnet", verify_cmd="dotnet test")
     assert result.get("warnings", []) == []
 
 
 @pytest.mark.parametrize("cmd", ["pytest", "python", "node", "npm"])
 def test_common_bare_tools_all_warn(svc, cmd):
-    result = svc.create_goal(
-        f"g-{cmd}", objective=f"run {cmd}", workspace_dir="/ws",
-        verify_cmd=cmd,
-    )
+    result = _ok(svc, f"g-{cmd}", verify_cmd=cmd)
     assert "warnings" in result, f"expected warning for verify_cmd={cmd!r}"
     assert cmd in result["warnings"][0]
 
@@ -83,11 +88,12 @@ def test_spec_param_is_persisted(svc):
     passes the finalized spec via create_goal — the service persists it so the
     evaluator can judge done against the shared contract."""
     spec_text = "# my-app — spec\n## Goal\nA tiny CLI.\n## Scope\nin: foo\nout: bar"
+    # spec alone is enough to admit (no done_when needed; spec carries it).
     svc.create_goal("g-spec", objective="ship cli", workspace_dir="/ws", spec=spec_text)
     persisted = svc._goal_store.read_spec("g-spec")
     assert "Goal" in persisted and "A tiny CLI." in persisted
 
 
 def test_no_spec_param_writes_nothing(svc):
-    svc.create_goal("g-nospec", objective="ship cli", workspace_dir="/ws")
+    _ok(svc, "g-nospec")
     assert svc._goal_store.read_spec("g-nospec") == ""

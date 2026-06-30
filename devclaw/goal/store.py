@@ -73,6 +73,7 @@ class GoalStore:
         done_when: str = "",
         backlog: list[str] | None = None,
         stub_acceptable: list[str] | None = None,
+        skills_required: list[str] | None = None,
     ) -> Goal:
         """Write a new goal.yaml. Raises FileExistsError if the id is taken."""
         if self.exists(goal_id):
@@ -92,6 +93,7 @@ class GoalStore:
                     "done_when": done_when.strip(),
                     "backlog": list(backlog or []),
                     "stub_acceptable": list(stub_acceptable or []),
+                    "skills_required": list(skills_required or []),
                 },
                 sort_keys=False,
             )
@@ -112,6 +114,7 @@ class GoalStore:
             done_when=str(raw.get("done_when", "")).strip(),
             backlog=[str(x).strip() for x in (raw.get("backlog") or [])],
             stub_acceptable=[str(x).strip() for x in (raw.get("stub_acceptable") or []) if str(x).strip()],
+            skills_required=[str(x).strip() for x in (raw.get("skills_required") or []) if str(x).strip()],
         )
 
     # ---- status (state) ----------------------------------------------------

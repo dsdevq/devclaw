@@ -152,6 +152,7 @@ checklist:
     effort_minutes: <int, optional>
     model_tier: <haiku|sonnet|opus, optional>
     note: <optional one-liner of context>
+    milestone: <one of the spec's milestone headings, e.g. "M1 — Skeleton">
   - ...
 open_questions:
   - <question for the owner, only if needed; empty list ok>
@@ -159,7 +160,42 @@ notes:
   - <free-form one-liner observation for the planner, only if needed>
 ```
 
+**Milestones.** When the spec (or discovery brief) lists milestones (an
+`## Milestones` section or numbered phases like "M1 / M2 / M3"), tag every
+item with the milestone it rolls up to via the `milestone:` field — copy the
+milestone's heading text verbatim (e.g. `milestone: "M1 — Skeleton"`). Tags
+let the planner pick a coherent set of next items, the dashboard render
+milestone-grouped progress, and the evaluator judge phase-by-phase
+completion. If the spec lists no milestones, omit the `milestone:` key on
+items rather than inventing one.
+
 The schema is a contract — extra top-level keys are dropped, missing
 required fields on an item make the item invalid. The shown schema block
 above is for your reference; in your output, write the actual YAML
 starting at `checklist:` with no fences.
+
+**YAML quoting — important.** `requirement`, `evidence_target`, and `note`
+routinely cite code symbols whose values contain characters YAML treats as
+syntax: `:` (C# / TypeScript class inheritance, namespace qualifiers,
+property syntax), `[`, `]`, `{{`, `}}`, `#`, leading `>` / `|`. When a value
+contains ANY of those characters, you MUST either:
+
+- wrap the value in **double quotes**, escaping any embedded `"` as `\"`, or
+- use a `|` **block scalar** on the next line, indented two spaces.
+
+Examples (do this):
+
+```
+requirement: "Define CrmDbContext : DbContext with DbSet<Contact> Contacts."
+evidence_target: "backend/Data/CrmDbContext.cs:8 — class CrmDbContext : DbContext"
+note: |
+  Single-project layout; Program.cs uses AddDbContext<CrmDbContext>().
+```
+
+NOT this (silently breaks the parser at the second colon):
+
+```
+requirement: Define CrmDbContext : DbContext with DbSet<Contact> Contacts.
+```
+
+If you are unsure whether a value needs quoting, quote it.

@@ -50,7 +50,7 @@ from ..engine.workspace import WorkspaceError, prepare_workspace
 #: ``"goal/<id>"`` branch is passed when checklist mode wants every item to
 #: stack on the same branch instead of forking off main. Injected so tests
 #: pass a no-op.
-WorkspacePrep = Callable[[str, "str | None", "str | None"], Awaitable[str]]
+WorkspacePrep = Callable[[str, "str | None", "str | None", "list[str] | None"], Awaitable[str]]
 
 #: deliveries between periodic direction evaluations (0 → only at the done-gate)
 EVAL_EVERY = int(os.environ.get("DEVCLAW_GOAL_EVAL_EVERY", "3"))
@@ -669,7 +669,7 @@ async def _open_done_gate(
         # (otherwise it judges done_when against an empty diff).
         done_gate_branch = f"goal/{goal_id}" if store.read_checklist(goal_id) else None
         try:
-            await prepare_ws(goal.workspace_dir, goal.repo_url, done_gate_branch)
+            await prepare_ws(goal.workspace_dir, goal.repo_url, done_gate_branch, goal.skills_required)
         except WorkspaceError as exc:
             store.append_log(goal_id, f"done-gate workspace prep failed: {exc}")
             store.save_status(goal_id, replace(base, phase="idle", next="retry done-gate"))
@@ -714,7 +714,7 @@ async def _open_investigation(
     the workspace it couldn't build is the same one executing needs, so deferring
     just hides the error one tick longer. Block on it instead (legibly)."""
     try:
-        await prepare_ws(goal.workspace_dir, goal.repo_url)
+        await prepare_ws(goal.workspace_dir, goal.repo_url, None, goal.skills_required)
     except WorkspaceError as exc:
         return await _block_on_prep_failure(
             goal_id, status, exc, store=store, notifier=notifier, summarize=summarize,
@@ -927,7 +927,7 @@ async def _dispatch_action(
     if action.tool != "review_repository" and store.read_checklist(goal_id):
         branch_for_dispatch = f"goal/{goal_id}"
     try:
-        await prepare_ws(goal.workspace_dir, goal.repo_url, branch_for_dispatch)
+        await prepare_ws(goal.workspace_dir, goal.repo_url, branch_for_dispatch, goal.skills_required)
     except WorkspaceError as exc:
         return await _block_on_prep_failure(
             goal_id, base, exc, store=store, notifier=notifier, summarize=summarize,

@@ -513,6 +513,7 @@ async def create_goal(
     verify_cmd: Optional[str] = None,
     open_pr: bool = True,
     spec: str = "",
+    skills_required: Optional[list[str]] = None,
 ) -> str:
     """Register a DURABLE goal that DevClaw drives over time. Unlike start_program
     (a one-shot DAG that runs to completion), a goal persists: on each heartbeat
@@ -528,20 +529,64 @@ async def create_goal(
     spec: optional pre-aligned scope contract — when the OpenClaw waiter has
     grilled the customer (via scope_grill) before filing the order, pass the
     finalized spec.md here and the evaluator judges done against it."""
-    if not goal_id or not objective or not workspace_dir:
-        raise ToolError("create_goal requires goal_id, objective, workspace_dir")
+    if not goal_id:
+        raise ToolError("create_goal requires goal_id")
+    # objective + workspace_dir are checked inside admission and surfaced as
+    # structured conditions — don't duplicate them here.
+    from ..goal.admission import GoalAdmissionRejected
+
     try:
         return json.dumps(
             goals.create_goal(
                 goal_id, objective=objective, workspace_dir=workspace_dir,
                 done_when=done_when, backlog=backlog, cadence=cadence,
                 repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
-                spec=spec,
+                spec=spec, skills_required=skills_required,
             ),
             indent=2,
         )
     except FileExistsError:
         raise ToolError(f"goal {goal_id!r} already exists")
+    except GoalAdmissionRejected as exc:
+        # Structured rejection: surface the full condition list so the waiter
+        # can render fixable items to the customer and route on the codes.
+        raise ToolError(json.dumps(exc.result.to_dict(), indent=2))
+
+
+@mcp.tool
+async def verify_goal(
+    objective: str,
+    workspace_dir: str,
+    done_when: str = "",
+    backlog: Optional[list[str]] = None,
+    repo_url: Optional[str] = None,
+    verify_cmd: Optional[str] = None,
+    spec: str = "",
+    skills_required: Optional[list[str]] = None,
+) -> str:
+    """Pre-flight check for a goal BEFORE you call create_goal. Runs the same
+    structural validations the chef applies at goal-creation time and returns
+    a list of conditions (severity ``reject`` or ``warn``) with machine-readable
+    codes the waiter can route on.
+
+    Use this to preview rejections so the customer sees fixable conditions
+    before they think the order was filed. ``admitted: false`` means
+    create_goal would reject; ``admitted: true`` with warnings means
+    create_goal would accept but flag.
+
+    Response shape:
+      {"admitted": bool,
+       "conditions": [{"code": "...", "severity": "reject"|"warn",
+                       "message": "...", "field": "..."}, ...]}
+    """
+    return json.dumps(
+        goals.verify_goal(
+            objective=objective, workspace_dir=workspace_dir, done_when=done_when,
+            backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
+            skills_required=skills_required,
+        ),
+        indent=2,
+    )
 
 
 @mcp.tool

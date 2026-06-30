@@ -65,6 +65,13 @@ class Goal:
     #: unless one of these names appears in the clause/evidence text. Empty
     #: list (the default) means "no stubs allowed — plan real work."
     stub_acceptable: list[str] = field(default_factory=list)
+    #: slugs of skills from the host's skill library (``devclaw.skill_library``)
+    #: that should be provisioned into ``<workspace>/.agent/skills/`` before the
+    #: executor runs against this goal. Per-project tech-stack briefings the
+    #: agent loads on each task. Empty list (default) = no extras beyond the
+    #: universal devclaw skill bundle + any repo-committed ``.agent/skills/``
+    #: contents. Admission validates each slug exists in the library.
+    skills_required: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -192,6 +199,14 @@ class ChecklistItem:
     #: ``legit_stub: `` marks the item as a deliberate not_yet_available
     #: stub rather than work-to-do.
     note: str = ""
+    #: the milestone (phase) this item rolls up to, matching one of the
+    #: heading strings under the spec's ``## Milestones`` section. Lets the
+    #: planner pick a coherent set of next items, the dashboard render
+    #: milestone-grouped progress, and the evaluator judge milestone-level
+    #: completion. ``None`` is valid — small checklists may omit milestones
+    #: entirely, and legacy decomposer output that pre-dated this field
+    #: still parses cleanly without it.
+    milestone: Optional[str] = None
 
 
 @dataclass(frozen=True)
