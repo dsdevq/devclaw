@@ -493,6 +493,176 @@ async def scope_grill(
     return json.dumps(step, indent=2)
 
 
+# ===== dry cognition (test the rail without filing a goal) ===================
+# The customer wants to *think about* a project — grill it, see the world-research
+# brief, see the decomposition, see how the evaluator would grade the finished
+# thing — WITHOUT committing to workspace_dir / repo_url / a persisted goal. These
+# tools expose the exact cognition modules the chef runs during a real goal's
+# lifecycle, but each one is one-shot and pure: it constructs a throwaway in-memory
+# ``Goal``, runs the module's ``default_caller`` (same model tier as production),
+# and returns the artifact. Zero writes to /var/lib/devclaw/goals/. Zero admission.
+
+
+def _dry_goal(
+    *,
+    objective: str,
+    done_when: str = "",
+    backlog: Optional[list[str]] = None,
+    stub_acceptable: Optional[list[str]] = None,
+):
+    """Build a throwaway :class:`Goal` for the dry-cognition tools. Persistence
+    fields (``workspace_dir``, ``repo_url``, ``verify_cmd``) get harmless
+    placeholders — the dry tools NEVER touch disk or clone, and the cognition
+    modules only read the fields the prompts actually reference."""
+    from ..goal.models import Goal
+
+    return Goal(
+        id="dry-run",
+        objective=objective,
+        cadence="1d",
+        engine="devclaw",
+        workspace_dir="/dev/null",
+        repo_url=None,
+        verify_cmd=None,
+        open_pr=False,
+        done_when=done_when,
+        backlog=backlog or [],
+        stub_acceptable=stub_acceptable or [],
+        skills_required=[],
+    )
+
+
+@mcp.tool
+async def dry_world_research(
+    objective: str,
+    spec: str = "",
+    done_when: str = "",
+) -> str:
+    """PURE COGNITION — no goal filed, no workspace, no side effects.
+
+    Runs the world-research brief the chef fires at investigation-open time for a
+    from-scratch goal (the same module used when ``repo_url`` is absent). Returns
+    the ``## Real-world exemplars`` / ``## What good MVP looks like`` / ``##
+    Deliberately defer`` brief as markdown. Use this to test the harness's read
+    of "build me X" ideas without filing a real goal — no workspace or repo URL
+    required.
+
+    Inputs:
+      objective: the durable aim (e.g., "build a CRM for SMB sales teams").
+      spec: optional aligned spec markdown (e.g., what ``scope_grill`` returned).
+      done_when: optional completion contract if you have one.
+    """
+    if not objective or not objective.strip():
+        raise ToolError("dry_world_research requires a non-empty objective")
+    from ..goal import world_research as _world
+
+    goal = _dry_goal(objective=objective, done_when=done_when)
+    try:
+        return await _world.world_brief(goal, spec, caller=_world.default_caller())
+    except Exception as err:  # noqa: BLE001
+        raise ToolError(f"dry_world_research failed: {err}")
+
+
+@mcp.tool
+async def dry_decompose(
+    objective: str,
+    spec: str = "",
+    done_when: str = "",
+    backlog: Optional[list[str]] = None,
+    discovery_brief: str = "",
+    repo_digest: str = "",
+    stub_acceptable: Optional[list[str]] = None,
+) -> str:
+    """PURE COGNITION — no goal filed, no workspace, no side effects.
+
+    Runs the goal decomposer against an in-memory objective and returns the
+    CHECKLIST YAML it would persist to ``checklist.yaml``. Use this to test how
+    the harness would break a goal into milestones + atomic items with
+    per-item ``evidence_target``/``depends_on`` — without filing a real goal.
+
+    Inputs:
+      objective / done_when / backlog / stub_acceptable — the goal facts the
+        prompt reads verbatim.
+      discovery_brief: optional prior pass (e.g., dry_world_research output) so
+        the decomposer plans against a real-world MVP shape.
+      repo_digest: optional curated repo excerpt — passing one exercises the
+        existing-repo decomposition path; leaving it empty exercises the
+        from-scratch path.
+    """
+    if not objective or not objective.strip():
+        raise ToolError("dry_decompose requires a non-empty objective")
+    from ..goal import decomposer as _decomp
+    from ..goal.checklist import dump_checklist
+
+    goal = _dry_goal(
+        objective=objective, done_when=done_when, backlog=backlog,
+        stub_acceptable=stub_acceptable,
+    )
+    try:
+        checklist = await _decomp.decompose(
+            goal,
+            claude_caller=_decomp.default_caller(),
+            discovery_brief=discovery_brief,
+            repo_digest=repo_digest,
+        )
+    except Exception as err:  # noqa: BLE001
+        raise ToolError(f"dry_decompose failed: {err}")
+    return dump_checklist(checklist)
+
+
+@mcp.tool
+async def dry_evaluate(
+    objective: str,
+    done_when: str,
+    review_report: str,
+    spec: str = "",
+    backlog: Optional[list[str]] = None,
+    stub_acceptable: Optional[list[str]] = None,
+    deliveries: str = "",
+    recent_log: str = "",
+    at_done_gate: bool = True,
+) -> str:
+    """PURE COGNITION — no goal filed, no workspace, no side effects.
+
+    Runs the direction evaluator (the cognition that grades a goal at the
+    done-gate) against hypothetical inputs and returns the JSON verdict:
+    ``{verdict, rationale, corrections, question, clauses}``. Use this to
+    sanity-check the harness's judgement on "here's what shipped vs. what was
+    asked" — including whether it would refuse stub-disguise on a specific
+    review — without touching a real goal.
+
+    Defaults to ``at_done_gate=True`` (strict per-clause grading, the mode the
+    real done-gate runs). Pass a ``review_report`` shaped like a
+    ``review_repository`` task's output (``## Per-clause evidence`` +
+    ``## Structural health`` sections) to exercise the full done-gate path.
+    """
+    if not objective or not objective.strip():
+        raise ToolError("dry_evaluate requires a non-empty objective")
+    if not done_when or not done_when.strip():
+        raise ToolError("dry_evaluate requires done_when (the completion contract)")
+    from dataclasses import asdict
+
+    from ..goal import evaluator as _eval
+    from ..goal.models import GoalStatus
+
+    goal = _dry_goal(
+        objective=objective, done_when=done_when, backlog=backlog,
+        stub_acceptable=stub_acceptable,
+    )
+    status = GoalStatus(phase="done" if at_done_gate else "in_flight")
+    try:
+        result = await _eval.evaluate(
+            goal, status, recent_log, deliveries,
+            claude_caller=_eval.default_caller(),
+            review_report=review_report or None,
+            at_done_gate=at_done_gate,
+            spec=spec,
+        )
+    except Exception as err:  # noqa: BLE001
+        raise ToolError(f"dry_evaluate failed: {err}")
+    return json.dumps(asdict(result), indent=2)
+
+
 # ===== goal layer (durable, steerable, evaluated goals) ======================
 # The folded-in goalclaw. A `program` is a bounded, one-shot DAG; a `goal` is an
 # open-ended standing intent that DevClaw drives across many heartbeats —
