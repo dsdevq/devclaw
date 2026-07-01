@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import Path
 from typing import Awaitable, Callable, Tuple, Union
 
 from . import checklist as _checklist
@@ -599,12 +600,37 @@ async def _run_mid_flight_eval(
     return None
 
 
+def _project_owns_its_deploy(workspace_dir: str) -> bool:
+    """The target project owns its deploy when its repo contains a ``Dockerfile``
+    at the workspace root. In that case devclaw MUST NOT spin its own throwaway
+    ``devclaw-deploy-<goal_id>`` container — the project's own CI (built by
+    ``setup_cicd``) is the single source of deploy truth, and one goal-branch
+    merge triggers one deploy from the project's singleton container. Devclaw's
+    old container-per-goal shape is the wrong ownership boundary; the
+    Dockerfile-presence check is the migration seam."""
+    try:
+        return (Path(workspace_dir) / "Dockerfile").exists()
+    except Exception:  # noqa: BLE001 — workspace missing = fall through to the old behavior
+        return False
+
+
 async def _auto_deploy(goal_id: str, goal: Goal, store: GoalStore) -> str:
     """Deploy the built app to a durable Tailscale URL on goal completion and return
     a short suffix to append to the completion notice (the live URL, or empty). Fully
     best-effort: any failure is logged and swallowed — a verified-complete goal must
-    never be reopened because hosting wobbled. Off via DEVCLAW_GOAL_AUTODEPLOY=0."""
+    never be reopened because hosting wobbled. Off via DEVCLAW_GOAL_AUTODEPLOY=0.
+
+    Skipped when the target project owns its own deploy (see
+    :func:`_project_owns_its_deploy`) — devclaw does not run a per-goal container
+    for a project that already has a Dockerfile + CI deploy job of its own.
+    """
     if os.environ.get("DEVCLAW_GOAL_AUTODEPLOY", "1") == "0":
+        return ""
+    if _project_owns_its_deploy(goal.workspace_dir):
+        store.append_log(
+            goal_id,
+            "auto-deploy skipped: project owns its deploy (Dockerfile present in workspace)",
+        )
         return ""
     try:
         out = await _deploy.deploy_project(goal.workspace_dir, goal_id)
