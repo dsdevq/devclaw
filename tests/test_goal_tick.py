@@ -595,9 +595,12 @@ def _delivery_status():
 
 @pytest.mark.asyncio
 async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
-    """A delivered change whose verify gate passed is merged by devclaw, with a
-    plain owner ping — when DEVCLAW_GOAL_AUTOMERGE is on."""
+    """A delivered change whose verify gate passed is merged by devclaw and a
+    TASK-altitude ping is emitted — when DEVCLAW_GOAL_AUTOMERGE is on.
+    The ping is TASK-altitude (not OWNER) so per-PR merges don't spam the owner
+    on a goal that lands many PRs; drop the floor so this test can observe it."""
     monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setenv("DEVCLAW_NOTIFY_ALTITUDE", "task")
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", _delivery_status())
@@ -1028,6 +1031,9 @@ async def test_planner_session_limit_is_caught_not_escaped(tmp_path):
 @pytest.mark.asyncio
 async def test_ship_notification_is_concise_not_the_full_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
+    # shipped+merged is TASK-altitude (per-PR chatter, not owner-altitude) — drop
+    # the floor so this test can observe it.
+    monkeypatch.setenv("DEVCLAW_NOTIFY_ALTITUDE", "task")
     # The notification must not paste the action's full instruction prompt (which
     # is what happened when the plain-language summarizer was quota-blocked and
     # fell back to raw text). With summary_caller=None the raw text is sent — and
@@ -1051,6 +1057,31 @@ async def test_ship_notification_is_concise_not_the_full_prompt(tmp_path, monkey
     assert ship, "expected a shipped+merged notification"
     assert "SECRET_DETAIL_LINE" not in ship[0]      # not the full prompt
     assert len(ship[0]) < 160                        # terse
+
+
+@pytest.mark.asyncio
+async def test_ship_notification_is_suppressed_at_owner_altitude(tmp_path, monkeypatch):
+    """Per-PR shipped+merged is TASK-altitude, so at the default OWNER floor it
+    must not reach the owner (otherwise a goal that lands 10 PRs in an afternoon
+    fires 10 owner-altitude "✅ complete" pings — the dogfood incident that
+    demoted this notification)."""
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
+    monkeypatch.setenv("DEVCLAW_NOTIFY_ALTITUDE", "owner")  # the default; explicit for the test
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "short goal"),
+    ))
+    notifier = RecordingNotifier()
+
+    await _tick(store, "g", FakeClaude(ACT_FEATURE), FakeClaude(), FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="done",
+        pr_url="https://github.com/o/r/pull/2", gate_passed=True,
+    )), notifier, merger=RecordingMerger())
+
+    assert not [m for m in notifier.sent if "shipped + merged" in m], \
+        "shipped+merged must not reach owner altitude"
 
 
 # ---- done-gate review brief — the two-axis structural fix -------------------

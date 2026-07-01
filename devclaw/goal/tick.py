@@ -1240,7 +1240,7 @@ async def _resolve_polling_action(
         if await ctx.merger(poll.pr_url):
             ctx.store.append_log(goal_id, f"auto-merged {poll.pr_url}")
             await _notify(
-                ctx.notifier, NotifyLevel.OWNER,
+                ctx.notifier, NotifyLevel.TASK,
                 f"✅ [{goal_id}] shipped + merged — {_action_label(ref)} ({poll.pr_url})",
                 summarize=ctx.summary_caller,
             )
