@@ -1,0 +1,52 @@
+{
+  "name": "off_track_missing_clause",
+  "module": "evaluator",
+  "source": "reconstructed",
+  "notes": "Three of four done_when clauses are satisfied by real evidence; one clause (the frontend rendering) is missing — the review report calls it out explicitly. A well-behaved evaluator returns `off_track` with a specific correction naming the missing clause. Even if the model MIS-labels the verdict as `achieved`, `validate()` MUST downgrade it because the unsatisfied clause has evidence proving the gap.",
+  "inputs": {
+    "goal": {
+      "id": "todo-fullstack-demo",
+      "objective": "Add optional due-date support to the todo app: model field, API surface, frontend rendering, and an overdue filter.",
+      "done_when": "Todos have an optional due_date (ISO date). POST/PUT/PATCH endpoints accept it. The list endpoint supports ?overdue=true. Frontend shows the due date on each todo and has an 'overdue only' toggle. Tests cover model, API, and the filter.",
+      "backlog": [
+        "add nullable due_date column + Alembic migration",
+        "extend TodoCreate/TodoUpdate schemas and API validation",
+        "wire the ?overdue=true filter with a UTC comparison",
+        "render due_date in the todo list; add an overdue toggle"
+      ],
+      "stub_acceptable": [],
+      "cadence": "2h",
+      "workspace_dir": "/repos/todo-fullstack-demo"
+    },
+    "status": {
+      "phase": "verifying",
+      "lifecycle": "executing",
+      "next": "run the done-gate review and evaluate",
+      "actions_dispatched": 3,
+      "deliveries_since_eval": 2
+    },
+    "recent_log": "PR #9 merged — model + migration + API validation. PR #10 merged — overdue filter with UTC comparison + tests. Frontend PR proposed but never opened (the agent believed the goal was done after backend work).",
+    "deliveries": "Two PRs merged into main:\n- #9 backend/models.py + backend/schemas.py + migrations/2026_06_28_add_due_date.py\n- #10 backend/main.py list-endpoint filter + tests/test_overdue_filter.py",
+    "review_report": "## Per-clause evidence\n- clause: `Todos have an optional due_date (ISO date)` — satisfied. backend/models.py:14 declares `due_date = Column(Date, nullable=True)`; migration adds the column NULLABLE.\n- clause: `POST/PUT/PATCH endpoints accept it` — satisfied. backend/schemas.py TodoCreate + TodoUpdate carry `due_date: Optional[date] = None`; tests/test_api.py::test_create_with_due_date passes.\n- clause: `The list endpoint supports ?overdue=true` — satisfied. backend/main.py:list_todos filters `Todo.due_date < today` when `overdue=true`; tests/test_overdue_filter.py covers past / future / null cases.\n- clause: `Frontend shows the due date on each todo and has an 'overdue only' toggle` — UNSATISFIED. frontend/src/TodoItem.tsx does NOT reference due_date; grep -rn 'due_date' frontend/ returns 0 hits; no overdue toggle exists in TodoList.tsx. The frontend PR was never opened.\n- clause: `Tests cover model, API, and the filter` — partially satisfied. Backend tests are in place (tests/test_api.py + tests/test_overdue_filter.py) but no frontend tests were added because there is no frontend rendering to test.\n\n## Structural health\nverdict: concerns. Backend changes are clean; frontend clause is entirely unaddressed — the shipped goal is functionally incomplete.\n\n## Risks not in done_when\nnone material.",
+    "at_done_gate": true,
+    "spec": ""
+  },
+  "expected": {
+    "verdict": "off_track",
+    "must_contain_rationale_hints": ["frontend", "due_date"],
+    "must_contain_correction_hints": ["frontend", "TodoItem", "toggle"],
+    "notes": "One clause (frontend rendering + toggle) is explicitly unsatisfied with cited evidence. Correct verdict is `off_track` with a correction naming what to add. If the model mislabels this `achieved`, `validate()`'s at-done-gate strictness must downgrade because the clauses array shows an unsatisfied entry with evidence."
+  },
+  "canned_model_output": {
+    "verdict": "achieved",
+    "rationale": "Backend fully implemented and green; frontend clause is missing but the model incorrectly stamped achieved anyway. This test proves validate() catches the model's mistake.",
+    "corrections": [],
+    "clauses": [
+      {"clause": "Todos have an optional due_date (ISO date)", "satisfied": true, "evidence": "backend/models.py:14 declares due_date as a nullable Date column."},
+      {"clause": "POST/PUT/PATCH endpoints accept it", "satisfied": true, "evidence": "backend/schemas.py TodoCreate + TodoUpdate carry due_date."},
+      {"clause": "The list endpoint supports ?overdue=true", "satisfied": true, "evidence": "backend/main.py:list_todos filters by due_date; tests pass."},
+      {"clause": "Frontend shows the due date on each todo and has an 'overdue only' toggle", "satisfied": false, "evidence": "grep -rn due_date frontend/ returns 0 hits; TodoItem.tsx has no due_date rendering; no overdue toggle in TodoList.tsx."},
+      {"clause": "Tests cover model, API, and the filter", "satisfied": true, "evidence": "tests/test_api.py + tests/test_overdue_filter.py green."}
+    ]
+  }
+}

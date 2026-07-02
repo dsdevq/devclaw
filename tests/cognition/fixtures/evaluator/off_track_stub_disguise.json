@@ -1,0 +1,49 @@
+{
+  "name": "off_track_stub_disguise",
+  "module": "evaluator",
+  "source": "reconstructed",
+  "notes": "Mirrors the closeloop 2026-06-25 'stub everything' failure mode: a clause is claimed satisfied but the cited evidence is a `not_yet_available` stub whose tool is NOT in stub_acceptable. The mechanical stub-policy check in validate() must flip the clause to unsatisfied and downgrade the verdict to `off_track` with a specific correction (implement the real capability OR add the tool name to stub_acceptable). A closeloop-family incident this fixture exists to guard against regressing.",
+  "inputs": {
+    "goal": {
+      "id": "closeloop-crm-core",
+      "objective": "Ship the first slice of the CRM: real MCP tools for cashflow reporting, contact lookup, and deal-stage transitions.",
+      "done_when": "MCP tools get_cashflow_report, get_contact, and update_deal_stage are wired to the real database and return live data. Every tool has an integration test that touches the database. Nothing is stubbed.",
+      "backlog": [
+        "implement get_cashflow_report against the transactions table",
+        "implement get_contact against the contacts table",
+        "implement update_deal_stage with a state-transition check"
+      ],
+      "stub_acceptable": [],
+      "cadence": "2h",
+      "workspace_dir": "/repos/closeloop"
+    },
+    "status": {
+      "phase": "verifying",
+      "lifecycle": "executing",
+      "next": "run the done-gate review and evaluate",
+      "actions_dispatched": 3,
+      "deliveries_since_eval": 3
+    },
+    "recent_log": "Three PRs merged: two real implementations (get_contact, update_deal_stage) plus one PR that ships a not_yet_available stub for get_cashflow_report. The agent argued cashflow is 'blocked on schema decision' and shipped the stub as terminal.",
+    "deliveries": "Three PRs:\n- #21 mcp/get_contact.py — real implementation, joined to contacts + phones\n- #22 mcp/update_deal_stage.py — real implementation with a state-transition guard\n- #23 mcp/get_cashflow_report.py — returns {\"status\": \"not_yet_available\", \"reason\": \"schema pending\"}",
+    "review_report": "## Per-clause evidence\n- clause: `MCP tools get_cashflow_report, get_contact, and update_deal_stage are wired to the real database and return live data` — partially satisfied. get_contact + update_deal_stage query real tables. get_cashflow_report returns a `not_yet_available` payload — mcp/get_cashflow_report.py:8 returns `{\"status\": \"not_yet_available\", \"reason\": \"schema pending\"}` with no query.\n- clause: `Every tool has an integration test that touches the database` — partially satisfied. Contact + deal-stage tests hit the database; the cashflow test only asserts the stub payload shape (tests/test_cashflow.py::test_returns_not_yet_available).\n- clause: `Nothing is stubbed` — UNSATISFIED. get_cashflow_report is an explicit `not_yet_available` stub and stub_acceptable is empty.\n\n## Structural health\nverdict: concerns. Real code for two of three tools is clean; the cashflow stub violates the goal's explicit no-stub rule.\n\n## Risks not in done_when\nnone material.",
+    "at_done_gate": true,
+    "spec": ""
+  },
+  "expected": {
+    "verdict": "off_track",
+    "must_contain_rationale_hints": ["stub", "cashflow"],
+    "must_contain_correction_hints": ["get_cashflow_report", "stub_acceptable"],
+    "notes": "The clause about cashflow is claimed satisfied but backed by a `not_yet_available` stub while stub_acceptable is empty. Correct verdict is `off_track` with a correction telling the agent to implement the real capability OR add `get_cashflow_report` to `stub_acceptable`. Even if the model returns `achieved`, validate()'s stub-policy check must flip the clause + downgrade."
+  },
+  "canned_model_output": {
+    "verdict": "achieved",
+    "rationale": "Two tools implemented; the cashflow tool ships a stub which the agent believes is acceptable for now.",
+    "corrections": [],
+    "clauses": [
+      {"clause": "MCP tools get_cashflow_report, get_contact, and update_deal_stage are wired to the real database and return live data", "satisfied": true, "evidence": "mcp/get_contact.py joins contacts+phones; mcp/update_deal_stage.py enforces transition; mcp/get_cashflow_report.py returns not_yet_available payload."},
+      {"clause": "Every tool has an integration test that touches the database", "satisfied": true, "evidence": "tests/test_contact.py + tests/test_deal_stage.py hit the DB; tests/test_cashflow.py asserts stub payload."},
+      {"clause": "Nothing is stubbed", "satisfied": true, "evidence": "Two tools are real; cashflow ships a not_yet_available stub which is documented in the code."}
+    ]
+  }
+}

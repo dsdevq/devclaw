@@ -1,0 +1,52 @@
+{
+  "name": "achieved_clean",
+  "module": "evaluator",
+  "source": "reconstructed",
+  "notes": "Happy-path done-gate: every done_when clause has real, specific evidence in the review report; expects `achieved`. This is the shape the evaluator should almost trivially green-light.",
+  "inputs": {
+    "goal": {
+      "id": "todo-fullstack-demo",
+      "objective": "Add optional due-date support to the todo app: model field, API surface, frontend rendering, and an overdue filter.",
+      "done_when": "Todos have an optional due_date (ISO date). POST/PUT/PATCH endpoints accept it. The list endpoint supports ?overdue=true. Frontend shows the due date on each todo and has an 'overdue only' toggle. Tests cover model, API, and the filter.",
+      "backlog": [
+        "add nullable due_date column + Alembic migration",
+        "extend TodoCreate/TodoUpdate schemas and API validation",
+        "wire the ?overdue=true filter with a UTC comparison",
+        "render due_date in the todo list; add an overdue toggle"
+      ],
+      "stub_acceptable": [],
+      "cadence": "2h",
+      "workspace_dir": "/repos/todo-fullstack-demo"
+    },
+    "status": {
+      "phase": "verifying",
+      "lifecycle": "executing",
+      "next": "run the done-gate review and evaluate",
+      "actions_dispatched": 4,
+      "deliveries_since_eval": 3
+    },
+    "recent_log": "PR #9 merged — model + migration + API validation. PR #10 merged — overdue filter with UTC comparison + tests. PR #11 merged — frontend due-date rendering + overdue toggle + component tests. Verify gate green on all three.",
+    "deliveries": "Three PRs merged into main:\n- #9 backend/models.py + backend/schemas.py + migrations/2026_06_28_add_due_date.py\n- #10 backend/main.py list-endpoint filter + tests/test_overdue_filter.py\n- #11 frontend/src/TodoItem.tsx + frontend/src/TodoList.tsx + frontend/src/__tests__/overdue-toggle.test.tsx",
+    "review_report": "## Per-clause evidence\n- clause: `Todos have an optional due_date (ISO date)` — satisfied. backend/models.py:14 declares `due_date = Column(Date, nullable=True)`; the migration in migrations/2026_06_28_add_due_date.py adds it as a NULLABLE column.\n- clause: `POST/PUT/PATCH endpoints accept it` — satisfied. backend/schemas.py TodoCreate + TodoUpdate carry `due_date: Optional[date] = None`; backend/main.py handlers pass it through unchanged; tests/test_api.py::test_create_with_due_date asserts round-trip.\n- clause: `The list endpoint supports ?overdue=true` — satisfied. backend/main.py:list_todos filters `Todo.due_date < datetime.utcnow().date()` when `overdue=true`; tests/test_overdue_filter.py covers past / future / null cases.\n- clause: `Frontend shows the due date on each todo and has an 'overdue only' toggle` — satisfied. frontend/src/TodoItem.tsx renders `todo.due_date`; frontend/src/TodoList.tsx has an `overdueOnly` state + checkbox; component tests assert the toggle filters visible rows.\n- clause: `Tests cover model, API, and the filter` — satisfied. tests/test_api.py + tests/test_overdue_filter.py + frontend/src/__tests__/overdue-toggle.test.tsx all green.\n\n## Structural health\nverdict: clean. Changes are small, additive, colocated with existing code, and covered by focused tests. No new god objects or coupling.\n\n## Risks not in done_when\nnone material.",
+    "at_done_gate": true,
+    "spec": ""
+  },
+  "expected": {
+    "verdict": "achieved",
+    "must_contain_rationale_hints": ["clause", "evidence"],
+    "must_contain_correction_hints": [],
+    "notes": "Every clause has specific file:line evidence and structural health is clean. A correct evaluator returns `achieved` without downgrading."
+  },
+  "canned_model_output": {
+    "verdict": "achieved",
+    "rationale": "Every clause in done_when maps to specific file:line evidence in the review report and structural health is clean; the shipped diff satisfies the goal.",
+    "corrections": [],
+    "clauses": [
+      {"clause": "Todos have an optional due_date (ISO date)", "satisfied": true, "evidence": "backend/models.py:14 declares due_date as a nullable Date column; migration adds it NULLABLE."},
+      {"clause": "POST/PUT/PATCH endpoints accept it", "satisfied": true, "evidence": "backend/schemas.py TodoCreate + TodoUpdate carry due_date; tests/test_api.py::test_create_with_due_date passes."},
+      {"clause": "The list endpoint supports ?overdue=true", "satisfied": true, "evidence": "backend/main.py:list_todos compares Todo.due_date to today when overdue=true; tests/test_overdue_filter.py covers all cases."},
+      {"clause": "Frontend shows the due date on each todo and has an 'overdue only' toggle", "satisfied": true, "evidence": "frontend/src/TodoItem.tsx renders due_date; TodoList.tsx has an overdueOnly toggle; component tests assert filter behavior."},
+      {"clause": "Tests cover model, API, and the filter", "satisfied": true, "evidence": "tests/test_api.py + tests/test_overdue_filter.py + frontend/src/__tests__/overdue-toggle.test.tsx all pass on CI."}
+    ]
+  }
+}
