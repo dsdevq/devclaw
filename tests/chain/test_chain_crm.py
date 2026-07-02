@@ -341,12 +341,17 @@ async def _walk_chain(gaps: list[str]) -> None:
                 _os.environ["DEVCLAW_SKILL_LIBRARY"] = _orig
 
     # ---- Links 5/7/8: repo init, AGENTS.md, CI/CD ---------------------------
-    print(_hr("LINKS 5/7/8: create_repo, onboard (AGENTS.md), setup_cicd"))
+    print(_hr("LINKS 5/7/8: create_repo, onboard (AGENTS.md), CI/CD task"))
     print(
-        "\n  EXIST as separate MCP tools. v2 of this chain test will drive them in\n"
-        "  sequence (gh-authed environment + workspace setup required). Decided\n"
-        "  2026-06-30: this is intentional v2 scope, NOT an unfilled chain gap.\n"
-        "  Tracked in chain-map row 18 + a separate task for the v2 harness."
+        "\n  create_repo + onboard EXIST as separate MCP tools; v2 of this chain\n"
+        "  test will drive them in sequence (gh-authed environment + workspace\n"
+        "  setup required). CI/CD is now a per-project engineering-judgment task\n"
+        "  dispatched via implement_feature (plan.md §Production-ready C5), not a\n"
+        "  hardcoded template scaffolder — the earlier setup_cicd MCP tool was\n"
+        "  removed 2026-07-02 because its 5-stack template list silently\n"
+        "  misgenerated for fullstack repos. Decided 2026-06-30: this is\n"
+        "  intentional v2 scope, NOT an unfilled chain gap. Tracked in\n"
+        "  chain-map row 18 + a separate task for the v2 harness."
     )
 
     # ---- Link 11: decomposition (the load-bearing eyeball checkpoint) -------

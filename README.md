@@ -140,7 +140,6 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 | `fix_bug(workspace_dir, description, …)` | Run a single bug-fix task |
 | `review_repository(workspace_dir, …)` | Read-only review (no writes — invariant runtime-checked) |
 | `onboard(workspace_dir, …)` | Analyze a repo and write a draft `AGENTS.md` (comprehension only) |
-| `setup_cicd(workspace_dir)` | Commit a self-hosted GitHub Actions workflow if none exists |
 | `create_repo(name, …)` | Stand up a fresh GitHub repo for a from-scratch goal |
 | `start_program(workspace_dir, goal, …)` | Decompose a large goal into a task DAG and run it |
 | `get_program(program_id)` / `list_programs()` | Program status + task DAG |

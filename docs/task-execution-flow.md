@@ -190,10 +190,13 @@ couldn't distinguish *"the docker run from Step C never happened"* from
    healthcheck is `curl /health`; doesn't catch the GID drift. Add a
    `docker version` to the test so a broken-but-running orchestrator flips
    unhealthy in 30s instead of being discovered by the first task.
-4. **Sandbox image selection by detected stack.** `_detect_stack()` exists
-   at `devclaw/server/tools.py:115`; reuse it to pick the right sandbox
-   image (dotnet/node/python/multi) automatically per task instead of one
-   global `DEVCLAW_SANDBOX_IMAGE` env.
+4. **Sandbox image selection by detected stack.** Historically we planned to
+   reuse a `_detect_stack()` helper to pick the sandbox image automatically per
+   task instead of one global `DEVCLAW_SANDBOX_IMAGE` env. That helper lived in
+   `devclaw/server/tools.py` as part of the removed `setup_cicd` scaffolder and
+   was deleted along with it (its 5-stack template list was silently wrong for
+   fullstack repos). Any future revival needs to be per-task stack judgment by
+   an engineer task, not a hardcoded dict — same reason as the C5 shift.
 5. **AGENTS.md posture block for sandbox.** Generated `AGENTS.md` should
    prepend "you're in a docker-less sandbox; ignore stack-bring-up
    instructions from `CLAUDE.md`; use the unit-only verify path." Today
