@@ -12,7 +12,14 @@ import subprocess
 import pytest
 
 from devclaw import delivery
-from devclaw.delivery import _extract_pr_url, _pr_body, _pr_title, _slug, deliver_change
+from devclaw.delivery import (
+    _extract_pr_url,
+    _pr_body,
+    _pr_title,
+    _scope_suffix,
+    _slug,
+    deliver_change,
+)
 from devclaw.engine import EngineRequest
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
@@ -67,6 +74,68 @@ def test_pr_body_carries_ticket_gate_and_caveat():
     # degrades cleanly when there was no gate
     nogate = _pr_body("x", "id", None, None)
     assert "## Verification" not in nogate and "## Files changed" not in nogate
+
+
+def test_scope_suffix_empty_or_missing():
+    # No files_stat → no suffix. Graceful on the None/"" edges.
+    assert _scope_suffix(None) == ""
+    assert _scope_suffix("") == ""
+    # A malformed stat with no `files changed` line — return "" rather than raise.
+    assert _scope_suffix("some garbage output") == ""
+
+
+def test_scope_suffix_narrow_diff_no_fire():
+    # Narrow — 2 files, 30 lines — well under both thresholds → no suffix.
+    stat = " foo.py | 20 ++++++++++++++++++++\n bar.py | 10 ++++++++++\n 2 files changed, 30 insertions(+), 0 deletions(-)"
+    assert _scope_suffix(stat) == ""
+
+
+def test_scope_suffix_wide_by_files_fires():
+    # 6 files with a small line count → fires because file-count crosses.
+    stat = (
+        " a.py | 5 ++++-\n b.py | 5 ++++-\n c.py | 5 ++++-\n"
+        " d.py | 5 ++++-\n e.py | 5 ++++-\n f.py | 5 ++++-\n"
+        " 6 files changed, 24 insertions(+), 6 deletions(-)"
+    )
+    suf = _scope_suffix(stat)
+    assert suf.startswith(" (spans 6 files")
+    assert "30 lines)" in suf  # 24 + 6 = 30, below 1k threshold → raw int
+
+
+def test_scope_suffix_wide_by_lines_fires():
+    # 2 files but 1800 lines → fires because line-count crosses.
+    stat = " App.tsx | 1800 +++++++...\n types.ts | 200 ++++++...\n 2 files changed, 1800 insertions(+), 200 deletions(-)"
+    suf = _scope_suffix(stat)
+    assert suf.startswith(" (spans 2 files")
+    assert "2.0k lines)" in suf
+
+
+def test_scope_suffix_the_closeloop_pr_23_case():
+    # The concrete regression this fix targets: closeloop PR #23 restructure —
+    # ~10 feature-dir files, ~1800 net insertions + ~1600 deletions.
+    stat = (
+        " frontend/src/App.tsx | 1650 -----\n"
+        " frontend/src/features/accounts/AccountsView.tsx | 320 +++++\n"
+        " frontend/src/features/activities/ActivitiesView.tsx | 280 +++\n"
+        " frontend/src/features/auth/LoginView.tsx | 90 +++\n"
+        " frontend/src/features/contacts/ContactsView.tsx | 360 +++\n"
+        " frontend/src/features/pipeline/PipelineView.tsx | 410 +++\n"
+        " frontend/src/features/stats/StatsView.tsx | 120 +++\n"
+        " frontend/src/features/today/TodayView.tsx | 130 +++\n"
+        " frontend/src/hooks/useAppState.ts | 145 +++\n"
+        " frontend/src/types.ts | 30 +++\n"
+        " 10 files changed, 1885 insertions(+), 1650 deletions(-)"
+    )
+    suf = _scope_suffix(stat)
+    assert suf.startswith(" (spans 10 files")
+    assert "3.5k lines)" in suf  # 1885 + 1650 = 3535, formatted as 3.5k
+
+
+def test_scope_suffix_tunable_thresholds():
+    # Callers can dial the thresholds tighter or looser.
+    tight_stat = " foo.py | 4 +++-\n bar.py | 4 +++-\n baz.py | 4 +++-\n 3 files changed, 12 insertions(+), 0 deletions(-)"
+    assert _scope_suffix(tight_stat) == ""  # default: no fire
+    assert _scope_suffix(tight_stat, min_files=3) != ""  # tightened: fires
 
 
 def test_extract_pr_url():

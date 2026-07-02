@@ -88,6 +88,48 @@ def _looks_conventional(subject: str) -> bool:
     return bool(_CC.match(subject.strip()))
 
 
+# git diff --stat prints a trailing summary like:
+#   " 3 files changed, 30 insertions(+), 5 deletions(-)"
+# We only need the trailing summary; per-file lines are ignored.
+_STAT_FILES = re.compile(r"(\d+)\s+files?\s+changed")
+_STAT_ADDS = re.compile(r"(\d+)\s+insertions?\(\+\)")
+_STAT_DELS = re.compile(r"(\d+)\s+deletions?\(-\)")
+
+
+def _scope_suffix(files_stat: str | None, *, min_files: int = 5, min_lines: int = 500) -> str:
+    """Return a trailing ``(spans N files, K lines)`` PR-title suffix when the
+    delivered diff is materially wider than a single-focus commit subject can
+    convey; empty otherwise.
+
+    Guards against the failure mode where the engineer writes a conventional-
+    commit-shaped subject (e.g. ``refactor(frontend): extract shared type
+    aliases into types.ts``) that describes ~5% of what actually shipped (an
+    App.tsx 1827→181-line restructure across seven feature dirs, per
+    closeloop PR #23). The suffix is grounded in the ACTUAL diffstat, so it
+    catches both a narrow commit subject AND a future planner-authored title
+    that drifts from what the executor built.
+
+    TODO(c7-proper): plan.md §Production-ready criterion C7 prescribes a
+    proper `title:` field on Action, threaded planner→delivery. This suffix is
+    the diff-grounded fallback; the proper thread-through is a follow-up if
+    this proves insufficient (a planner-authored title CAN still drift).
+    """
+    if not files_stat:
+        return ""
+    last = files_stat.strip().splitlines()[-1] if files_stat.strip() else ""
+    m_files = _STAT_FILES.search(last)
+    if not m_files:
+        return ""
+    files = int(m_files.group(1))
+    adds = int(_STAT_ADDS.search(last).group(1)) if _STAT_ADDS.search(last) else 0
+    dels = int(_STAT_DELS.search(last).group(1)) if _STAT_DELS.search(last) else 0
+    total = adds + dels
+    if files < min_files and total < min_lines:
+        return ""
+    lines_str = f"{total / 1000:.1f}k" if total >= 1000 else str(total)
+    return f" (spans {files} files, {lines_str} lines)"
+
+
 async def _agent_commit_msg(workspace_dir: str, base: str | None) -> tuple[str, str] | None:
     """The (subject, body) the AGENT committed for this change (HEAD of base..HEAD),
     or None if it didn't commit. The engineer writing its own commit is what makes
@@ -324,9 +366,17 @@ async def deliver_change(
                 result["pr_url"] = existing
                 result["delivered"] = True
                 return result
+        # Ground the PR title in the actual diff scope — an engineer commit
+        # subject often describes ~5% of a wide restructure (see closeloop
+        # PR #23). Suffix only fires when files/lines cross a threshold; skip
+        # when the title already carries a scope tail so we never double-suffix
+        # on updates or when the agent wrote its own scope indicator.
+        pr_title = title
+        if not pr_title.rstrip().endswith(")"):
+            pr_title = pr_title + _scope_suffix(files_stat)
         rc, out = await _run(
             "gh", "pr", "create", "--head", branch,
-            "--title", title,
+            "--title", pr_title,
             "--body", _pr_body(goal, task_id, verify, files_stat, changes=changes),
             cwd=workspace_dir,
         )
