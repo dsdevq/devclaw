@@ -238,6 +238,20 @@ async def list_tasks(
     return json.dumps([t.to_dict() for t in tasks], indent=2)
 
 
+@mcp.tool
+async def get_scorecard_metrics(
+    window_hours: Annotated[int, Field(ge=1, le=24 * 30)] = 168,
+) -> str:
+    """L8 rolling scorecard: merge rate, evaluator verdict distribution, steer
+    rate, first-pass hit rate, workspace-break count — computed over the last
+    ``window_hours`` (default 168 = one week). Reads state_store directly, so
+    it's cheap and can be called from Telegram or a dashboard without waking
+    the goal loop. See ``plan.md`` §Measurement direction for how the numbers
+    relate to the C1-C8 production-ready scorecard."""
+    from ..telemetry import compute_scorecard
+    return json.dumps(compute_scorecard(store, window_hours=int(window_hours)), indent=2)
+
+
 # ===== cancellation (deliberate abort) =======================================
 
 

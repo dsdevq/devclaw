@@ -30,6 +30,8 @@ from typing import Optional
 
 from .goal.store import GoalStore
 from .project_registry import ProjectExists, ProjectRegistry, project_rollup
+from .state_store import StateStore
+from .telemetry import compute_scorecard, format_scorecard
 
 
 def _db_path() -> str:
@@ -186,9 +188,34 @@ def _cmd_rm(reg: ProjectRegistry, goal_get, args) -> int:
     return 1
 
 
+def _cmd_scorecard(args) -> int:
+    """Print the L8 scorecard (merge rate, verdict distribution, steer rate,
+    first-pass hit rate) rolled up over the last ``--window-hours`` (default
+    168 = one week). Reads state_store directly, no engine/server needed."""
+    store = StateStore(_db_path())
+    try:
+        sc = compute_scorecard(store, window_hours=int(args.window_hours))
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(sc, indent=2))
+    else:
+        print(format_scorecard(sc))
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="devclaw", description="devclaw control-plane CLI")
     sub = parser.add_subparsers(dest="group", required=True)
+
+    p_score = sub.add_parser(
+        "scorecard",
+        help="L8 rolling metrics (merge rate, steer rate, verdicts) over a window",
+    )
+    p_score.add_argument("--window-hours", default=168, type=int,
+                         help="lookback window in hours (default 168 = 1 week)")
+    p_score.add_argument("--json", action="store_true")
+    p_score.set_defaults(func=lambda reg, get, a: _cmd_scorecard(a))
 
     projects = sub.add_parser("projects", help="manage the project registry")
     psub = projects.add_subparsers(dest="cmd", required=True)
