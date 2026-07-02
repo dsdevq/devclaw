@@ -830,6 +830,64 @@ class StateStore:
         self.delete_meta("pause_until_ms")
         self.delete_meta("pause_reason")
 
+    # ---- workspace circuit-breaker (per-workspace pause) -----------------
+
+    def count_recent_task_failures(self, workspace_dir: str, since_ms: int) -> int:
+        """Number of tasks that failed for one workspace since ``since_ms``.
+        Used by the circuit-breaker to trip a per-workspace hold when a run of
+        failures piles up in a short window (the 2026-07-02 quota-burn pattern:
+        one broken workspace keeps re-attempting until Denys notices)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM tasks "
+                "WHERE workspace_dir = ? AND status = 'failed' "
+                "AND completed_at IS NOT NULL AND completed_at >= ?",
+                (workspace_dir, since_ms),
+            ).fetchone()
+        return int(row["n"])
+
+    def set_workspace_break(
+        self, workspace_dir: str, until_ms: int, reason: str
+    ) -> None:
+        """Hold dispatch for ONE workspace until ``until_ms`` (epoch ms). Sibling
+        of the global quota pause but scoped — other workspaces keep running."""
+        self.set_meta(
+            f"workspace_break:{workspace_dir}",
+            json.dumps({"until_ms": int(until_ms), "reason": reason or ""}),
+        )
+
+    def get_workspace_break(self, workspace_dir: str) -> tuple[int, str]:
+        """Return (until_ms, reason). until_ms is 0 when no break is set."""
+        raw = self.get_meta(f"workspace_break:{workspace_dir}")
+        if not raw:
+            return 0, ""
+        try:
+            data = json.loads(raw)
+            return int(data.get("until_ms") or 0), str(data.get("reason") or "")
+        except (ValueError, TypeError):
+            return 0, ""
+
+    def clear_workspace_break(self, workspace_dir: str) -> None:
+        self.delete_meta(f"workspace_break:{workspace_dir}")
+
+    def list_workspace_breaks(self) -> list[tuple[str, int, str]]:
+        """All currently-recorded workspace breaks (may include expired ones —
+        the caller filters). Read surface for observability + ops-agent."""
+        prefix = "workspace_break:"
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, value FROM meta WHERE key LIKE ?", (f"{prefix}%",)
+            ).fetchall()
+        out: list[tuple[str, int, str]] = []
+        for r in rows:
+            ws = r["key"][len(prefix):]
+            try:
+                data = json.loads(r["value"])
+                out.append((ws, int(data.get("until_ms") or 0), str(data.get("reason") or "")))
+            except (ValueError, TypeError):
+                continue
+        return out
+
     # ---- trend-detector cooldowns (typed wrappers over set_meta/get_meta) -
 
     def set_trend_cooldown(self, scope: str, signal_id: str, until_ms_str: str) -> None:
