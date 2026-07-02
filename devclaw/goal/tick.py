@@ -603,11 +603,16 @@ async def _run_mid_flight_eval(
 def _project_owns_its_deploy(workspace_dir: str) -> bool:
     """The target project owns its deploy when its repo contains a ``Dockerfile``
     at the workspace root. In that case devclaw MUST NOT spin its own throwaway
-    ``devclaw-deploy-<goal_id>`` container — the project's own CI (built by
-    ``setup_cicd``) is the single source of deploy truth, and one goal-branch
-    merge triggers one deploy from the project's singleton container. Devclaw's
-    old container-per-goal shape is the wrong ownership boundary; the
-    Dockerfile-presence check is the migration seam."""
+    ``devclaw-deploy-<goal_id>`` container — the project's own CI is the single
+    source of deploy truth, and one goal-branch merge triggers one deploy from
+    the project's singleton container. Devclaw's old container-per-goal shape
+    is the wrong ownership boundary; the Dockerfile-presence check is the
+    migration seam. How each project's Dockerfile + CI workflow gets authored
+    is engineering-judgment work an ``implement_feature`` task does per-repo
+    (per ``plan.md`` §Production-ready C5); devclaw no longer ships a template
+    scaffolder — the earlier ``setup_cicd`` MCP tool encoded product taste in
+    the harness (5 hardcoded stack templates, silently wrong for fullstack)
+    and was removed."""
     try:
         return (Path(workspace_dir) / "Dockerfile").exists()
     except Exception:  # noqa: BLE001 — workspace missing = fall through to the old behavior
