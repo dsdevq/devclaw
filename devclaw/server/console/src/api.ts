@@ -21,3 +21,32 @@ export async function fetchProjects(): Promise<ProjectRow[]> {
   if (!r.ok) throw new Error(`projects.json ${r.status}`);
   return r.json();
 }
+
+export interface GoalRow {
+  id: string;
+  phase: string | null;
+  phaseLabel: string;
+  action: string;
+  lastUpdateMs: number | null;
+}
+
+export interface ProjectDetail {
+  id: string;
+  name: string;
+  status: "active" | "paused" | "archived";
+  repoUrl: string | null;
+  previewUrl: string | null;
+  active: GoalRow[];
+  archived: GoalRow[];
+}
+
+export async function fetchProject(id: string): Promise<ProjectDetail> {
+  const r = await fetch(`/projects/${encodeURIComponent(id)}.json${tokenQS()}`);
+  if (r.status === 404) throw new Error(`project not found: ${id}`);
+  if (!r.ok) throw new Error(`project ${id}: ${r.status}`);
+  return r.json();
+}
+
+export function tokenQueryString(): string {
+  return tokenQS();
+}

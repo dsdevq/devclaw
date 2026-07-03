@@ -214,6 +214,107 @@ def _active_goal_count(goals_list: list[dict]) -> int:
     )
 
 
+_TERMINAL_PHASES = {"done", "cancelled", "error", "achieved"}
+
+
+def _phase_label(phase: str | None) -> str:
+    """Map internal phase to the design's label vocabulary. `done` is presented
+    as `Achieved` per the mock (Project Detail archived section).
+    """
+    if phase is None:
+        return "—"
+    return {"done": "Achieved"}.get(phase, phase.capitalize())
+
+
+def _goal_action_label(goal_id: str) -> str:
+    """One-line 'what's this goal currently doing' — the design's In-flight
+    action column. Terminal goals fall back to their last direction note; active
+    goals surface the human `next` hint, then the in_flight tool. Returns '—'
+    when nothing useful is known."""
+    try:
+        g = _goal_get(goal_id)
+    except KeyError:
+        return "—"
+    phase = g.get("phase")
+    if phase in _TERMINAL_PHASES:
+        direction = g.get("direction") or {}
+        note = direction.get("note") or ""
+        return note.strip() or "—"
+    nxt = (g.get("next") or "").strip()
+    if nxt:
+        return nxt
+    in_flight = g.get("in_flight") or {}
+    tool = in_flight.get("tool")
+    return tool if tool else "—"
+
+
+def _goal_last_update_ms(goal_id: str) -> int | None:
+    try:
+        g = _goal_get(goal_id)
+    except KeyError:
+        return None
+    last_at = (g.get("progress") or {}).get("last_at")
+    if not isinstance(last_at, str):
+        return None
+    try:
+        ts = _dt.datetime.fromisoformat(last_at)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=_dt.timezone.utc)
+    return int(ts.timestamp() * 1000)
+
+
+def _goal_row(goal_id: str) -> dict:
+    try:
+        g = _goal_get(goal_id)
+    except KeyError:
+        return {
+            "id": goal_id,
+            "phase": None,
+            "phaseLabel": "Missing",
+            "action": "—",
+            "lastUpdateMs": None,
+        }
+    phase = g.get("phase")
+    return {
+        "id": goal_id,
+        "phase": phase,
+        "phaseLabel": _phase_label(phase),
+        "action": _goal_action_label(goal_id),
+        "lastUpdateMs": _goal_last_update_ms(goal_id),
+    }
+
+
+@mcp.custom_route("/projects/{project_id}.json", methods=["GET"])
+async def project_json(request: Request) -> Response:
+    """Project Detail feed — header (name, repo, preview) + active/archived goal
+    rows. Same phase/direction source as get_goal so any drift on the goal side
+    reflects here without extra plumbing."""
+    project_id = request.path_params["project_id"]
+    p = registry.get(project_id)
+    if p is None:
+        return JSONResponse({"error": "not_found", "id": project_id}, status_code=404)
+    active: list[dict] = []
+    archived: list[dict] = []
+    for gid in p.goal_ids:
+        row = _goal_row(gid)
+        (archived if row["phase"] in _TERMINAL_PHASES else active).append(row)
+    active.sort(key=lambda r: r.get("lastUpdateMs") or 0, reverse=True)
+    archived.sort(key=lambda r: r.get("lastUpdateMs") or 0, reverse=True)
+    return JSONResponse(
+        {
+            "id": p.id,
+            "name": p.name,
+            "status": p.status,
+            "repoUrl": p.repo_url,
+            "previewUrl": p.preview_url,
+            "active": active,
+            "archived": archived,
+        }
+    )
+
+
 @mcp.custom_route("/projects.json", methods=["GET"])
 async def projects_json(_request: Request) -> Response:
     """Projects Home feed: name, status, active goal count, last activity.

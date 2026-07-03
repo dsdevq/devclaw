@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { fetchProjects, type ProjectRow } from "../api";
 import { mono, palettes } from "../theme";
+import { relativeTime } from "../util/time";
 
 // Mirrors the Claude Design mock at Projects Home.dc.html verbatim: same
 // palette, same 56px header, same grid columns, same arrow-key nav.
@@ -13,26 +15,11 @@ const STATUS_LABEL: Record<Status, string> = {
   archived: "Archived",
 };
 
-function relativeTime(ms: number | null): string {
-  if (ms === null) return "—";
-  const diff = Date.now() - ms;
-  if (diff < 0) return "just now";
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 14) return `${d}d ago`;
-  const w = Math.floor(d / 7);
-  return `${w}w ago`;
-}
-
 const VERSION_LABEL = "v0.7.2";
 
 export function ProjectsHome() {
   const p = palettes.dark;
+  const navigate = useNavigate();
   const [rows, setRows] = useState<ProjectRow[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<number>(-1);
@@ -70,9 +57,9 @@ export function ProjectsHome() {
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSelected((i) => Math.max(i - 1, 0));
-    } else if (e.key === "Enter" && selected >= 0) {
+    } else if (e.key === "Enter" && selected >= 0 && rows[selected]) {
       e.preventDefault();
-      // Navigation to Project Detail lands in PR#2.
+      navigate(`/projects/${rows[selected].id}`);
     }
   };
 
@@ -174,7 +161,10 @@ export function ProjectsHome() {
               return (
                 <div
                   key={r.id}
-                  onClick={() => setSelected(i)}
+                  onClick={() => {
+                    setSelected(i);
+                    navigate(`/projects/${r.id}`);
+                  }}
                   onMouseEnter={() => setHovered(i)}
                   onMouseLeave={() => setHovered(-1)}
                   style={{
