@@ -872,8 +872,9 @@ async def list_projects(status: Optional[str] = None) -> str:
     goals' phase/direction + a derived health: working/blocked/done/idle/archived).
     Filter by status (active|paused|archived). This is the 'show me everything'
     surface for chat / API / CLI."""
+    all_goals = goals.list_goals()
     items = [
-        project_rollup(p, _goal_get)
+        project_rollup(p, all_goals)
         for p in registry.list(status=status)  # type: ignore[arg-type]
     ]
     return json.dumps(items, indent=2)
@@ -886,7 +887,7 @@ async def project_status(project_id: str) -> str:
     p = registry.get(project_id)
     if p is None:
         raise ToolError(f"unknown project_id: {project_id}")
-    return json.dumps(project_rollup(p, _goal_get), indent=2)
+    return json.dumps(project_rollup(p, goals.list_goals()), indent=2)
 
 
 @mcp.tool

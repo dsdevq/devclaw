@@ -128,7 +128,8 @@ async def dashboard_goals(_request: Request) -> Response:
 async def dashboard_projects(_request: Request) -> Response:
     """Portfolio view — every registered project + its derived health, the
     control-plane overview that ties repos to the goals driving them."""
-    items = [project_rollup(p, _goal_get) for p in registry.list()]
+    all_goals = goals.list_goals()
+    items = [project_rollup(p, all_goals) for p in registry.list()]
     return HTMLResponse(_dash.render_projects(items, version=__version__, token_qs=TOKEN_QS))
 
 
@@ -529,9 +530,20 @@ async def project_json(request: Request) -> Response:
     p = registry.get(project_id)
     if p is None:
         return JSONResponse({"error": "not_found", "id": project_id}, status_code=404)
+    # Discover this project's goals by workspace_dir match — same join rule
+    # as project_rollup. `goal_ids` on the Project row is advisory only and
+    # can go stale (see project_registry_link_stale memory + docstring).
+    from ..project_registry import _normalize_workspace
+
+    proj_ws = _normalize_workspace(p.workspace_dir)
+    matching_ids: list[str] = []
+    if proj_ws is not None:
+        for g in goals.list_goals():
+            if _normalize_workspace(g.get("workspace_dir")) == proj_ws:
+                matching_ids.append(g["id"])
     active: list[dict] = []
     archived: list[dict] = []
-    for gid in p.goal_ids:
+    for gid in matching_ids:
         row = _goal_row(gid)
         (archived if row["phase"] in _TERMINAL_PHASES else active).append(row)
     active.sort(key=lambda r: r.get("lastUpdateMs") or 0, reverse=True)
@@ -557,8 +569,9 @@ async def projects_json(_request: Request) -> Response:
     the two views can't drift. Shape is documented in
     `devclaw/server/console/src/api.ts` (ProjectRow)."""
     out: list[dict] = []
+    all_goals = goals.list_goals()
     for p in registry.list():
-        rollup = project_rollup(p, _goal_get)
+        rollup = project_rollup(p, all_goals)
         out.append(
             {
                 "id": p.id,

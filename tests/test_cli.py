@@ -43,22 +43,33 @@ def test_show_unknown_returns_1(env, capsys):
     assert "unknown project" in capsys.readouterr().err
 
 
-def test_link_goal_shows_in_status(env, capsys):
-    seed_goal(env["goals"], "g1")  # a real goal on disk (phase defaults to idle)
-    main(["projects", "register", "todo", "Todo App"])
-    assert main(["projects", "link", "todo", "g1"]) == 0
+def test_goal_shows_up_via_workspace_match(env, capsys):
+    """The rollup joins project↔goals by workspace_dir. A goal whose
+    workspace matches the project's workspace shows up; no explicit link
+    needed. `seed_goal` writes a goal with workspace_dir=/repos/demo, so
+    registering the project with the same value is what associates them."""
+    seed_goal(env["goals"], "g1")  # workspace_dir: /repos/demo
+    main(["projects", "register", "todo", "Todo App",
+          "--workspace-dir", "/repos/demo"])
     capsys.readouterr()
     assert main(["projects", "show", "todo"]) == 0
     out = capsys.readouterr().out
     assert "g1" in out and "idle" in out
 
 
-def test_dangling_link_is_flagged(env, capsys):
-    main(["projects", "register", "todo", "Todo App"])
-    main(["projects", "link", "todo", "nonexistent"])
+def test_link_goal_is_advisory_and_does_not_force_association(env, capsys):
+    """`projects link` still writes goal_ids for legacy compat, but the rollup
+    ignores it. A linked goal whose workspace doesn't match this project
+    doesn't appear in the rollup — the old "dangling link -> MISSING" state
+    no longer exists (there is no link to dangle)."""
+    seed_goal(env["goals"], "g1")  # workspace_dir: /repos/demo
+    main(["projects", "register", "todo", "Todo App",
+          "--workspace-dir", "/repos/other-place"])
+    main(["projects", "link", "todo", "g1"])
     capsys.readouterr()
-    main(["projects", "show", "todo"])
-    assert "MISSING" in capsys.readouterr().out
+    main(["projects", "show", "todo", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["goals"] == [] and data["health"] == "idle"
 
 
 def test_archive_then_health(env, capsys):

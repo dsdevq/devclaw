@@ -42,15 +42,17 @@ def _goals_dir() -> str:
     return os.path.expanduser(os.environ.get("DEVCLAW_GOALS_DIR", "~/memory/goals"))
 
 
-def _goal_getter(goal_store: GoalStore):
-    """A read-only goal-status getter (shape matches goal_service.get_goal's
-    relevant fields) built straight from the GoalStore — no queue/engine needed."""
-
-    def get(goal_id: str) -> dict:
-        if not goal_store.exists(goal_id):
-            raise KeyError(goal_id)
-        s = goal_store.load_status(goal_id)
-        return {
+def _list_goals(goal_store: GoalStore) -> list[dict]:
+    """CLI-side mirror of goal_service.list_goals — reads straight from
+    GoalStore so the CLI works without the queue/engine. Shape includes
+    workspace_dir so project_rollup can do the workspace-match join."""
+    out: list[dict] = []
+    for gid in goal_store.list_goal_ids():
+        g = goal_store.load_goal(gid)
+        s = goal_store.load_status(gid)
+        out.append({
+            "id": gid,
+            "workspace_dir": g.workspace_dir,
             "phase": s.phase,
             "lifecycle": s.lifecycle or "executing",
             "blocked_on": s.blocked_on,
@@ -59,9 +61,8 @@ def _goal_getter(goal_store: GoalStore):
                 {"verdict": s.last_eval_verdict, "at": s.last_eval_at, "note": s.last_eval_note}
                 if s.last_eval_verdict else None
             ),
-        }
-
-    return get
+        })
+    return out
 
 
 # ---- rendering -------------------------------------------------------------
@@ -102,8 +103,8 @@ def _print_show(p: dict) -> None:
 # ---- commands --------------------------------------------------------------
 
 
-def _cmd_list(reg: ProjectRegistry, goal_get, args) -> int:
-    items = [project_rollup(p, goal_get) for p in reg.list(status=args.status)]
+def _cmd_list(reg: ProjectRegistry, all_goals, args) -> int:
+    items = [project_rollup(p, all_goals) for p in reg.list(status=args.status)]
     if args.json:
         print(json.dumps(items, indent=2))
         return 0
@@ -115,12 +116,12 @@ def _cmd_list(reg: ProjectRegistry, goal_get, args) -> int:
     return 0
 
 
-def _cmd_show(reg: ProjectRegistry, goal_get, args) -> int:
+def _cmd_show(reg: ProjectRegistry, all_goals, args) -> int:
     p = reg.get(args.id)
     if p is None:
         print(f"unknown project: {args.id}", file=sys.stderr)
         return 1
-    rolled = project_rollup(p, goal_get)
+    rolled = project_rollup(p, all_goals)
     if args.json:
         print(json.dumps(rolled, indent=2))
     else:
@@ -128,7 +129,7 @@ def _cmd_show(reg: ProjectRegistry, goal_get, args) -> int:
     return 0
 
 
-def _cmd_register(reg: ProjectRegistry, goal_get, args) -> int:
+def _cmd_register(reg: ProjectRegistry, all_goals, args) -> int:
     try:
         p = reg.create(
             id=args.id, name=args.name, repo_url=args.repo_url,
@@ -142,7 +143,7 @@ def _cmd_register(reg: ProjectRegistry, goal_get, args) -> int:
     return 0
 
 
-def _cmd_update(reg: ProjectRegistry, goal_get, args) -> int:
+def _cmd_update(reg: ProjectRegistry, all_goals, args) -> int:
     try:
         reg.update(
             args.id, name=args.name, repo_url=args.repo_url,
@@ -156,7 +157,7 @@ def _cmd_update(reg: ProjectRegistry, goal_get, args) -> int:
     return 0
 
 
-def _cmd_link(reg: ProjectRegistry, goal_get, args) -> int:
+def _cmd_link(reg: ProjectRegistry, all_goals, args) -> int:
     try:
         if args.unlink:
             reg.unlink_goal(args.id, args.goal_id)
@@ -170,7 +171,7 @@ def _cmd_link(reg: ProjectRegistry, goal_get, args) -> int:
     return 0
 
 
-def _cmd_archive(reg: ProjectRegistry, goal_get, args) -> int:
+def _cmd_archive(reg: ProjectRegistry, all_goals, args) -> int:
     try:
         reg.update(args.id, status="archived")
     except KeyError:
@@ -180,7 +181,7 @@ def _cmd_archive(reg: ProjectRegistry, goal_get, args) -> int:
     return 0
 
 
-def _cmd_rm(reg: ProjectRegistry, goal_get, args) -> int:
+def _cmd_rm(reg: ProjectRegistry, all_goals, args) -> int:
     if reg.delete(args.id):
         print(f"removed {args.id}")
         return 0
@@ -270,8 +271,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     reg = ProjectRegistry(_db_path())
-    goal_get = _goal_getter(GoalStore(_goals_dir()))
-    return args.func(reg, goal_get, args)
+    # All CLI subcommands receive the full goals list for uniformity. Only
+    # `list` and `show` actually consume it; the rest ignore it.
+    all_goals = _list_goals(GoalStore(_goals_dir()))
+    return args.func(reg, all_goals, args)
 
 
 if __name__ == "__main__":  # pragma: no cover
