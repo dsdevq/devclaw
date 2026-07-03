@@ -103,6 +103,15 @@ class Program:
     error: Optional[str]
     created_at: int
     completed_at: Optional[int]
+    #: When True, every task the decomposer creates for this program inherits
+    #: ``deliver=True`` — the standing-goal / reviewable-slice contract. When
+    #: False (legacy default), program tasks commit directly and never open a
+    #: PR (the pre-2026-07-03 behavior).
+    open_pr: bool = False
+    #: Gate command the decomposer's tasks inherit. None → no gate (matches
+    #: legacy behavior); when set, child tasks run this after the agent
+    #: finishes and only succeed on exit 0.
+    verify_cmd: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -114,6 +123,8 @@ class Program:
             "error": self.error,
             "createdAt": self.created_at,
             "completedAt": self.completed_at,
+            "openPr": self.open_pr,
+            "verifyCmd": self.verify_cmd,
         }
 
 
@@ -182,6 +193,8 @@ def _row_to_program(r: sqlite3.Row) -> Program:
         error=r["error"],
         created_at=r["created_at"],
         completed_at=r["completed_at"],
+        open_pr=bool(r["open_pr"]) if "open_pr" in r.keys() else False,
+        verify_cmd=r["verify_cmd"] if "verify_cmd" in r.keys() else None,
     )
 
 
@@ -253,7 +266,9 @@ class StateStore:
                   status          TEXT NOT NULL,
                   error           TEXT,
                   created_at      INTEGER NOT NULL,
-                  completed_at    INTEGER
+                  completed_at    INTEGER,
+                  open_pr         INTEGER NOT NULL DEFAULT 0,
+                  verify_cmd      TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
@@ -303,6 +318,11 @@ class StateStore:
                 "ALTER TABLE tasks ADD COLUMN deliver INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE tasks ADD COLUMN pr_url TEXT",
                 "ALTER TABLE tasks ADD COLUMN title TEXT",
+                # Program-level PR discipline (2026-07-03) — inherited by
+                # child tasks so start_program under a standing goal ships
+                # reviewable-slice PRs, not direct-to-main commits.
+                "ALTER TABLE programs ADD COLUMN open_pr INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE programs ADD COLUMN verify_cmd TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -499,12 +519,18 @@ class StateStore:
         goal: str,
         workspace_dir: str,
         notify_url: Optional[str] = None,
+        open_pr: bool = False,
+        verify_cmd: Optional[str] = None,
     ) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT INTO programs (id, goal, workspace_dir, notify_url, status, created_at) "
-                "VALUES (?, ?, ?, ?, 'planning', ?)",
-                (id, goal, workspace_dir, notify_url, _now_ms()),
+                "INSERT INTO programs "
+                "(id, goal, workspace_dir, notify_url, status, created_at, open_pr, verify_cmd) "
+                "VALUES (?, ?, ?, ?, 'planning', ?, ?, ?)",
+                (
+                    id, goal, workspace_dir, notify_url, _now_ms(),
+                    1 if open_pr else 0, verify_cmd,
+                ),
             )
             self._db.commit()
 

@@ -389,11 +389,30 @@ class TaskQueue:
         return task_id
 
     def submit_program(
-        self, *, workspace_dir: str, goal: str, notify_url: Optional[str] = None
+        self,
+        *,
+        workspace_dir: str,
+        goal: str,
+        notify_url: Optional[str] = None,
+        open_pr: bool = False,
+        verify_cmd: Optional[str] = None,
     ) -> str:
+        """Submit a program the decomposer will plan into child tasks.
+
+        ``open_pr`` (default False for legacy behavior) is inherited by every
+        child task the decomposer creates — under a standing goal with
+        ``open_pr: true`` on the Action, each child task delivers as a
+        reviewable-slice PR instead of committing directly to the workspace
+        branch. ``verify_cmd`` (default None) is inherited the same way as the
+        gate command. Closes the closeloop-mission-v2 defect where the
+        activity-timeline program pushed straight to main because the flags
+        stopped at ``submit_program`` and never reached child ``create_task``
+        calls.
+        """
         program_id = str(uuid.uuid4())
         self._store.create_program(
-            id=program_id, goal=goal, workspace_dir=workspace_dir, notify_url=notify_url
+            id=program_id, goal=goal, workspace_dir=workspace_dir,
+            notify_url=notify_url, open_pr=open_pr, verify_cmd=verify_cmd,
         )
         self._planning.add(program_id)
         self._spawn(self._plan_and_start(program_id, workspace_dir, goal))
@@ -584,14 +603,20 @@ class TaskQueue:
         program_id: Optional[str],
     ) -> None:
         # The task is already 'running' (claim_pending set it); just run + settle.
-        # A standalone open_pr task must NOT be observable as 'done' until its
-        # change is delivered — otherwise a poller (goalclaw) reads done-without-PR
-        # the instant the gate passes and re-dispatches an already-shipped item.
-        # So for that path we defer the done-flip: run delivery while the task is
-        # still 'running', then settle 'done' WITH the pr_url in one write.
-        # (Program tasks and plain tasks settle 'done' inside _run_and_settle.)
+        # An open_pr task (standalone OR program-child) must NOT be observable as
+        # 'done' until its change is delivered — otherwise a poller (goalclaw)
+        # reads done-without-PR the instant the gate passes and re-dispatches
+        # an already-shipped item. So for that path we defer the done-flip:
+        # run delivery while the task is still 'running', then settle 'done'
+        # WITH the pr_url in one write.
+        #
+        # Program tasks inherit their ``deliver`` flag from the parent program's
+        # ``open_pr`` (set at submit_program time; see ``_persist_plan``) — the
+        # standing-goal reviewable-slice contract, closing the 2026-07-03
+        # closeloop-mission-v2 defect where the activity-timeline program
+        # pushed straight to main.
         row = self._store.get_task(task_id)
-        deliver = program_id is None and bool(row and row.deliver)
+        deliver = bool(row and row.deliver)
         success = await self._run_and_settle(
             task_id, kind, workspace_dir, goal, defer_done=deliver
         )
@@ -601,26 +626,26 @@ class TaskQueue:
             # redispatch it (fresh attempts) once the pause expires.
             self._pump()
             return
+        if deliver and success is not None:
+            # Gate passed; the task is still 'running'. Turn the change into a
+            # branch/PR, then make 'done' observable — with pr_url already on
+            # the row. Pass the kind (→ conventional-commit title) + the gate
+            # verdict (→ PR body) so the delivered PR describes itself.
+            verify = success.get("verify") if isinstance(success, dict) else None
+            pr_url = None
+            try:
+                delivery = await deliver_change(
+                    workspace_dir=workspace_dir, task_id=task_id, goal=goal,
+                    kind=kind, verify=verify,
+                    title=(row.title if row else None),
+                )
+                pr_url = delivery.get("pr_url")
+                sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")
+            except Exception as err:  # delivery must never strand a verified task
+                sys.stderr.write(f"task-queue: delivery failed task={task_id}: {err}\n")
+            # 'done' becomes observable only now, atomically with pr_url.
+            self._store.mark_done(task_id, json.dumps(success), pr_url=pr_url)
         if program_id is None:
-            if deliver and success is not None:
-                # Gate passed; the task is still 'running'. Turn the change into a
-                # branch/PR, then make 'done' observable — with pr_url already on
-                # the row. Pass the kind (→ conventional-commit title) + the gate
-                # verdict (→ PR body) so the delivered PR describes itself.
-                verify = success.get("verify") if isinstance(success, dict) else None
-                pr_url = None
-                try:
-                    delivery = await deliver_change(
-                        workspace_dir=workspace_dir, task_id=task_id, goal=goal,
-                        kind=kind, verify=verify,
-                        title=(row.title if row else None),
-                    )
-                    pr_url = delivery.get("pr_url")
-                    sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")
-                except Exception as err:  # delivery must never strand a verified task
-                    sys.stderr.write(f"task-queue: delivery failed task={task_id}: {err}\n")
-                # 'done' becomes observable only now, atomically with pr_url.
-                self._store.mark_done(task_id, json.dumps(success), pr_url=pr_url)
             final = self._store.get_task(task_id)
             if final and final.notify_url:
                 await self._notify_task(final)
@@ -634,7 +659,18 @@ class TaskQueue:
     ) -> None:
         """Map planner keys -> real UUIDs and insert the program's tasks with
         depends_on remapped. Runs as one batch before anything is scheduled, so
-        the dep graph is fully consistent by the time the first task starts."""
+        the dep graph is fully consistent by the time the first task starts.
+
+        Child tasks INHERIT the program's ``open_pr`` and ``verify_cmd`` — the
+        standing-goal / reviewable-slice contract. Review tasks
+        (``review_repository``) always skip PR + gate because they write a
+        read-only report, matching the standalone-task rule at engine.py."""
+        program = self._store.get_program(program_id)
+        # Legacy programs (created before the 2026-07-03 column addition) load
+        # with open_pr=False / verify_cmd=None; that preserves the pre-change
+        # behavior for any in-flight program at deploy time.
+        program_open_pr = bool(program and program.open_pr)
+        program_verify_cmd = program.verify_cmd if program else None
         key_to_uuid = {p.key: str(uuid.uuid4()) for p in planned}
         for idx, p in enumerate(planned):
             dep_uuids: list[str] = []
@@ -643,6 +679,7 @@ class TaskQueue:
                 if not u:  # should never happen — validate_plan rejects dangling refs
                     raise RuntimeError(f"planner produced dangling ref '{k}'")
                 dep_uuids.append(u)
+            is_review = p.kind == "review_repository"
             self._store.create_task(
                 id=key_to_uuid[p.key],
                 kind=p.kind,
@@ -653,6 +690,8 @@ class TaskQueue:
                 depends_on=dep_uuids,
                 order_idx=idx,
                 milestone=p.milestone,
+                verify_cmd=None if is_review else program_verify_cmd,
+                deliver=False if is_review else program_open_pr,
             )
 
     def start_planned_program(

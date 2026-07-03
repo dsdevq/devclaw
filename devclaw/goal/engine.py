@@ -56,8 +56,17 @@ class InProcessEngine:
         ws = goal.workspace_dir
         nu = notify_url or None
         if action.tool == "start_program":
+            # Program-child tasks inherit ``open_pr`` and ``verify_cmd`` — the
+            # standing-goal / reviewable-slice contract. Under a mission goal
+            # (``open_pr: true``), the decomposer's tasks each deliver as a
+            # PR instead of committing straight to the workspace branch.
+            # Closes the 2026-07-03 closeloop-mission-v2 defect where the
+            # activity-timeline program pushed direct-to-main because the
+            # flags stopped at ``submit_program``.
             program_id = self._queue.submit_program(
-                workspace_dir=ws, goal=action.goal, notify_url=nu
+                workspace_dir=ws, goal=action.goal, notify_url=nu,
+                open_pr=action.open_pr,
+                verify_cmd=action.verify_cmd or goal.verify_cmd,
             )
             return InFlight("devclaw", "start_program", program_id, "program", action.goal)
         if action.tool in ("implement_feature", "fix_bug", "review_repository"):
