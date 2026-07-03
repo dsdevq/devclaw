@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   EVENT_KINDS,
   goalEventsUrl,
@@ -8,8 +8,12 @@ import {
 import { mono, palettes } from "../theme";
 
 // The event stream half of Goal Detail.dc.html.
-// PR#4 delivers: kind filter chips, expandable rows, SSE live feed.
-// PR#5 adds: autoscroll toggle, pending-merge pill, infinite scroll of history.
+// PR#4: kind filter chips + expandable rows + SSE live feed.
+// PR#5 (this): autoscroll toggle + pending-merge pill for paused sessions.
+// Note on infinite scroll — the design mock pages older events into memory,
+// but our SSE contract delivers the whole history at connect (bounded by the
+// state store) so there's no untelled backlog to page in. If we ever cap the
+// server-side replay we'll add a paginated /events/history endpoint.
 
 const MAX_EVENTS = 500; // console-side cap; older events fall off the tail
 
@@ -20,6 +24,11 @@ interface Props {
 export function EventFeed({ goalId }: Props) {
   const p = palettes.dark;
   const [events, setEvents] = useState<StreamEvent[]>([]);
+  const [pending, setPending] = useState<StreamEvent[]>([]);
+  const [autoScroll, setAutoScroll] = useState<boolean>(true);
+  const autoScrollRef = useRef(autoScroll);
+  autoScrollRef.current = autoScroll;
+  const feedRef = useRef<HTMLDivElement>(null);
   const [selectedKinds, setSelectedKinds] = useState<Record<EventKind, boolean>>(
     () => Object.fromEntries(EVENT_KINDS.map((k) => [k, true])) as Record<
       EventKind,
@@ -30,6 +39,7 @@ export function EventFeed({ goalId }: Props) {
 
   useEffect(() => {
     setEvents([]);
+    setPending([]);
     setExpanded({});
     let closed = false;
     let es: EventSource | null = null;
@@ -41,25 +51,32 @@ export function EventFeed({ goalId }: Props) {
       es.onmessage = (m) => {
         try {
           const ev = JSON.parse(m.data) as StreamEvent;
-          setEvents((prev) => {
-            const next = [ev, ...prev];
-            return next.length > MAX_EVENTS ? next.slice(0, MAX_EVENTS) : next;
-          });
+          if (autoScrollRef.current) {
+            setEvents((prev) => {
+              const next = [ev, ...prev];
+              return next.length > MAX_EVENTS ? next.slice(0, MAX_EVENTS) : next;
+            });
+            // Snap feed to top on next paint so the newest event is visible.
+            requestAnimationFrame(() => {
+              if (feedRef.current) feedRef.current.scrollTop = 0;
+            });
+          } else {
+            // Paused: queue events into the pending stripe. Merge is user-driven
+            // via the "N new events" pill.
+            setPending((prev) => [ev, ...prev]);
+          }
         } catch {
           /* malformed frame — ignore */
         }
       };
       es.addEventListener("done", () => {
-        // Server closed the stream (in_flight rotated / gone). Reconnect after
-        // a short delay to re-pin to whatever's current now.
         es?.close();
         if (!closed) {
           reconnectTimer = setTimeout(connect, 1500);
         }
       });
       es.onerror = () => {
-        // Browser will auto-reconnect on transient errors; if the connection
-        // dropped hard we let onerror close and the browser retries.
+        // Browser retries transient errors automatically.
       };
     };
 
@@ -70,6 +87,33 @@ export function EventFeed({ goalId }: Props) {
       es?.close();
     };
   }, [goalId]);
+
+  const mergePending = () => {
+    setEvents((prev) => {
+      const next = [...pending, ...prev];
+      return next.length > MAX_EVENTS ? next.slice(0, MAX_EVENTS) : next;
+    });
+    setPending([]);
+    requestAnimationFrame(() => {
+      if (feedRef.current) feedRef.current.scrollTop = 0;
+    });
+  };
+
+  const toggleAutoScroll = () => {
+    setAutoScroll((prev) => {
+      const next = !prev;
+      // Re-enabling autoscroll implicitly drains the pending stripe so the
+      // user isn't left with a permanent pill they can't clear.
+      if (next && pending.length > 0) {
+        setEvents((old) => {
+          const merged = [...pending, ...old];
+          return merged.length > MAX_EVENTS ? merged.slice(0, MAX_EVENTS) : merged;
+        });
+        setPending([]);
+      }
+      return next;
+    });
+  };
 
   const chips = useMemo(
     () =>
@@ -122,9 +166,44 @@ export function EventFeed({ goalId }: Props) {
         >
           Event stream
         </span>
-        <span style={{ fontFamily: mono, fontSize: 12, color: p.textMuted }}>
-          {rows.length} shown · {events.length} received
-        </span>
+        <div
+          onClick={toggleAutoScroll}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            cursor: "pointer",
+            userSelect: "none",
+          }}
+        >
+          <span style={{ fontSize: 12, color: p.textSecondary }}>Auto-scroll</span>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              width: 32,
+              height: 18,
+              borderRadius: 9,
+              background: autoScroll ? p.accent : p.rowHover,
+              border: `1px solid ${autoScroll ? p.accent : p.border}`,
+              padding: 2,
+              boxSizing: "border-box",
+              transition: "background 0.12s ease",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                width: 12,
+                height: 12,
+                borderRadius: "50%",
+                background: "#ffffff",
+                transform: `translateX(${autoScroll ? 14 : 0}px)`,
+                transition: "transform 0.12s ease",
+              }}
+            />
+          </span>
+        </div>
       </div>
 
       <div
@@ -163,6 +242,7 @@ export function EventFeed({ goalId }: Props) {
       </div>
 
       <div
+        ref={feedRef}
         style={{
           flex: 1,
           minHeight: 0,
@@ -170,6 +250,34 @@ export function EventFeed({ goalId }: Props) {
           borderTop: `1px solid ${p.border}`,
         }}
       >
+        {pending.length > 0 && (
+          <div
+            onClick={mergePending}
+            style={{
+              position: "sticky",
+              top: 0,
+              zIndex: 2,
+              display: "flex",
+              justifyContent: "center",
+              padding: "8px 0",
+              cursor: "pointer",
+              background: `linear-gradient(to bottom, ${p.bg} 0%, ${p.bg} 60%, transparent 100%)`,
+            }}
+          >
+            <span
+              style={{
+                background: p.accent,
+                color: "#ffffff",
+                fontSize: 11.5,
+                fontWeight: 600,
+                padding: "5px 13px",
+                borderRadius: 12,
+              }}
+            >
+              {pending.length} new event{pending.length === 1 ? "" : "s"}
+            </span>
+          </div>
+        )}
         {rows.length === 0 && (
           <div
             style={{
