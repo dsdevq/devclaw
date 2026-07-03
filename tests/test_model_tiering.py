@@ -25,14 +25,61 @@ def test_argv_includes_model_when_set():
     argv = _build_claude_argv("do the thing", "sonnet")
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "sonnet"
-    assert argv[-1] == "do the thing"  # prompt stays last
     assert argv[:3] == [planner.CLAUDE_BIN, "--print", "--output-format=text"]
+    # 2026-07-03 argv → stdin migration: prompt no longer rides on argv,
+    # protecting against ``[Errno 7] Argument list too long`` on long prompts.
+    assert "do the thing" not in argv
 
 
 def test_argv_omits_model_when_none():
     argv = _build_claude_argv("p", None)
     assert "--model" not in argv  # → CLI account default
-    assert argv[-1] == "p"
+    # 2026-07-03: prompt migrated off argv entirely — see call_claude stdin path.
+    assert "p" not in argv
+
+
+def test_argv_never_appends_prompt_regardless_of_size():
+    """Long prompts (the failure mode: goal-planner prompt crossing ARG_MAX
+    after many log/deliveries entries) must NOT show up in argv. Regression
+    guard against silently reverting to the pre-2026-07-03 argv path."""
+    huge = "x" * 200_000  # ~200 KB — well past Linux ARG_MAX
+    argv_none = _build_claude_argv(huge, None)
+    argv_sonnet = _build_claude_argv(huge, "sonnet")
+    assert huge not in argv_none
+    assert huge not in argv_sonnet
+    # And the argv itself stays small — no accidental prompt leakage into a flag.
+    assert sum(len(a) for a in argv_none) < 200
+    assert sum(len(a) for a in argv_sonnet) < 200
+
+
+async def test_call_claude_passes_prompt_on_stdin(monkeypatch):
+    """The prompt reaches ``claude --print`` via stdin, not argv — the
+    live-hit closeloop-mission-v2 2026-07-03T18:35Z fix. Verifies the
+    subprocess is created with stdin=PIPE (not DEVNULL) and that the exact
+    prompt bytes are written to it via ``communicate(input=…)``."""
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self, input=None):  # noqa: A002
+            captured["stdin_bytes"] = input
+            return b"ok", b""
+
+    async def fake_spawn(*argv, **kwargs):
+        captured["argv"] = argv
+        captured["stdin_kw"] = kwargs.get("stdin")
+        return _FakeProc()
+
+    monkeypatch.setattr(planner.asyncio, "create_subprocess_exec", fake_spawn)
+    out = await call_claude("this is a very long prompt " * 5_000, model="sonnet")
+    assert out == "ok"
+    # Verified: prompt reached stdin, not argv.
+    assert captured["stdin_bytes"] == (b"this is a very long prompt " * 5_000)
+    assert not any(b"very long prompt" in a.encode() for a in captured["argv"]), (
+        "prompt leaked into argv"
+    )
+    assert captured["stdin_kw"] == planner.asyncio.subprocess.PIPE
 
 
 # ---- the model-binding factory ----
