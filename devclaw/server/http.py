@@ -579,6 +579,8 @@ async def projects_json(_request: Request) -> Response:
                 "status": p.status,
                 "activeGoals": _active_goal_count(rollup["goals"]),
                 "lastActivityMs": _last_activity_ms(rollup["goals"]),
+                "repoUrl": p.repo_url or None,
+                "previewUrl": p.preview_url or None,
             }
         )
     return JSONResponse(out)
