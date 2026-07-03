@@ -244,10 +244,15 @@ async def deliver_change(
     goal: str,
     kind: str | None = None,
     verify: dict | None = None,
+    title: str | None = None,
 ) -> dict:
     """Commit the workspace's change to a branch and (best-effort) push + open a PR.
     Returns a verdict dict; never raises. ``kind`` shapes the conventional-commit
-    title (feat/fix/…); ``verify`` (the gate verdict) goes into the PR body."""
+    title (feat/fix/…); ``verify`` (the gate verdict) goes into the PR body.
+    ``title`` is the PLANNER's chosen PR title (see Action.title / plan.md
+    §Production-ready C7). When present and non-empty it wins over the
+    engineer's own commit subject and the goal-derived heuristic — the diff-
+    scope suffix from ``_scope_suffix`` still applies for grounding."""
     result: dict = {"delivered": False, "branch": None, "committed": False,
                     "pushed": False, "pr_url": None, "error": None}
 
@@ -292,15 +297,30 @@ async def deliver_change(
     # devclaw/* branch (so an auto-committed change is visibly distinct from an
     # engineer-authored one).
     agent_msg = await _agent_commit_msg(workspace_dir, base) if (not dirty and ahead > 0) else None
-    if agent_msg:
+    planner_title = (title or "").strip() or None
+    if planner_title:
+        # Planner's explicit title wins over the engineer's commit subject and the
+        # goal-derived heuristic. Prefix the kind (`feat:`/`fix:`) if the planner
+        # omitted the conventional-commit prefix — the branch derivation below
+        # relies on `_cc_type` recovering a type from the subject either way.
+        prefixed = planner_title if _looks_conventional(planner_title) else _pr_title(planner_title, kind)
+        pr_title_derived = _truncate_words(prefixed, 72)
+        derived_branch = f"{_cc_type(pr_title_derived, kind)}/{_slug(_cc_description(pr_title_derived))}"
+        changes = (agent_msg[1] or agent_msg[0]) if agent_msg else None
+        title_slot = pr_title_derived
+    elif agent_msg:
         subject, body = agent_msg
-        title = _truncate_words(subject if _looks_conventional(subject) else _pr_title(subject, kind), 72)
+        title_slot = _truncate_words(subject if _looks_conventional(subject) else _pr_title(subject, kind), 72)
         derived_branch = f"{_cc_type(subject, kind)}/{_slug(_cc_description(subject))}"
-        changes: str | None = body or subject
+        changes = body or subject
     else:
-        title = _pr_title(goal, kind)
+        title_slot = _pr_title(goal, kind)
         derived_branch = f"devclaw/{task_id[:8]}-{_slug(goal)}"
         changes = None
+    # ``title`` (the function parameter) has now been consumed; ``title_slot`` is
+    # the PR-title string the rest of this function uses. Kept as ``title`` in the
+    # commit-message path below so we don't churn the message shape.
+    title = title_slot
 
     if goal_mode:
         # Stay on the goal branch — every item commits to it cumulatively.

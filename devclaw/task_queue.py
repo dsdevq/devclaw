@@ -372,6 +372,7 @@ class TaskQueue:
         notify_url: Optional[str] = None,
         verify_cmd: Optional[str] = None,
         deliver: bool = False,
+        title: Optional[str] = None,
     ) -> str:
         task_id = str(uuid.uuid4())
         self._store.create_task(
@@ -382,6 +383,7 @@ class TaskQueue:
             notify_url=notify_url,
             verify_cmd=verify_cmd,
             deliver=deliver,
+            title=title,
         )
         self._pump()
         return task_id
@@ -611,6 +613,7 @@ class TaskQueue:
                     delivery = await deliver_change(
                         workspace_dir=workspace_dir, task_id=task_id, goal=goal,
                         kind=kind, verify=verify,
+                        title=(row.title if row else None),
                     )
                     pr_url = delivery.get("pr_url")
                     sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")

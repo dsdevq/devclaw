@@ -64,6 +64,10 @@ class Task:
     deliver: bool
     #: the delivered PR URL (or None if not delivered / only a local branch)
     pr_url: Optional[str]
+    #: Planner-chosen PR title (see Action.title). Optional; when None, delivery
+    #: falls back to the engineer's own commit subject or the goal-derived
+    #: heuristic.
+    title: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -85,6 +89,7 @@ class Task:
             "verifyCmd": self.verify_cmd,
             "deliver": self.deliver,
             "prUrl": self.pr_url,
+            "title": self.title,
         }
 
 
@@ -163,6 +168,7 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         verify_cmd=r["verify_cmd"],
         deliver=bool(r["deliver"]),
         pr_url=r["pr_url"],
+        title=r["title"] if "title" in r.keys() else None,
     )
 
 
@@ -235,7 +241,8 @@ class StateStore:
                   milestone       TEXT,
                   verify_cmd      TEXT,
                   deliver         INTEGER NOT NULL DEFAULT 0,
-                  pr_url          TEXT
+                  pr_url          TEXT,
+                  title           TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS programs (
@@ -295,6 +302,7 @@ class StateStore:
                 "ALTER TABLE tasks ADD COLUMN verify_cmd TEXT",
                 "ALTER TABLE tasks ADD COLUMN deliver INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE tasks ADD COLUMN pr_url TEXT",
+                "ALTER TABLE tasks ADD COLUMN title TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -334,13 +342,15 @@ class StateStore:
         milestone: Optional[str] = None,
         verify_cmd: Optional[str] = None,
         deliver: bool = False,
+        title: Optional[str] = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT INTO tasks
                      (id, kind, status, workspace_dir, goal, notify_url, created_at,
-                      program_id, depends_on, order_idx, milestone, verify_cmd, deliver)
-                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      program_id, depends_on, order_idx, milestone, verify_cmd, deliver,
+                      title)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     kind,
@@ -354,6 +364,7 @@ class StateStore:
                     milestone,
                     verify_cmd,
                     1 if deliver else 0,
+                    title,
                 ),
             )
             self._db.commit()
