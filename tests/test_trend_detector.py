@@ -172,6 +172,82 @@ async def test_cooldown_silences_repeated_fires(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_fingerprint_silences_re_fires_even_after_cooldown_expires(tmp_path):
+    """The 2026-07-03 audit fix: a signal that fired, cooled down, and would
+    fire AGAIN on identical evidence must be suppressed — the story hasn't
+    changed. Without this, R2/D4-D7 fire daily on stale evidence, waking the
+    owner with "no new evidence" retrospectives (the exact pattern the
+    closeloop-frontend-refactor 4-day R2 chain surfaced)."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    caller = _CountingCaller()
+    detector, store, sent, _ = _detector_for(
+        tmp_path=tmp_path,
+        signals=[_StubSignal("S1", scope="per_project")],
+        caller=caller,
+    )
+
+    # First tick: signal fires, LLM is called, entry + notify + fingerprint land.
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    assert caller.calls == 1
+    fp_after_first = store.get_trend_fingerprint("project:" + str(workspace), "S1")
+    assert fp_after_first is not None
+
+    # Simulate the 24h cooldown expiring — clear it manually. The fingerprint
+    # stays. This is the exact scenario the audit hit: cooldown wall clock ran
+    # out, signal is eligible to fire, evidence hasn't changed.
+    store.set_trend_cooldown("project:" + str(workspace), "S1", "0")
+
+    # Second tick: signal STILL WANTS TO FIRE (same evidence), but the
+    # fingerprint check catches it and suppresses. No LLM call, no new entry.
+    initial_content = (workspace / ".devclaw" / "trends.md").read_text()
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    assert caller.calls == 1, "LLM was called a second time on identical evidence"
+    assert (workspace / ".devclaw" / "trends.md").read_text() == initial_content
+    assert len(sent) == 1, "owner was pinged a second time on identical evidence"
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_lets_fresh_evidence_refire(tmp_path):
+    """When the signal's evidence genuinely changes, the fingerprint differs
+    and the mute lifts — the fire lands fresh. This is the "R2 fires again
+    when a NEW fix commit lands on the same file" behavior we DO want."""
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    caller = _CountingCaller()
+
+    # A signal we can mutate between ticks — evidence changes on the second call.
+    class _MutatingSignal(_StubSignal):
+        def __init__(self, sid):
+            super().__init__(sid, scope="per_project")
+            self._tick = 0
+
+        def check(self, ctx):
+            self._tick += 1
+            return SignalResult(
+                fired=True,
+                actual_value=42.0,
+                threshold_value=10.0,
+                evidence={"tick": self._tick, "note": "changed each tick"},
+            )
+
+    detector, store, sent, _ = _detector_for(
+        tmp_path=tmp_path,
+        signals=[_MutatingSignal("S1")],
+        caller=caller,
+    )
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    store.set_trend_cooldown("project:" + str(workspace), "S1", "0")  # expire cooldown
+
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+    # Fresh evidence (tick=2 vs tick=1) → fingerprint differs → fires fresh.
+    assert caller.calls == 2
+    assert len(sent) == 2
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_no_fire_when_signal_does_not_fire(tmp_path):
     workspace = tmp_path / "repo"
     workspace.mkdir()

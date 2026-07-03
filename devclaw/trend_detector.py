@@ -192,6 +192,39 @@ class TrendDetector:
         until = self._now_ms() + hours * 3600 * 1000
         self._store.set_trend_cooldown(scope_key, signal.id, str(until))
 
+    def _fingerprint_matches_last(
+        self, scope_key: str, signal: Signal, result: SignalResult,
+    ) -> bool:
+        """True iff this fire is telling the same story as the last successful
+        fire — same file + same commits + same everything a signal calls
+        identity.
+
+        Added 2026-07-03 after audit found signals firing daily on identical
+        evidence: time-cooldown expired (24h), evidence hadn't changed, LLM
+        was called, wrote a "no new evidence" retrospective, notified the
+        owner, cooldown reset, repeat. This is the second gate: suppress
+        the fire entirely when the underlying situation hasn't changed."""
+        try:
+            new_fp = signal.fingerprint(result)
+        except Exception:  # noqa: BLE001 — signal fingerprint bugs must not break tick
+            return False
+        if not new_fp:
+            return False
+        last = self._store.get_trend_fingerprint(scope_key, signal.id)
+        return last == new_fp
+
+    def _set_fingerprint(
+        self, scope_key: str, signal: Signal, result: SignalResult,
+    ) -> None:
+        """Record this fire's identity so a future identical fire suppresses.
+        Silent on signal-side fingerprint errors (matches the check pathway)."""
+        try:
+            fp = signal.fingerprint(result)
+        except Exception:  # noqa: BLE001
+            return
+        if fp:
+            self._store.set_trend_fingerprint(scope_key, signal.id, fp)
+
     # ---- public entry points (Stage 4 wires these into tick.py) ------------
 
     async def run_per_goal(self, *, goal_id: str, workspace_dir: str) -> None:
@@ -277,14 +310,24 @@ class TrendDetector:
                     fired=False, reason=f"error:{exc.__class__.__name__}",
                 )
                 continue
+            fingerprint_dupe = (
+                result.fired
+                and self._fingerprint_matches_last(scope_key, signal, result)
+            )
             _trace.record_trend_check(
                 signal=signal.id, scope=scope_label,
-                fired=result.fired,
+                fired=result.fired and not fingerprint_dupe,
                 actual=result.actual_value,
                 threshold=result.threshold_value,
-                reason="fired" if result.fired else "below_threshold",
+                reason=(
+                    "fingerprint_dupe"
+                    if fingerprint_dupe
+                    else "fired"
+                    if result.fired
+                    else "below_threshold"
+                ),
             )
-            if result.fired:
+            if result.fired and not fingerprint_dupe:
                 candidates.append((signal, result))
 
         if not candidates:
@@ -333,6 +376,11 @@ class TrendDetector:
             _trace.record_note(f"trend_detector: write failed for {signal.id}: {exc}")
 
         self._set_cooldown(scope_key, signal)
+        # Record the identity of this fire so the next tick suppresses when
+        # the situation hasn't changed. Complements (not replaces) the
+        # time cooldown: cooldown is "don't check for N hours"; fingerprint
+        # is "don't fire again on the same story ever, until real change."
+        self._set_fingerprint(scope_key, signal, result)
 
         # Bookmark-aware signals reset the workspace's observation window
         # after firing — next heartbeat compares against the new HEAD instead

@@ -940,6 +940,21 @@ class StateStore:
         cooldown was set / has been cleared."""
         return self.get_meta(f"trend_cooldown:{scope}:{signal_id}")
 
+    def set_trend_fingerprint(self, scope: str, signal_id: str, fp: str) -> None:
+        """Persist the fingerprint (identity hash of the situation) of the
+        LAST successful fire for one (scope, signal) pair. Added 2026-07-03
+        after audit found R2 firing 4 days consecutively on identical evidence
+        because the time-cooldown expired without any new data. The detector
+        now compares new fires against this fingerprint and suppresses when
+        the story hasn't changed. Distinct from cooldown (which is a wall-
+        clock timer); this is content identity."""
+        self.set_meta(f"trend_fingerprint:{scope}:{signal_id}", fp)
+
+    def get_trend_fingerprint(self, scope: str, signal_id: str) -> Optional[str]:
+        """The last-fire fingerprint for one (scope, signal) pair. ``None``
+        when the signal has never fired at that scope (fresh fire allowed)."""
+        return self.get_meta(f"trend_fingerprint:{scope}:{signal_id}")
+
     def set_trend_bookmark(self, workspace_dir: str, sha: str) -> None:
         """Persist the trend detector's last-seen SHA for one workspace. This
         is the DETECTOR'S OWN namespace — distinct from any future

@@ -187,6 +187,31 @@ class Signal:
     def check(self, ctx: SignalContext) -> SignalResult:
         raise NotImplementedError
 
+    def fingerprint(self, result: "SignalResult") -> str:
+        """Return a stable identity of the situation this fire is describing.
+
+        Two fires with the same fingerprint mean "same underlying evidence,
+        same story" — the trend detector uses this to suppress duplicate
+        retrospective LLM passes (and duplicate owner notifications) after
+        the initial fire, per the 2026-07-03 audit that surfaced R2 firing
+        4 days in a row on an unchanged 7-commit set.
+
+        Default: a stable hash over every key/value in ``result.evidence``.
+        Signals whose evidence contains volatile fields (e.g. a monotonically
+        growing counter of commits since a doc was touched) MUST override
+        this to hash only the stability-defining subset — otherwise the
+        fingerprint drifts every commit and mute is defeated.
+
+        The mute is layered on top of the time cooldown (not a replacement):
+        cooldown enforces "don't check again for N hours", fingerprint
+        enforces "don't fire again on the same story ever, until it changes."
+        """
+        import hashlib
+        import json
+
+        stable = json.dumps(result.evidence or {}, sort_keys=True, default=str)
+        return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
+
 
 # ---- v1 signals (Stage 2 fills in the check() bodies) ----------------------
 
@@ -252,6 +277,7 @@ class R2RepeatedFixHotspot(Signal):
                 "commit_shas": per_file[worst_file][:8],
                 "window_days": self.window_days,
             },
+            # deeper_refs set below (unchanged).
             deeper_refs={
                 "git_log_cmd": (
                     f"git log -E -i --grep='{_FIX_GREP_PATTERN}' --name-only "
@@ -260,6 +286,24 @@ class R2RepeatedFixHotspot(Signal):
                 ),
             },
         )
+
+    def fingerprint(self, result: "SignalResult") -> str:
+        """R2's identity is the (file, sorted-SHA-set) tuple: same file with
+        the same set of fix-class commits = same story. New fix commits on
+        the same file → different fingerprint → refire (real new evidence).
+        Fixes on other files → different file → different fingerprint.
+
+        The window is trailing-30-days so as time passes old commits fall
+        off — but the fingerprint hashes the CURRENT commit set (sorted so
+        order doesn't matter), so an unchanged 30-day window over multiple
+        days produces the same fingerprint even as the calendar advances."""
+        import hashlib
+
+        ev = result.evidence or {}
+        file = ev.get("file", "")
+        shas = tuple(sorted(ev.get("commit_shas", []) or []))
+        stable = f"r2-hotspot:file={file}:shas={','.join(shas)}"
+        return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
 
 
 class _DocFileStaleness(Signal):
@@ -342,6 +386,25 @@ class _DocFileStaleness(Signal):
         """Stable slug (``AGENTS.md`` → ``agents_md``) used in the evidence
         keys so each doc-signal's dict is inspectable independently."""
         return self.doc_path.lower().replace(".", "_").replace("/", "_")
+
+    def fingerprint(self, result: "SignalResult") -> str:
+        """Doc-staleness identity is ``last_<doc>_sha`` — the SHA of the
+        commit that last touched the doc (or None if never). The commits-since
+        counter grows every commit and would defeat the mute; the "story"
+        this signal is telling is "doc was last touched at SHA X and hasn't
+        been touched since," which is uniquely identified by SHA X.
+
+        When SHA X changes (someone finally touched the doc), the signal
+        will either stop firing (below threshold now) or fire fresh with
+        a new fingerprint. Either way is correct behavior."""
+        import hashlib
+
+        ev = result.evidence or {}
+        slug = self._evidence_slug()
+        last_sha = ev.get(f"last_{slug}_sha")
+        exists = ev.get(f"{slug}_exists_in_history", False)
+        stable = f"doc-staleness:{slug}:sha={last_sha}:exists={exists}"
+        return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:16]
 
 
 class D4AgentsMdStaleness(_DocFileStaleness):
