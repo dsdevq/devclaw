@@ -62,6 +62,75 @@ async def test_program_dag_runs_in_dependency_order(store):
     assert all(t.status == "done" for t in tasks)
 
 
+async def test_program_default_open_pr_is_false_child_tasks_dont_deliver(store):
+    """Legacy behavior: submit_program without open_pr → children skip delivery.
+    This is the pre-2026-07-03 shape and must stay the default for programs
+    that don't ask for the reviewable-slice contract."""
+    async def planner(goal, workspace_dir):
+        return [PlannedTask(key="a", goal="do it", kind="implement_feature",
+                            depends_on_keys=[])]
+    q = TaskQueue(store, planner=planner, runner=_ok_runner([]))
+    program_id = q.submit_program(workspace_dir="/ws", goal="x")
+    await q.drain()
+    tasks = store.list_program_tasks(program_id)
+    assert all(t.deliver is False for t in tasks)
+    program = store.get_program(program_id)
+    assert program.open_pr is False and program.verify_cmd is None
+
+
+async def test_program_open_pr_and_verify_cmd_propagate_to_children(store):
+    """Reviewable-slice contract (2026-07-03): when submit_program is called
+    with open_pr=True and verify_cmd, EVERY implement_feature/fix_bug child
+    task the decomposer creates inherits both. Closes the closeloop-mission-v2
+    defect where the activity-timeline program pushed straight to main because
+    the flags stopped at submit_program."""
+    async def planner(goal, workspace_dir):
+        return [
+            PlannedTask(key="a", goal="first slice", kind="implement_feature",
+                        depends_on_keys=[]),
+            PlannedTask(key="b", goal="second slice", kind="implement_feature",
+                        depends_on_keys=["a"]),
+        ]
+    q = TaskQueue(store, planner=planner, runner=_ok_runner([]))
+    program_id = q.submit_program(
+        workspace_dir="/ws", goal="mission-shaped program",
+        open_pr=True, verify_cmd="bash scripts/verify.sh",
+    )
+    await q.drain()
+    program = store.get_program(program_id)
+    assert program.open_pr is True
+    assert program.verify_cmd == "bash scripts/verify.sh"
+    tasks = store.list_program_tasks(program_id)
+    assert len(tasks) == 2
+    for t in tasks:
+        assert t.deliver is True, f"child {t.goal!r} didn't inherit open_pr"
+        assert t.verify_cmd == "bash scripts/verify.sh"
+
+
+async def test_program_review_repository_children_never_deliver_even_when_open_pr(store):
+    """review_repository is inherently read-only — it writes a review report,
+    no code changes to deliver. Even under open_pr=True inheritance, review
+    tasks skip PR + gate. Mirrors the standalone-task carve-out at engine.py."""
+    async def planner(goal, workspace_dir):
+        return [
+            PlannedTask(key="build", goal="build slice", kind="implement_feature",
+                        depends_on_keys=[]),
+            PlannedTask(key="audit", goal="audit the build", kind="review_repository",
+                        depends_on_keys=["build"]),
+        ]
+    q = TaskQueue(store, planner=planner, runner=_ok_runner([]))
+    program_id = q.submit_program(
+        workspace_dir="/ws", goal="build then audit",
+        open_pr=True, verify_cmd="pytest",
+    )
+    await q.drain()
+    tasks = {t.goal: t for t in store.list_program_tasks(program_id)}
+    assert tasks["build slice"].deliver is True
+    assert tasks["build slice"].verify_cmd == "pytest"
+    assert tasks["audit the build"].deliver is False
+    assert tasks["audit the build"].verify_cmd is None
+
+
 async def test_program_persists_milestones(store):
     async def planner(goal, workspace_dir):
         return [
