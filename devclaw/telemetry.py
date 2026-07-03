@@ -42,6 +42,13 @@ _EVAL_VERDICTS = ("on_track", "off_track", "achieved", "stalled", "needs_human")
 #: a signal in its own right about model output quality.
 _VERDICT_RE = re.compile(r'"verdict"\s*:\s*"(\w+)"')
 
+#: Same shape for the structural axis. Present only at done-gate responses;
+#: absent from progress-check calls. Missing values are counted as ``"unknown"``
+#: so the dashboard can spot legacy / non-done-gate calls without them polluting
+#: the concrete grades.
+_STRUCTURAL_RE = re.compile(r'"structural_health"\s*:\s*"(\w+)"')
+_STRUCTURAL_GRADES = ("clean", "concerns", "poor")
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -59,6 +66,19 @@ def _extract_verdict(preview: str) -> Optional[str]:
         return None
     v = m.group(1).strip().lower()
     return v if v in _EVAL_VERDICTS else None
+
+
+def _extract_structural(preview: str) -> Optional[str]:
+    """Pull the ``structural_health`` grade — the axis-B verdict added by C3.
+    Returns None when the field is absent (progress-check or legacy call);
+    only recognized values pass through."""
+    if not preview:
+        return None
+    m = _STRUCTURAL_RE.search(preview)
+    if not m:
+        return None
+    g = m.group(1).strip().lower()
+    return g if g in _STRUCTURAL_GRADES else None
 
 
 def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
@@ -109,6 +129,7 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
         ).fetchall()
 
     verdicts: dict[str, int] = {v: 0 for v in _EVAL_VERDICTS}
+    structural: dict[str, int] = {g: 0 for g in _STRUCTURAL_GRADES}
     unparseable = 0
     eval_calls = 0
     for r in cog_rows:
@@ -119,11 +140,17 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
         if p.get("role") != _EVALUATOR_ROLE:
             continue
         eval_calls += 1
-        v = _extract_verdict(p.get("response_preview") or "")
+        preview = p.get("response_preview") or ""
+        v = _extract_verdict(preview)
         if v is None:
             unparseable += 1
             continue
         verdicts[v] += 1
+        # Structural grade is present only at done-gate responses. Absent
+        # elsewhere — don't inflate the denominator by counting misses.
+        g = _extract_structural(preview)
+        if g is not None:
+            structural[g] += 1
 
     total_terminal = int(sum(by_status.values()))
     done_count = int(by_status.get("done", 0))
@@ -166,6 +193,10 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
             "unparseable_responses": unparseable,
             "steer_rate": round(steer_rate, 4),
             "first_pass_hit_rate": round(first_pass_hit_rate, 4),
+            # Axis-B distribution — only counted for responses that carried a
+            # structural_health field (post-C3 done-gate calls). Empty when no
+            # evaluator response in-window reported one.
+            "structural_grades": structural,
         },
         "estimate_notes": [
             "first_pass_hit_rate mixes done-gate + progress-check evaluator "
@@ -194,6 +225,11 @@ def format_scorecard(sc: dict) -> str:
         lines.append(f"  {v:<14} {e['verdicts'][v]}")
     lines.append(f"steer rate:       {e['steer_rate'] * 100:.1f}%   (off_track / classified)")
     lines.append(f"first-pass hit:   {e['first_pass_hit_rate'] * 100:.1f}%   (achieved / classified)")
+    struct = e.get("structural_grades") or {}
+    if any(struct.values()):
+        lines.append("structural (done-gate only):")
+        for g in _STRUCTURAL_GRADES:
+            lines.append(f"  {g:<14} {struct.get(g, 0)}")
     lines.append("")
     lines.append("estimate notes:")
     for n in sc.get("estimate_notes") or []:

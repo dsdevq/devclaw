@@ -257,13 +257,39 @@ def _stub_is_authorized(clause: ClauseVerdict, stub_acceptable: list[str]) -> bo
     return False
 
 
+#: values the LLM may return for ``structural_health`` at the done-gate. Any
+#: other string is treated as "" (unknown → we don't downgrade on missing data;
+#: the clause-level enforcement still runs).
+_VALID_STRUCTURAL = {"clean", "concerns", "poor"}
+
+
+def _parse_structural(parsed: dict) -> tuple[str, list[str]]:
+    """Extract ``structural_health`` + ``structural_concerns`` from the model
+    response. Tolerates missing / mistyped fields — ``structural_health`` maps
+    only known values through, empty otherwise, so the mechanical downgrade
+    can safely no-op on legacy / non-done-gate responses."""
+    raw_h = parsed.get("structural_health")
+    health = str(raw_h).strip().lower() if raw_h else ""
+    if health not in _VALID_STRUCTURAL:
+        health = ""
+    raw_c = parsed.get("structural_concerns") or []
+    concerns: list[str] = []
+    if isinstance(raw_c, list):
+        for c in raw_c:
+            s = str(c).strip()
+            if s:
+                concerns.append(s)
+    return health, concerns
+
+
 def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: list[str] | None = None) -> EvalResult:
     """Validate + normalize the model's evaluation. When ``at_done_gate=True``,
-    ``achieved`` requires every clause in ``clauses`` to be ``satisfied=True``
-    with non-empty ``evidence`` — otherwise the verdict is downgraded to
-    ``off_track`` with one correction per unsatisfied clause (the safety net
-    that closes the 2026-06-25 "stub everything" failure mode, where the model
-    can still ignore the strict prompt and stamp ``achieved`` on vibes)."""
+    ``achieved`` requires (a) every clause in ``clauses`` to be ``satisfied=True``
+    with non-empty ``evidence`` AND (b) ``structural_health`` in {``clean``,
+    ``concerns``-with-no-substantive-items}. Otherwise the verdict is downgraded
+    to ``off_track`` — the safety net that closes both the 2026-06-25 "stub
+    everything" failure mode (axis A) AND the closeloop-D1/D2/D6 monolith
+    creep (axis B, per plan.md §Production-ready C3)."""
     if not isinstance(parsed, dict):
         raise GoalEvalError("Eval must be a JSON object")
     verdict = parsed.get("verdict")
@@ -274,13 +300,20 @@ def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: lis
     corrections = [str(c).strip() for c in raw_corr if str(c).strip()] if isinstance(raw_corr, list) else []
     question = str(parsed.get("question", "")).strip()
     clauses = _parse_clauses(parsed.get("clauses"))
+    structural_health, structural_concerns = _parse_structural(parsed)
     if verdict == "needs_human" and not question:
         # tolerate a model that put the ask in rationale rather than question
         question = rationale or "the evaluator needs a human decision (no question given)"
-    if verdict == "off_track" and not corrections:
+    if verdict == "off_track" and not corrections and not structural_concerns:
         # off_track is only actionable with corrections; treat a bare off_track as
-        # a soft on_track so we don't silently stall without steering.
-        return EvalResult(verdict="on_track", rationale=rationale or "no corrections given", clauses=clauses)
+        # a soft on_track so we don't silently stall without steering. Structural
+        # concerns count as corrections at the done-gate (below), but for a plain
+        # off_track without either, drop to on_track.
+        return EvalResult(
+            verdict="on_track", rationale=rationale or "no corrections given",
+            clauses=clauses, structural_health=structural_health,
+            structural_concerns=structural_concerns,
+        )
     # Done-gate strictness: achieved MUST be backed by per-clause evidence; the
     # model can technically still claim achieved with no clauses (or with some
     # unsatisfied), so we re-check here and downgrade with derived corrections.
@@ -298,6 +331,8 @@ def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: lis
                     "it."
                 ],
                 clauses=clauses,
+                structural_health=structural_health,
+                structural_concerns=structural_concerns,
             )
         # Mechanical stub-policy enforcement: a satisfied clause whose evidence
         # is structurally a stub (not_yet_available payload, *Stub class, etc.)
@@ -338,10 +373,46 @@ def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: lis
                 ),
                 corrections=derived,
                 clauses=clauses,
+                structural_health=structural_health,
+                structural_concerns=structural_concerns,
+            )
+        # Functional axis passes — now the structural axis (C3, plan.md
+        # §Production-ready). ``poor`` is an unconditional flip. ``concerns``
+        # with itemized items is a flip too — the prompt tells the model to
+        # only itemize substantive items; when the model reports concerns AND
+        # names any, we trust its own judgment that the item is worth blocking.
+        # ``clean`` and empty-``concerns`` both pass. Missing structural_health
+        # is treated as unknown (no flip) — legacy responses stay observable
+        # rather than silently failing; the prompt now mandates the field.
+        structural_fail = (
+            structural_health == "poor"
+            or (structural_health == "concerns" and structural_concerns)
+        )
+        if structural_fail:
+            derived = [
+                f"[structural: {structural_health}] {c}"
+                for c in (structural_concerns or ["structural review reported "
+                          "'poor' but named no concerns — resurface the "
+                          "review's ## Structural health block and cite the "
+                          "specific file:line + fix each item."])
+            ]
+            return EvalResult(
+                verdict="off_track",
+                rationale=(
+                    rationale or f"functional clauses met but structural axis "
+                    f"failed ({structural_health}); clean up the shape before "
+                    "declaring done."
+                ),
+                corrections=derived,
+                clauses=clauses,
+                structural_health=structural_health,
+                structural_concerns=structural_concerns,
             )
     return EvalResult(
         verdict=verdict, rationale=rationale, corrections=corrections,
         question=question, clauses=clauses,
+        structural_health=structural_health,
+        structural_concerns=structural_concerns,
     )
 
 
