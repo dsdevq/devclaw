@@ -1,0 +1,56 @@
+{
+  "name": "off_track_structural_poor",
+  "module": "evaluator",
+  "source": "closeloop-D1/D2/D6 pattern",
+  "notes": "The functional clauses ARE all met — every done_when item has real evidence — but the shape drift is severe: App.tsx is a 1827-LOC god object doing pipeline + contacts + accounts + auth + everything else, and the reviewer graded structural_health=poor with specific file:line concerns. A well-behaved evaluator returns off_track and lists the structural items as corrections. Even if the model returns achieved anyway (functional axis passed → tempting), validate() must mechanically downgrade because structural_health=poor at the done-gate.",
+  "inputs": {
+    "goal": {
+      "id": "closeloop-frontend-refactor",
+      "objective": "Ship the pipeline board UI: drag-drop stage transitions, contact list, account details view. Wire to existing backend API.",
+      "done_when": "The pipeline view supports drag-drop between stages persisted via POST /pipeline/move. Contact list renders and filters. Account detail view renders the contact/deal timeline. Tests cover the drag-drop hook and the account view.",
+      "backlog": [
+        "wire pipeline drag-drop with POST /pipeline/move",
+        "render contact list with client-side filter",
+        "render account detail with timeline"
+      ],
+      "stub_acceptable": [],
+      "cadence": "2h",
+      "workspace_dir": "/repos/closeloop"
+    },
+    "status": {
+      "phase": "verifying",
+      "lifecycle": "executing",
+      "next": "run the done-gate review and evaluate",
+      "actions_dispatched": 4,
+      "deliveries_since_eval": 3
+    },
+    "recent_log": "PR #19–#22 merged into main. Each PR added the requested feature but stacked its handlers into App.tsx rather than creating a feature dir.",
+    "deliveries": "Four PRs merged:\n- #19 pipeline drag-drop wired\n- #20 contact list + filter\n- #21 account detail view\n- #22 timeline component",
+    "review_report": "## Per-clause evidence\n- clause: `The pipeline view supports drag-drop between stages persisted via POST /pipeline/move` — satisfied. src/App.tsx:432 usePipelineDrag() + POST call landed; tests/hooks/usePipelineDrag.test.ts green.\n- clause: `Contact list renders and filters` — satisfied. src/App.tsx:889 ContactsList component + client-side filter; tests/components/ContactsList.test.tsx green.\n- clause: `Account detail view renders the contact/deal timeline` — satisfied. src/App.tsx:1240 AccountDetail component wraps Timeline (src/App.tsx:1502).\n- clause: `Tests cover the drag-drop hook and the account view` — satisfied. tests/hooks/usePipelineDrag.test.ts + tests/components/AccountDetail.test.tsx both present + green.\n\n## Structural health\nverdict: poor. Specific concerns:\n- src/App.tsx has grown to 1827 lines and now owns pipeline + contacts + accounts + auth + activities in one file. Should be decomposed into src/features/{pipeline,contacts,accounts}/*View.tsx feature folders.\n- src/App.tsx:1502 Timeline is defined inline inside AccountDetail. Should be extracted to src/features/accounts/Timeline.tsx with its own tests.\n- src/App.tsx:889 ContactsList imports and mutates a shared `contacts` mutable ref instead of using useState — race-prone; should own its own state or accept a controlled prop.\n\n## Risks not in done_when\nnone material — but the shape drift compounds with every future feature merged into App.tsx.",
+    "at_done_gate": true,
+    "spec": ""
+  },
+  "expected": {
+    "verdict": "off_track",
+    "must_contain_rationale_hints": ["structural"],
+    "must_contain_correction_hints": ["App.tsx", "feature"],
+    "notes": "Functional clauses all pass; structural_health=poor with three specific named items. The correct verdict is off_track with the structural items as corrections. If the model returns achieved (because clauses ARE all satisfied), validate() must downgrade because structural_health=poor at the done-gate — closes the closeloop-D1/D2/D6 shape-drift failure mode."
+  },
+  "canned_model_output": {
+    "verdict": "achieved",
+    "rationale": "Every done_when clause has evidence in the review. The model incorrectly ignores the structural axis; validate() must catch this.",
+    "corrections": [],
+    "clauses": [
+      {"clause": "The pipeline view supports drag-drop between stages persisted via POST /pipeline/move", "satisfied": true, "evidence": "src/App.tsx:432 usePipelineDrag() + tests/hooks/usePipelineDrag.test.ts green."},
+      {"clause": "Contact list renders and filters", "satisfied": true, "evidence": "src/App.tsx:889 ContactsList; tests/components/ContactsList.test.tsx green."},
+      {"clause": "Account detail view renders the contact/deal timeline", "satisfied": true, "evidence": "src/App.tsx:1240 AccountDetail wraps Timeline (src/App.tsx:1502)."},
+      {"clause": "Tests cover the drag-drop hook and the account view", "satisfied": true, "evidence": "tests/hooks/usePipelineDrag.test.ts + tests/components/AccountDetail.test.tsx green."}
+    ],
+    "structural_health": "poor",
+    "structural_concerns": [
+      "src/App.tsx:1-1827 — App.tsx is a 1827-LOC god object owning pipeline+contacts+accounts+auth+activities; decompose into src/features/{pipeline,contacts,accounts}/*View.tsx.",
+      "src/App.tsx:1502 — Timeline is defined inline inside AccountDetail; extract to src/features/accounts/Timeline.tsx with its own tests.",
+      "src/App.tsx:889 — ContactsList mutates a shared `contacts` mutable ref instead of useState; own state or accept a controlled prop."
+    ]
+  }
+}

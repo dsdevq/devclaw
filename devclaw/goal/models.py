@@ -261,6 +261,16 @@ class EvalResult:
     question: str = ""
     #: per-clause findings — populated at the done-gate. Empty pre-done-gate.
     clauses: list[ClauseVerdict] = field(default_factory=list)
+    #: axis-B verdict at the done-gate: ``clean`` | ``concerns`` | ``poor``.
+    #: Empty pre-done-gate. When ``poor`` (or ``concerns`` with substantive named
+    #: items), ``validate()`` mechanically downgrades ``achieved`` → ``off_track``
+    #: — the second half of the closeloop-D1/D2/D6 safety net (the model has an
+    #: incentive to declare done; mechanism has none).
+    structural_health: str = ""
+    #: itemized structural concerns backing ``structural_health``. Empty when
+    #: ``clean``. When ``poor`` or a substantive ``concerns``, each entry becomes
+    #: a correction on the downgrade path.
+    structural_concerns: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

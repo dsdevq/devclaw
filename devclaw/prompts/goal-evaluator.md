@@ -100,6 +100,19 @@ Respond with STRICT JSON ONLY — no prose, no markdown fences. Schema:
       "evidence": "<specific file/symbol/test names from the repo review, OR 'missing — should live in <where>' when unsatisfied>"
     }}
   ],
+  "structural_health": "clean" | "concerns" | "poor",
+    // REQUIRED at the done-gate. Reflects the review's ``## Structural health``
+    // section (axis B). ``clean`` = no substantive concerns. ``concerns`` =
+    // minor items you consider individually not-blocking. ``poor`` = at least
+    // one substantive concern (god object, coupled responsibilities that should
+    // have been split, no-op stub satisfying a clause literally without doing
+    // the work, untested behaviour the new code added).
+  "structural_concerns": [
+    // list the specific items you saw. Empty when ``clean``. Each entry names
+    // file:line + the senior-eng move the agent should make. Mandatory when
+    // ``structural_health`` is ``poor``; recommended when ``concerns``.
+    "<file:line — what's wrong — the fix>"
+  ],
   "corrections": [
     // present iff verdict == 'off_track'
     "[clause N] <concrete next step naming the unsatisfied clause>"
@@ -111,3 +124,9 @@ Hard rule for `achieved`: every entry in `clauses` MUST have
 `"satisfied": true` AND non-empty `"evidence"`. If any clause is
 unsatisfied, the only valid done-gate verdict is `off_track` with
 corrections — not `achieved`, not `on_track`.
+
+Hard rule for `achieved` (structural axis): `structural_health` MUST be
+`clean` OR `concerns` with `structural_concerns` naming only minor items.
+`poor` — or `concerns` with substantive items — is `off_track`, with each
+concern surfaced as a correction. If you claim `achieved` while reporting
+`poor`, the mechanical validator flips you to `off_track` — don't invite it.

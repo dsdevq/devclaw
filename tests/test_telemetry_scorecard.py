@@ -175,3 +175,57 @@ def test_format_scorecard_smoke(store):
         "steer rate:", "first-pass hit:", "estimate notes:",
     ):
         assert token in text, f"format_scorecard dropped {token!r}"
+
+
+def _emit_evaluator_with_structural(store: StateStore, goal_id: str, verdict: str, grade: str) -> None:
+    """Simulate a done-gate evaluator response that carries both verdict AND
+    the new C3 structural_health grade. Preview is capped at 240 chars — real
+    tracer's cap — so the extractor's regex must hit within that."""
+    store.append_trace_event(
+        trace_id=f"trace-{time.time_ns()}",
+        goal_id=goal_id,
+        kind="cognition",
+        payload={
+            "kind": "cognition",
+            "role": "evaluator",
+            "model": "sonnet",
+            "response_preview": json.dumps(
+                {"verdict": verdict, "structural_health": grade, "rationale": "test"}
+            )[:240],
+        },
+    )
+
+
+def test_structural_grades_counted_per_done_gate_response(store):
+    """C3: done-gate responses now carry structural_health. Telemetry counts
+    the grade distribution; progress-check calls (no structural_health) don't
+    inflate the denominator."""
+    _emit_evaluator_with_structural(store, "g", "achieved", "clean")
+    _emit_evaluator_with_structural(store, "g", "achieved", "clean")
+    _emit_evaluator_with_structural(store, "g", "off_track", "poor")
+    _emit_evaluator_with_structural(store, "g", "off_track", "concerns")
+    # A progress-check response without structural_health — should NOT count.
+    _emit_evaluator_verdict(store, "g", "on_track")
+
+    sc = compute_scorecard(store, window_hours=24)
+    grades = sc["evaluator"]["structural_grades"]
+    assert grades == {"clean": 2, "concerns": 1, "poor": 1}
+    # verdict counting still works over the full 5 responses.
+    assert sc["evaluator"]["total_calls"] == 5
+
+
+def test_format_scorecard_renders_structural_when_any_reported(store):
+    """format_scorecard shows structural block only when the window contained
+    at least one graded response — an all-zero row would be noise."""
+    _emit_evaluator_with_structural(store, "g", "achieved", "clean")
+    text = format_scorecard(compute_scorecard(store, window_hours=24))
+    assert "structural (done-gate only):" in text
+    assert "clean" in text and "concerns" in text and "poor" in text
+
+    # Empty-store case: no structural block.
+    empty_store = StateStore(":memory:")
+    try:
+        empty_text = format_scorecard(compute_scorecard(empty_store, window_hours=24))
+        assert "structural (done-gate only):" not in empty_text
+    finally:
+        empty_store.close()
