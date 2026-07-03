@@ -146,6 +146,15 @@ class Action:
     verify_cmd: Optional[str] = None
     open_pr: bool = True
     addresses: list[str] = field(default_factory=list)
+    #: A concise conventional-commit-shaped PR title the PLANNER chose based on
+    #: what it's asking the executor to build — e.g. ``feat: add /health
+    #: endpoint``. Threaded planner → Task → delivery so the opened PR reads as
+    #: what was asked, not what a summary of a mid-work commit subject
+    #: interpreted after the fact (see plan.md §Production-ready C7 and commit
+    #: d41d27b which grounded the fallback but couldn't remove the guesswork).
+    #: Optional: when None, delivery falls back to the engineer's own commit
+    #: subject, then the diff-grounded _pr_title(goal, kind) heuristic.
+    title: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -71,6 +71,7 @@ class InProcessEngine:
                 notify_url=nu,
                 verify_cmd=None if is_review else (action.verify_cmd or goal.verify_cmd),
                 deliver=False if is_review else action.open_pr,
+                title=None if is_review else action.title,
             )
             return InFlight("devclaw", action.tool, task_id, "task", action.goal)
         raise GoalEngineError(f"unknown engine tool: {action.tool}")

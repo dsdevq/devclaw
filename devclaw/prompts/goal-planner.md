@@ -62,6 +62,7 @@ Respond with STRICT JSON ONLY — no prose, no markdown fences. Schema:
     {{
       "tool": "start_program" | "implement_feature" | "fix_bug" | "review_repository",
       "goal": "<concrete instruction for the engine>",
+      "title": "<conventional-commit-shaped PR title, ≤72 chars, e.g. 'feat: add /health endpoint' — describes what you are asking to be built, not how; optional but recommended for implement_feature/fix_bug so the opened PR describes intent instead of guessing from the commit>",
       "open_pr": true,
       "addresses": ["<checklist-item-id>", ...]   // checklist-mode only; empty in backlog mode
     }}

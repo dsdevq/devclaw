@@ -194,6 +194,8 @@ def validate(parsed: object) -> PlanResult:
             if s and s not in seen:
                 seen.add(s)
                 addresses.append(s)
+    raw_title = a.get("title")
+    parsed_title = str(raw_title).strip() if raw_title else None
     action = Action(
         engine="devclaw",
         tool=tool,
@@ -201,6 +203,7 @@ def validate(parsed: object) -> PlanResult:
         verify_cmd=(str(a["verify_cmd"]).strip() if a.get("verify_cmd") else None),
         open_pr=bool(a.get("open_pr", True)),
         addresses=addresses,
+        title=parsed_title or None,
     )
     return PlanResult(decision="act", actions=[action], note=note or g)
 

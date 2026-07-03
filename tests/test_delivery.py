@@ -251,6 +251,57 @@ async def test_deliver_goal_branch_mode_does_not_create_per_task_branch(tmp_path
     assert "goal/my-goal" in refs and "devclaw/" not in refs and "feat/" not in refs
 
 
+async def test_deliver_uses_explicit_planner_title_over_engineer_commit(tmp_path):
+    """C7 climb: when the planner emits a `title:` on the Action, it wins over
+    the engineer's own commit subject and the goal-derived heuristic. Closes
+    the failure mode where a mid-work commit subject describes only part of
+    what was asked (planner has full intent; commit describes latest step)."""
+    origin = str(tmp_path / "origin.git")
+    subprocess.run(["git", "init", "--bare", "-q", origin], check=True)
+    repo = str(tmp_path / "repo")
+    subprocess.run(["git", "clone", "-q", origin, repo], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (tmp_path / "repo" / "base.txt").write_text("base\n")
+    _git(repo, "add", "-A"); _git(repo, "commit", "-q", "-m", "base")
+    _git(repo, "push", "-q", "origin", "HEAD")
+    # engineer's commit describes only their last atomic step.
+    (tmp_path / "repo" / "feature.txt").write_text("agent change\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "wip: iterate on the parser")
+
+    r = await deliver_change(
+        workspace_dir=repo, task_id="abcd1234ef",
+        goal="Rewrite the parser to support nested groups...",
+        kind="implement_feature",
+        title="feat(parser): support nested groups",
+    )
+
+    assert r["committed"] is True and r["pushed"] is True and r["delivered"] is True
+    # branch is derived from the planner's title, not from `wip: iterate…`.
+    assert r["branch"] == "feat/support-nested-groups"
+
+
+async def test_deliver_explicit_title_prefixes_kind_when_bare(tmp_path):
+    """A planner-supplied title without a conventional-commit prefix still gets
+    the kind-derived prefix, so the delivered PR reads as feat: / fix: even
+    when the planner didn't remember the shape."""
+    repo = str(tmp_path / "repo")
+    os.makedirs(repo)
+    _init_repo(repo)
+    (tmp_path / "repo" / "new.txt").write_text("change\n")
+
+    r = await deliver_change(
+        workspace_dir=repo, task_id="abcd1234ef",
+        goal="do the thing", kind="implement_feature",
+        title="add /health endpoint",
+    )
+
+    # local-only (no remote) — but the branch was derived from the title.
+    assert r["committed"] is True
+    assert r["branch"] == "feat/add-health-endpoint"
+
+
 async def test_current_branch_helper_returns_branch_or_none(tmp_path):
     from devclaw.delivery import _current_branch
 
@@ -322,7 +373,7 @@ async def test_done_is_not_observable_before_delivery(store, tmp_path, monkeypat
     seen = {}
     pr = "https://github.com/dsdevq/lifekit-dashboard/pull/99"
 
-    async def fake_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None):
+    async def fake_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None):
         # While delivery runs, the task must still be 'running' (not yet 'done').
         seen["status_during_delivery"] = store.get_task(task_id).status
         seen["pr_url_during_delivery"] = store.get_task(task_id).pr_url
