@@ -654,3 +654,122 @@ def test_all_signals_set():
     # Bookmark-aware signals are exactly D1/D2/D3 in this PR.
     bookmark_aware = {s.id for s in sigs if s.advances_bookmark}
     assert bookmark_aware == {"D1", "D2", "D3"}
+
+
+# ---- fingerprint (mute mechanism, 2026-07-03 audit fix) --------------------
+
+
+def _fake_signal_result(evidence: dict, fired: bool = True):
+    """Build a SignalResult without importing the trend_signals internals."""
+    from devclaw.trend_signals import SignalResult
+    return SignalResult(fired=fired, evidence=evidence)
+
+
+def test_r2_fingerprint_stable_across_ticks_with_same_evidence():
+    """R2 fingerprint is identity of (file, sorted-SHA-set). Two fires with
+    the same file + same SHA set → same fingerprint → mute activates.
+    Regression against the 4-day-in-a-row R2 fires on closeloop-frontend-refactor
+    2026-06-29 through 2026-07-02 that the audit surfaced."""
+    r2 = R2RepeatedFixHotspot()
+    ev = {
+        "file": "AGENTS.md",
+        "fix_class_commit_count": 7,
+        "commit_shas": ["a1", "b2", "c3", "d4", "e5", "f6", "07"],
+        "window_days": 30,
+    }
+    fp1 = r2.fingerprint(_fake_signal_result(ev))
+    fp2 = r2.fingerprint(_fake_signal_result(ev))
+    assert fp1 == fp2
+    # SHA ORDER doesn't matter — we sort before hashing.
+    ev_reordered = {**ev, "commit_shas": ["07", "f6", "e5", "d4", "c3", "b2", "a1"]}
+    assert r2.fingerprint(_fake_signal_result(ev_reordered)) == fp1
+
+
+def test_r2_fingerprint_differs_when_new_fix_commit_lands():
+    """A new fix-class commit on the hot file adds a SHA to commit_shas —
+    fingerprint MUST differ so the fire refires on genuinely fresh evidence."""
+    r2 = R2RepeatedFixHotspot()
+    base = {"file": "AGENTS.md", "commit_shas": ["a1", "b2", "c3", "d4"]}
+    later = {"file": "AGENTS.md", "commit_shas": ["a1", "b2", "c3", "d4", "e5"]}
+    assert r2.fingerprint(_fake_signal_result(base)) != r2.fingerprint(
+        _fake_signal_result(later)
+    )
+
+
+def test_r2_fingerprint_differs_when_hot_file_moves():
+    """Different hot file = different story = different fingerprint. Prevents
+    the (unlikely but valid) case of two files sharing the same SHA set."""
+    r2 = R2RepeatedFixHotspot()
+    a = {"file": "AGENTS.md", "commit_shas": ["a1", "b2", "c3", "d4"]}
+    b = {"file": "README.md", "commit_shas": ["a1", "b2", "c3", "d4"]}
+    assert r2.fingerprint(_fake_signal_result(a)) != r2.fingerprint(_fake_signal_result(b))
+
+
+def test_doc_staleness_fingerprint_stable_when_last_touched_sha_unchanged():
+    """D4/D5/D6/D7 fingerprint hangs off the last-touched SHA. The commits-
+    since counter grows every commit but the SHA is what defines "situation."
+    Same SHA across ticks → same fingerprint → mute suppresses. Prevents the
+    D5 README-staleness pattern from firing every day as the counter grows."""
+    d5 = D5ReadmeStaleness()
+    ev_today = {
+        "commits_since_readme_md_touched": 40,
+        "total_commits": 54,
+        "last_readme_md_sha": "0a109113b3a5e78f6f98e554375622354031c1bb",
+        "readme_md_exists_in_history": True,
+    }
+    ev_tomorrow_10_more_commits = {
+        **ev_today,
+        "commits_since_readme_md_touched": 50,
+        "total_commits": 64,
+    }
+    fp1 = d5.fingerprint(_fake_signal_result(ev_today))
+    fp2 = d5.fingerprint(_fake_signal_result(ev_tomorrow_10_more_commits))
+    # SAME fingerprint even though the counter grew — because the DOC-touched
+    # SHA is unchanged. The "story" is still "README hasn't been touched since sha X."
+    assert fp1 == fp2
+
+
+def test_doc_staleness_fingerprint_differs_when_doc_finally_touched():
+    """When the doc is finally touched, last_<doc>_sha changes → fingerprint
+    changes → if the signal still fires (threshold still crossed for a
+    different reason), it fires fresh, not muted."""
+    d5 = D5ReadmeStaleness()
+    old = {"last_readme_md_sha": "aaa", "readme_md_exists_in_history": True}
+    new = {"last_readme_md_sha": "bbb", "readme_md_exists_in_history": True}
+    assert d5.fingerprint(_fake_signal_result(old)) != d5.fingerprint(_fake_signal_result(new))
+
+
+def test_doc_staleness_fingerprint_differs_when_doc_first_created():
+    """Special case: doc previously didn't exist (last SHA = None), then
+    someone created it (last SHA becomes a real SHA). Fingerprint must
+    differ — the story "doc never existed" is genuinely different from
+    "doc exists but was last touched at SHA X"."""
+    d5 = D5ReadmeStaleness()
+    never = {"last_readme_md_sha": None, "readme_md_exists_in_history": False}
+    now_exists = {"last_readme_md_sha": "abc", "readme_md_exists_in_history": True}
+    assert d5.fingerprint(_fake_signal_result(never)) != d5.fingerprint(
+        _fake_signal_result(now_exists)
+    )
+
+
+def test_default_fingerprint_hashes_full_evidence():
+    """Signals that don't override ``fingerprint`` get the default: stable
+    hash over sorted evidence keys+values. Same evidence dict → same fp;
+    any change → different fp. Catches signals that don't yet override
+    (H4 today, future signals tomorrow) and ensures they mute correctly
+    when evidence is verbatim-identical."""
+    from devclaw.trend_signals import Signal
+
+    class _ProbeSignal(Signal):
+        id = "PROBE"
+
+    sig = _ProbeSignal()
+    ev1 = {"a": 1, "b": [2, 3], "c": "x"}
+    ev2 = {"a": 1, "b": [2, 3], "c": "x"}
+    assert sig.fingerprint(_fake_signal_result(ev1)) == sig.fingerprint(
+        _fake_signal_result(ev2)
+    )
+    ev3 = {"a": 1, "b": [2, 3, 4], "c": "x"}  # one extra list element
+    assert sig.fingerprint(_fake_signal_result(ev1)) != sig.fingerprint(
+        _fake_signal_result(ev3)
+    )
