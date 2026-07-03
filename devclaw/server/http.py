@@ -473,11 +473,37 @@ async def goal_json(request: Request) -> Response:
         return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
     phase = g.get("phase")
     current_index = _phase_index(phase)
-    timeline = [
-        {"name": name, "reached": i <= current_index, "current": i == current_index,
-         "timestampMs": None}
-        for i, name in enumerate(_TIMELINE_PHASES)
-    ]
+    # Timeline slots are the fixed 5-slot design contract. For each slot, if the
+    # goal's phase_history recorded arriving at that phase, we stamp the FIRST
+    # arrival. Repeated visits (idle → executing → idle → executing) don't
+    # rewrite the label — matches the design's "when did this phase happen"
+    # semantic, not "most recent".
+    history_first_at: dict[str, str] = {}
+    for entry in g.get("phase_history") or []:
+        pn = str(entry.get("phase") or "")
+        if pn and pn not in history_first_at and entry.get("at"):
+            history_first_at[pn] = str(entry["at"])
+
+    def _iso_to_ms(iso: str) -> int | None:
+        try:
+            ts = _dt.datetime.fromisoformat(iso)
+        except ValueError:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_dt.timezone.utc)
+        return int(ts.timestamp() * 1000)
+
+    timeline = []
+    for i, name in enumerate(_TIMELINE_PHASES):
+        stamp_iso = history_first_at.get(name)
+        timeline.append(
+            {
+                "name": name,
+                "reached": i <= current_index,
+                "current": i == current_index,
+                "timestampMs": _iso_to_ms(stamp_iso) if stamp_iso else None,
+            }
+        )
     return JSONResponse(
         {
             "id": g["id"],

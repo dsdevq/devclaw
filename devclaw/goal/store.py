@@ -15,6 +15,7 @@ A clock is injected (``now``) so ticks are deterministic under test.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -139,6 +140,12 @@ class GoalStore:
                 is_discovery=bool(f.get("is_discovery", False)),
                 addresses=addresses,
             )
+        raw_history = fm.get("phase_history") or []
+        history: tuple[dict, ...] = tuple(
+            {"phase": str(e.get("phase")), "at": str(e.get("at"))}
+            for e in raw_history
+            if isinstance(e, dict) and e.get("phase") and e.get("at")
+        )
         return GoalStatus(
             phase=fm.get("phase", "idle"),
             lifecycle=fm.get("lifecycle") or None,
@@ -155,9 +162,34 @@ class GoalStore:
             last_eval_note=fm.get("last_eval_note", "") or "",
             last_progress_at=fm.get("last_progress_at") or None,
             no_progress_notified=bool(fm.get("no_progress_notified", False)),
+            phase_history=history,
         )
 
     def save_status(self, goal_id: str, status: GoalStatus) -> None:
+        # phase_history is append-only. When the phase differs from what's on
+        # disk we tack a new {phase, at} entry on. We consult the disk (not
+        # just the passed-in status) because callers sometimes hand us a
+        # snapshot older than the file — trusting only in-memory would let a
+        # stale save silently drop history.
+        prev_phase: str | None = None
+        prev_hist: tuple[dict, ...] = tuple(status.phase_history)
+        status_path = self._dir(goal_id) / "STATUS.md"
+        if status_path.exists():
+            prev_fm = self._read_frontmatter(status_path.read_text())
+            prev_phase = prev_fm.get("phase")
+            raw_prev_hist = prev_fm.get("phase_history") or []
+            disk_hist = tuple(
+                {"phase": str(e.get("phase")), "at": str(e.get("at"))}
+                for e in raw_prev_hist
+                if isinstance(e, dict) and e.get("phase") and e.get("at")
+            )
+            if len(disk_hist) > len(prev_hist):
+                prev_hist = disk_hist
+        if status.phase and status.phase != prev_phase:
+            prev_hist = prev_hist + (
+                {"phase": status.phase, "at": self._now().isoformat(timespec="seconds")},
+            )
+        status = replace(status, phase_history=prev_hist)
         fm: dict = {
             "phase": status.phase,
             "lifecycle": status.lifecycle,
@@ -187,6 +219,7 @@ class GoalStore:
             "last_eval_note": status.last_eval_note,
             "last_progress_at": status.last_progress_at,
             "no_progress_notified": status.no_progress_notified,
+            "phase_history": [dict(e) for e in status.phase_history],
         }
         body = self._render_status_body(goal_id, status)
         text = "---\n" + yaml.safe_dump(fm, sort_keys=False).rstrip() + "\n---\n\n" + body

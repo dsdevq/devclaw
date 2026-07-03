@@ -11,6 +11,23 @@ import { mono, palettes } from "../theme";
 
 const VERSION_LABEL = "v0.7.2";
 
+// Timeline nodes want a compact "HH:MM" tag if the phase was entered today,
+// otherwise a short "MM/DD" — matches the Goal Detail mock's ephemeral time
+// labels (e.g. "09:01") for phases that transitioned during the same session.
+function formatTimestampShort(ms: number | null): string {
+  if (ms === null) return "—";
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) {
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+  return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+}
+
 const VERDICT_LABEL: Record<Verdict, string> = {
   on_track: "On track",
   off_track: "Off track",
@@ -444,7 +461,7 @@ function PhaseTimeline({
                     color: p.textMuted,
                   }}
                 >
-                  —
+                  {formatTimestampShort(n.timestampMs)}
                 </span>
               </div>
             );
