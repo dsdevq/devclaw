@@ -7,10 +7,19 @@ stay thin — fetch data, hand it to a renderer.
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
+import mimetypes
+from pathlib import Path
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+)
 
 from .. import __version__
 from . import dashboard as _dash
@@ -121,6 +130,110 @@ async def dashboard_projects(_request: Request) -> Response:
     control-plane overview that ties repos to the goals driving them."""
     items = [project_rollup(p, _goal_get) for p in registry.list()]
     return HTMLResponse(_dash.render_projects(items, version=__version__, token_qs=TOKEN_QS))
+
+
+# ---- Console (Vite + React SPA, served as a static bundle) ----------------
+# The three-screen web console lives under `devclaw/server/console/`. `npm run
+# build` writes `console/dist/`; the bytes on disk are what these routes serve.
+# The SPA does client-side routing under basename="/console", so any path that
+# doesn't map to a file falls through to `index.html`.
+
+_CONSOLE_DIST = Path(__file__).resolve().parent / "console" / "dist"
+
+
+def _serve_console_file(rel: str) -> Response:
+    if not _CONSOLE_DIST.exists():
+        return PlainTextResponse(
+            "devclaw console bundle not built — run `npm --prefix "
+            "devclaw/server/console run build`",
+            status_code=503,
+        )
+    # Resolve safely inside dist. `Path.resolve()` normalizes `..`, then we
+    # verify the resolved path stays inside the dist tree.
+    target = (_CONSOLE_DIST / rel).resolve()
+    try:
+        target.relative_to(_CONSOLE_DIST)
+    except ValueError:
+        return PlainTextResponse("forbidden", status_code=403)
+    if target.is_file():
+        media, _ = mimetypes.guess_type(str(target))
+        return FileResponse(str(target), media_type=media)
+    # SPA fallback: unknown paths serve the app shell so client-side routing works.
+    index = _CONSOLE_DIST / "index.html"
+    if not index.is_file():
+        return PlainTextResponse("console index.html missing from bundle", status_code=500)
+    return FileResponse(str(index), media_type="text/html")
+
+
+@mcp.custom_route("/console", methods=["GET"])
+async def console_index(_request: Request) -> Response:
+    return _serve_console_file("index.html")
+
+
+@mcp.custom_route("/console/{path:path}", methods=["GET"])
+async def console_asset(request: Request) -> Response:
+    return _serve_console_file(request.path_params["path"] or "index.html")
+
+
+# ---- JSON API surfaces the console reads ----------------------------------
+
+
+def _last_activity_ms(goals_list: list[dict]) -> int | None:
+    """Newest `progress.last_at` (ISO ts) across a project's linked goals,
+    converted to epoch ms. `None` when no goal has fired progress yet.
+
+    Kept here (not on Project) so the registry stays free of goal-shape
+    knowledge — reading live phase/progress is the rollup's job."""
+    best: int | None = None
+    for g in goals_list:
+        if g.get("missing"):
+            continue
+        last_at = (g.get("progress") or {}).get("last_at")
+        if not isinstance(last_at, str):
+            continue
+        try:
+            ts = _dt.datetime.fromisoformat(last_at)
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=_dt.timezone.utc)
+        ms = int(ts.timestamp() * 1000)
+        if best is None or ms > best:
+            best = ms
+    return best
+
+
+def _active_goal_count(goals_list: list[dict]) -> int:
+    """A goal is 'active' from the console's POV when it isn't terminal — the
+    Projects Home column matches the design's semantics ('Active goals')."""
+    terminal = {"done", "cancelled", "error", "achieved"}
+    return sum(
+        1
+        for g in goals_list
+        if not g.get("missing") and (g.get("phase") not in terminal)
+    )
+
+
+@mcp.custom_route("/projects.json", methods=["GET"])
+async def projects_json(_request: Request) -> Response:
+    """Projects Home feed: name, status, active goal count, last activity.
+
+    Same source of truth as the `/projects` HTML route — project_rollup — so
+    the two views can't drift. Shape is documented in
+    `devclaw/server/console/src/api.ts` (ProjectRow)."""
+    out: list[dict] = []
+    for p in registry.list():
+        rollup = project_rollup(p, _goal_get)
+        out.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "status": p.status,
+                "activeGoals": _active_goal_count(rollup["goals"]),
+                "lastActivityMs": _last_activity_ms(rollup["goals"]),
+            }
+        )
+    return JSONResponse(out)
 
 
 @mcp.custom_route("/goals/{goal_id}", methods=["GET"])
