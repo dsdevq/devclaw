@@ -8,7 +8,6 @@ thin on purpose: validate inputs, dispatch, return JSON. Cognition lives below
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Annotated, Literal, Optional
 
@@ -125,37 +124,41 @@ async def review_trends(scope: str = "harness_self", limit_chars: int = 5000) ->
 async def onboard(
     workspace_dir: str, focus: str = "", notify_url: Optional[str] = None
 ) -> str:
-    """Onboard a repository: analyze it and write a DRAFT AGENTS.md so future
-    tasks start informed. OpenHands inspects the workspace READ-ONLY (it modifies
-    no file except the AGENTS.md it writes) and captures COMPREHENSION ONLY —
-    stack, layout, how to build/run/test (incl. the command to use as the verify
-    gate), conventions, and setup gotchas. Project direction / decision-log are
-    deliberately out of scope.
+    """Onboard a repository: analyze it and write a DRAFT documentation set so
+    future tasks + humans start informed. OpenHands inspects the workspace
+    READ-ONLY (it modifies no file except the four docs it writes) and captures
+    COMPREHENSION ONLY across four scoped documents:
 
-    Human-in-the-loop: the draft is NOT authoritative until you review it. It
-    lands in the repo working tree (review it via `git diff`) and the agent's
-    summary appears in the task's result_json once status=done. If the repo
-    already has an AGENTS.md, the agent validates it against the real repo and
-    keeps what's still accurate — only correcting what's wrong or missing —
-    rather than clobbering hand-written project memory. Returns task_id
-    immediately; same optional notify_url as implement_feature.
+      - AGENTS.md      — agent-facing: stack, layout, build/run/test commands
+                         (with the verify gate), conventions, gotchas.
+      - README.md      — human-facing: one-paragraph purpose, quickstart,
+                         high-level pointer at layout, one-line status.
+      - ARCHITECTURE.md — component map, data flow, cross-cutting concerns,
+                         notable design decisions (cross-links to DECISIONS).
+      - DECISIONS.md   — ADR-style entries reconstructed from git log + code +
+                         prior docs. Empty-with-header is acceptable when
+                         nothing is honestly inferrable.
 
-    Also automatically runs setup_cicd: if the repo has no GitHub Actions
-    workflows, a standard self-hosted-runner CI file is committed and pushed
-    before the analysis task starts. The cicd_setup field in the response
-    reports what happened (present | created | error)."""
+    Closes the C6 gap (`plan.md` §Production-ready): a project with only
+    AGENTS.md is undocumented from a human's point of view. The onboarding
+    skill (`skills/onboard/00-onboard.md`) enforces boundary discipline
+    (no ADR reasoning in README, no quickstart in ARCHITECTURE) so the four
+    docs don't blur into each other.
+
+    Human-in-the-loop: each doc lands with a top-of-file DRAFT marker and is
+    NOT authoritative until you review it. The agent won't clobber a
+    substantive existing doc — it validates each part against the real repo
+    and only corrects what's wrong or missing. Returns task_id immediately;
+    same optional notify_url as implement_feature."""
     if not workspace_dir:
         raise ToolError("onboard requires workspace_dir")
-    cicd = await asyncio.get_event_loop().run_in_executor(
-        None, _cicd_setup_sync, workspace_dir
-    )
     task_id = queue.submit(
         kind="onboard",
         workspace_dir=workspace_dir,
         goal=focus or "general onboarding",
         notify_url=notify_url,
     )
-    return json.dumps({"task_id": task_id, "status": "pending", "cicd_setup": cicd}, indent=2)
+    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
 @mcp.tool

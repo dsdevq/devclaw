@@ -262,18 +262,24 @@ class R2RepeatedFixHotspot(Signal):
         )
 
 
-class D4AgentsMdStaleness(Signal):
-    """``AGENTS.md`` untouched while the project has had material churn.
+class _DocFileStaleness(Signal):
+    """Base for "single documentation file untouched while the project has had
+    material churn" signals. Subclasses pin ``id``, ``doc_path``, and (rarely)
+    ``commits_threshold``.
 
-    Fires when ``AGENTS.md`` has not been committed for ≥30 commits AND the
-    project itself has had ≥30 total commits. A strict subset of PR2's D2
-    (files-touched-not-in-AGENTS.md) — once D2 lands, plan to retire D4."""
+    Fires when the tracked doc has not been committed for ≥``commits_threshold``
+    commits AND the project itself has had ≥``commits_threshold`` total commits.
+    All doc-drift signals share this shape verbatim — parameterizing avoids
+    four near-duplicate 60-line ``check`` methods. Category and scope are set
+    on the concrete subclass so the trend detector's priority + dedup treat
+    each doc independently."""
 
-    id = "D4"
     category = "drift"
     scope = "per_project"
 
-    #: Threshold for both "commits since AGENTS.md touched" AND "total project commits".
+    #: Concrete subclasses override to point at the file this signal tracks.
+    doc_path: str = ""
+    #: Threshold for both "commits since doc touched" AND "total project commits".
     commits_threshold = 30
 
     def check(self, ctx: SignalContext) -> SignalResult:
@@ -291,22 +297,23 @@ class D4AgentsMdStaleness(Signal):
                 actual_value=float(len(all_commits)),
                 threshold_value=float(self.commits_threshold),
             )
-        agents_commits_raw = _run_git(
-            ["log", "--pretty=format:%H", "--no-merges", "--", "AGENTS.md"],
+        doc_commits_raw = _run_git(
+            ["log", "--pretty=format:%H", "--no-merges", "--", self.doc_path],
             cwd=ctx.workspace_dir,
         )
-        agents_commits = [s for s in agents_commits_raw.splitlines() if s.strip()]
-        if not agents_commits:
-            # AGENTS.md never committed. Project with ≥30 commits and no AGENTS.md
-            # at all is itself the drift signal — every commit is "since".
+        doc_commits = [s for s in doc_commits_raw.splitlines() if s.strip()]
+        if not doc_commits:
+            # The doc has never been committed. A project with ≥threshold
+            # commits and no doc at all IS the drift signal — every commit
+            # counts as "since."
             commits_since = len(all_commits)
         else:
-            last_agents_sha = agents_commits[0]
+            last_doc_sha = doc_commits[0]
             try:
-                commits_since = all_commits.index(last_agents_sha)
+                commits_since = all_commits.index(last_doc_sha)
             except ValueError:
-                # AGENTS.md was touched on a commit not in the merge-free
-                # log (e.g. only on a merge). Defensive: treat as untouched.
+                # Doc was touched only on a merge commit, so it isn't in the
+                # merge-free log. Defensive: treat as untouched.
                 commits_since = len(all_commits)
         if commits_since < self.commits_threshold:
             return SignalResult(
@@ -319,15 +326,69 @@ class D4AgentsMdStaleness(Signal):
             actual_value=float(commits_since),
             threshold_value=float(self.commits_threshold),
             evidence={
-                "commits_since_agents_md_touched": commits_since,
+                f"commits_since_{self._evidence_slug()}_touched": commits_since,
                 "total_commits": len(all_commits),
-                "last_agents_md_sha": agents_commits[0] if agents_commits else None,
-                "agents_md_exists_in_history": bool(agents_commits),
+                f"last_{self._evidence_slug()}_sha": doc_commits[0] if doc_commits else None,
+                f"{self._evidence_slug()}_exists_in_history": bool(doc_commits),
             },
             deeper_refs={
-                "git_log_cmd": "git log --pretty=format:%H --no-merges -- AGENTS.md",
+                "git_log_cmd": (
+                    f"git log --pretty=format:%H --no-merges -- {self.doc_path}"
+                ),
             },
         )
+
+    def _evidence_slug(self) -> str:
+        """Stable slug (``AGENTS.md`` → ``agents_md``) used in the evidence
+        keys so each doc-signal's dict is inspectable independently."""
+        return self.doc_path.lower().replace(".", "_").replace("/", "_")
+
+
+class D4AgentsMdStaleness(_DocFileStaleness):
+    """``AGENTS.md`` untouched while the project has had material churn.
+
+    Fires when ``AGENTS.md`` has not been committed for ≥30 commits AND the
+    project itself has had ≥30 total commits. A strict subset of PR2's D2
+    (files-touched-not-in-AGENTS.md) — once D2 lands, plan to retire D4."""
+
+    id = "D4"
+    doc_path = "AGENTS.md"
+
+
+class D5ReadmeStaleness(_DocFileStaleness):
+    """``README.md`` untouched while the project has had material churn.
+
+    Same shape as D4 but for the human-facing README onboarding now produces
+    alongside AGENTS.md (C6 → 1.0). A stale README means the project's
+    stated purpose + quickstart has drifted from what the codebase now is —
+    exactly the doc-drift signal C6 was set up to catch."""
+
+    id = "D5"
+    doc_path = "README.md"
+
+
+class D6ArchitectureStaleness(_DocFileStaleness):
+    """``ARCHITECTURE.md`` untouched while the project has had material churn.
+
+    Onboarding produces ARCHITECTURE.md as the "how it fits together" doc.
+    A stale one is drift between the described boundaries and what the
+    code now actually does — the compounding hazard C6/C8 exist to prevent."""
+
+    id = "D6"
+    doc_path = "ARCHITECTURE.md"
+
+
+class D7DecisionsStaleness(_DocFileStaleness):
+    """``DECISIONS.md`` untouched while the project has had material churn.
+
+    Onboarding produces DECISIONS.md as the ADR-style rationale log. Not
+    firing this signal for a stable, well-thought-through project is
+    correct behavior — a project MAY have all its decisions captured. Firing
+    it after 30 commits means changes are landing without their reasoning
+    getting written down. Same doc-drift shape as D4/D5/D6."""
+
+    id = "D7"
+    doc_path = "DECISIONS.md"
 
 
 class H4SteeringFrequency(Signal):
@@ -714,5 +775,8 @@ def all_signals() -> list[Signal]:
         D2FilesNotInAgentsMd(),
         D3NewArchitecturalSurface(),
         D4AgentsMdStaleness(),
+        D5ReadmeStaleness(),
+        D6ArchitectureStaleness(),
+        D7DecisionsStaleness(),
         H4SteeringFrequency(),
     ]

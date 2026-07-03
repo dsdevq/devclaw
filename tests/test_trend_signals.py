@@ -19,6 +19,9 @@ from devclaw.trend_signals import (
     D2FilesNotInAgentsMd,
     D3NewArchitecturalSurface,
     D4AgentsMdStaleness,
+    D5ReadmeStaleness,
+    D6ArchitectureStaleness,
+    D7DecisionsStaleness,
     H4SteeringFrequency,
     R2RepeatedFixHotspot,
     SignalContext,
@@ -229,6 +232,101 @@ def test_d4_fires_when_agents_md_stale_with_recent_churn(monkeypatch, tmp_path):
     assert result.fired is True
     assert result.evidence["commits_since_agents_md_touched"] == 40
     assert result.evidence["agents_md_exists_in_history"] is True
+
+
+# ---- D5 / D6 / D7: sibling doc-staleness signals ---------------------------
+# The three new signals share D4's shape via _DocFileStaleness; we cover the
+# per-signal path filter + evidence-key isolation rather than re-testing the
+# streak arithmetic (which is D4's contract). One integration test per signal
+# is enough to catch a mis-wired doc_path or evidence-slug regression.
+
+
+@pytest.mark.parametrize(
+    "signal_cls,doc_path,slug",
+    [
+        (D5ReadmeStaleness, "README.md", "readme_md"),
+        (D6ArchitectureStaleness, "ARCHITECTURE.md", "architecture_md"),
+        (D7DecisionsStaleness, "DECISIONS.md", "decisions_md"),
+    ],
+)
+def test_new_doc_staleness_signals_fire_when_absent_with_churn(
+    monkeypatch, tmp_path, signal_cls, doc_path, slug,
+):
+    """D5/D6/D7 fire when the tracked doc is absent AND the project has ≥30
+    commits — same shape as D4's `agents_md_exists_in_history=False` path."""
+    forty_shas = "\n".join(_unique_sha(i) for i in range(40))
+
+    def fake_git(args, cwd):
+        if "--" in args and doc_path in args:
+            return ""
+        return forty_shas
+
+    monkeypatch.setattr(trend_signals, "_run_git", fake_git)
+    result = signal_cls().check(_ctx_per_project(tmp_path))
+    assert result.fired is True
+    # Evidence keys are per-signal so downstream logs can inspect each doc
+    # independently — this is the guard that a shared base didn't collapse
+    # them into a single "commits_since_touched" bucket.
+    assert result.evidence[f"{slug}_exists_in_history"] is False
+    assert result.evidence[f"commits_since_{slug}_touched"] == 40
+    assert result.evidence["total_commits"] == 40
+    # Deeper refs surface the doc-specific git command for the retrospective
+    # LLM pass; wrong doc_path here would silently mis-attribute drift.
+    assert doc_path in result.deeper_refs["git_log_cmd"]
+
+
+@pytest.mark.parametrize(
+    "signal_cls,doc_path",
+    [
+        (D5ReadmeStaleness, "README.md"),
+        (D6ArchitectureStaleness, "ARCHITECTURE.md"),
+        (D7DecisionsStaleness, "DECISIONS.md"),
+    ],
+)
+def test_new_doc_staleness_signals_no_fire_when_touched_recently(
+    monkeypatch, tmp_path, signal_cls, doc_path,
+):
+    """Doc touched at HEAD → commits_since=0 → no fire (regression against
+    the shared base returning the wrong SHA index)."""
+    shas = [_unique_sha(i) for i in range(40)]
+    head_sha = shas[0]
+    all_shas = "\n".join(shas)
+
+    def fake_git(args, cwd):
+        if "--" in args and doc_path in args:
+            return head_sha
+        return all_shas
+
+    monkeypatch.setattr(trend_signals, "_run_git", fake_git)
+    result = signal_cls().check(_ctx_per_project(tmp_path))
+    assert result.fired is False
+    assert result.actual_value == 0.0
+
+
+def test_new_doc_signals_stay_isolated_per_doc(monkeypatch, tmp_path):
+    """When only ONE of the four docs is stale (say README missing) the
+    OTHER signals must not also fire — guard against a shared _DocFileStaleness
+    base accidentally sharing state."""
+    forty_shas = "\n".join(_unique_sha(i) for i in range(40))
+    head_sha = _unique_sha(0)
+
+    def fake_git(args, cwd):
+        # README.md: never committed → D5 fires.
+        if "--" in args and "README.md" in args:
+            return ""
+        # AGENTS.md / ARCHITECTURE.md / DECISIONS.md: touched at HEAD → no fire.
+        if "--" in args and (
+            "AGENTS.md" in args or "ARCHITECTURE.md" in args or "DECISIONS.md" in args
+        ):
+            return head_sha
+        return forty_shas
+
+    monkeypatch.setattr(trend_signals, "_run_git", fake_git)
+    ctx = _ctx_per_project(tmp_path)
+    assert D5ReadmeStaleness().check(ctx).fired is True
+    assert D4AgentsMdStaleness().check(ctx).fired is False
+    assert D6ArchitectureStaleness().check(ctx).fired is False
+    assert D7DecisionsStaleness().check(ctx).fired is False
 
 
 # ---- H4: steering frequency ------------------------------------------------
@@ -550,7 +648,7 @@ def test_count_added_dep_lines_ignores_comments_and_blanks():
 def test_all_signals_set():
     sigs = all_signals()
     ids = {s.id for s in sigs}
-    assert ids == {"R2", "D1", "D2", "D3", "D4", "H4"}
+    assert ids == {"R2", "D1", "D2", "D3", "D4", "D5", "D6", "D7", "H4"}
     by_scope = {s.scope for s in sigs}
     assert by_scope == {"per_project", "harness_self"}
     # Bookmark-aware signals are exactly D1/D2/D3 in this PR.

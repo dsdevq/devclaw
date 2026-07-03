@@ -1,11 +1,12 @@
-"""Onboarding tests — generate a DRAFT AGENTS.md on first touch of a repo.
+"""Onboarding tests — generate a DRAFT doc set on first touch of a repo.
 
-`onboard` is a 4th task kind that mirrors the `review_repository` read-only
-path but is allowed to write a single file (AGENTS.md). It captures repo
-COMPREHENSION ("what is": stack, layout, build/test, conventions, gotchas) so
-1b's project-guide briefing has something to read on repos that lack one. The
-draft is human-reviewed (not authoritative until then), so when an AGENTS.md
-already exists the agent validates-and-keeps rather than clobbering.
+`onboard` is a task kind that mirrors the `review_repository` read-only path
+but is allowed to write FOUR docs (AGENTS.md, README.md, ARCHITECTURE.md,
+DECISIONS.md) so both agent + human have onboarding infrastructure. C6 in
+plan.md §Production-ready: a project with only AGENTS.md is undocumented from
+a human's point of view. The draft is human-reviewed (not authoritative until
+then), so when a doc already exists the agent validates-and-keeps rather than
+clobbering.
 
 Two layers, both SDK-/docker-/claude-free: the goal-wrapper prompt (runner) and
 the TaskQueue wiring (a stub engine stands in for OpenHands).
@@ -35,39 +36,57 @@ def runner():
 # ---- the onboard goal-wrapper ----------------------------------------------
 
 
-def test_onboard_writes_a_draft_agents_md(runner):
+def test_onboard_writes_all_four_docs_as_drafts(runner):
     wrapped = runner._wrap_goal("onboard", "FOCUS-TOKEN")
-    # writes the comprehension file, marked a draft for human review
-    assert "AGENTS.md" in wrapped
+    # each of the four docs is named so the LLM knows the concrete filenames
+    for doc in ("AGENTS.md", "README.md", "ARCHITECTURE.md", "DECISIONS.md"):
+        assert doc in wrapped, doc
+    # each doc is marked DRAFT until a human reviews it
     assert "DRAFT" in wrapped
     # the optional focus still rides along
     assert "FOCUS-TOKEN" in wrapped
 
 
-def test_onboard_is_read_only_except_agents_md(runner):
+def test_onboard_is_read_only_except_the_four_docs(runner):
     wrapped = runner._wrap_goal("onboard", "")
     assert "READ ONLY" in wrapped
-    # the only write it's permitted is AGENTS.md (every OTHER file is off-limits)
-    assert "EXCEPT" in wrapped
+    # writes limited to the doc set — every other file (source, build, config)
+    # is off-limits so onboarding never mutates behaviour.
+    assert "EXCEPT the four documents" in wrapped
     assert "do not change" in wrapped or "Do NOT modify" in wrapped
 
 
-def test_onboard_captures_comprehension_not_direction(runner):
+def test_onboard_covers_the_agents_md_comprehension_surface(runner):
+    """AGENTS.md is still the agent-facing 'what is' scope — the C6 expansion
+    added three siblings but must not water down this doc's contract."""
     wrapped = runner._wrap_goal("onboard", "")
-    # the "what is" comprehension surface, incl. the verify-gate command
-    for cue in ("Stack", "Layout", "test", "gate", "Conventions", "gotcha"):
-        assert cue.lower() in wrapped.lower(), cue
-    # direction / decision-log is deliberately OUT of scope
-    assert "decision log" in wrapped.lower()
-    assert "out of scope" in wrapped.lower()
+    for cue in ("stack", "layout", "test", "gate", "conventions", "gotcha"):
+        assert cue in wrapped.lower(), cue
 
 
-def test_onboard_keeps_a_correct_existing_agents_md(runner):
+def test_onboard_enforces_boundary_between_the_four_docs(runner):
+    """Boundary discipline: each doc has one job. C6 rationale — a project
+    where README carries ADR content or ARCHITECTURE has quickstart commands
+    is undocumented in practice because the reader can't rely on scope."""
     wrapped = runner._wrap_goal("onboard", "")
-    # validate-and-keep, not clobber, when AGENTS.md already exists
+    assert "boundary discipline" in wrapped.lower()
+    # README purpose: quickstart + purpose, NOT decision rationale
+    assert "quickstart" in wrapped.lower()
+    # ARCHITECTURE purpose: how the pieces fit, data flow — not quickstart
+    assert "data flow" in wrapped.lower() or "component" in wrapped.lower()
+    # DECISIONS purpose: ADR-style; reconstructed entries allowed with a flag
+    assert "adr" in wrapped.lower()
+    assert "reconstructed" in wrapped.lower()
+
+
+def test_onboard_keeps_substantive_existing_docs(runner):
+    """No-clobber contract now applies to any of the four docs, not just
+    AGENTS.md. When a doc already exists AND is substantive, validate and
+    keep what's accurate."""
+    wrapped = runner._wrap_goal("onboard", "")
     assert "ALREADY exists" in wrapped
-    assert "KEEP" in wrapped
-    assert "unchanged" in wrapped
+    assert "not clobber" in wrapped.lower() or "not blindly overwrite" in wrapped.lower()
+    assert "keep what's accurate" in wrapped.lower() or "keep it" in wrapped.lower()
 
 
 def test_onboard_kind_is_distinct_from_review(runner):
