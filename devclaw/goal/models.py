@@ -130,6 +130,12 @@ class GoalStatus:
     #: True once the no-progress watchdog has pinged the owner for the CURRENT stall;
     #: cleared on the next delivery so a later stall fires again (ping once per stall).
     no_progress_notified: bool = False
+    #: Append-only trail of phase transitions — one dict per entry-to-a-new-phase
+    #: (``{"phase": str, "at": iso_ts}``). Written by the store on save_status
+    #: whenever the phase changes; read by the console for the timeline
+    #: timestamps. Deliberately unbounded — the log is human-scale (dozens of
+    #: entries per goal at most).
+    phase_history: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)

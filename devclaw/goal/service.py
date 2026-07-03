@@ -398,6 +398,7 @@ class GoalService:
             ),
             "recent_log": self._goal_store.recent_log(goal_id, n=15),
             "firmed_draft": firmed_draft,
+            "phase_history": [dict(e) for e in s.phase_history],
         }
 
     def _firmed_draft_payload(self, goal_id: str) -> Optional[dict]:
