@@ -286,6 +286,56 @@ def _goal_row(goal_id: str) -> dict:
     }
 
 
+# Fixed left-to-right order the Goal Detail phase-timeline renders. Keep in
+# sync with `phaseNames` in the Claude Design mock (Goal Detail.dc.html:373).
+_TIMELINE_PHASES = ["investigating", "firming", "executing", "verifying", "done"]
+
+
+def _phase_index(current: str | None) -> int:
+    """Where along the timeline the goal is right now. Non-timeline phases
+    (idle, in_flight, blocked, cancelled, error) collapse to 'executing' —
+    they all represent forward-of-firming work in the current lifecycle."""
+    if current is None:
+        return 0
+    if current in _TIMELINE_PHASES:
+        return _TIMELINE_PHASES.index(current)
+    return _TIMELINE_PHASES.index("executing")
+
+
+@mcp.custom_route("/goals/{goal_id}.json", methods=["GET"])
+async def goal_json(request: Request) -> Response:
+    """Goal Detail feed — header, objective, phase-timeline shape, pills.
+
+    Reuses goal_service.get_goal so the observe surface stays a single source
+    of truth. Timeline node timestamps arrive in PR#7 (phase_history)."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        g = goals.get_goal(goal_id)
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+    phase = g.get("phase")
+    current_index = _phase_index(phase)
+    timeline = [
+        {"name": name, "reached": i <= current_index, "current": i == current_index,
+         "timestampMs": None}
+        for i, name in enumerate(_TIMELINE_PHASES)
+    ]
+    return JSONResponse(
+        {
+            "id": g["id"],
+            "objective": g.get("objective") or "",
+            "phase": phase,
+            "phaseLabel": _phase_label(phase),
+            "lifecycle": g.get("lifecycle"),
+            "direction": g.get("direction"),
+            "actionsDispatched": g.get("actions_dispatched", 0),
+            "inFlight": g.get("in_flight"),
+            "timeline": timeline,
+            "blockedOn": g.get("blocked_on"),
+        }
+    )
+
+
 @mcp.custom_route("/projects/{project_id}.json", methods=["GET"])
 async def project_json(request: Request) -> Response:
     """Project Detail feed — header (name, repo, preview) + active/archived goal
