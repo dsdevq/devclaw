@@ -107,3 +107,26 @@ export interface StreamEvent {
 export function goalEventsUrl(id: string): string {
   return `/goals/${encodeURIComponent(id)}/events${tokenQS()}`;
 }
+
+export async function cancelGoal(id: string): Promise<{ cancelled: boolean; phase: string; reason?: string }> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/cancel${tokenQS()}`, {
+    method: "POST",
+  });
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) throw new Error(`cancel ${id}: ${r.status}`);
+  return r.json();
+}
+
+export async function steerGoal(id: string, message: string): Promise<{ steered: boolean }> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/steer${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`steer ${id}: ${r.status} ${err}`);
+  }
+  return r.json();
+}

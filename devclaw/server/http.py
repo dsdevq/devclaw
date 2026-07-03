@@ -344,6 +344,44 @@ def _project_event_row(ev, *, kind: str, payload: object) -> dict:
     }
 
 
+@mcp.custom_route("/goals/{goal_id}/cancel", methods=["POST"])
+async def goal_cancel(request: Request) -> Response:
+    """Console-facing cancel button. Wraps goal_service.cancel_goal — same
+    entrypoint the MCP tool uses, so behavior (terminal-phase no-op, in-flight
+    teardown) is identical whether the caller is Claude or the browser."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        result = goals.cancel_goal(goal_id)
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/goals/{goal_id}/steer", methods=["POST"])
+async def goal_steer(request: Request) -> Response:
+    """Console-facing steer button. Body is JSON `{"message": "..."}`.
+
+    Steering is additive — appends to the goal's inbox and pokes the loop
+    (goal_service.steer_goal), so it can flip a blocked goal back to idle.
+    Empty or missing message returns 400 rather than a silent no-op."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    message = (body or {}).get("message")
+    if not isinstance(message, str) or not message.strip():
+        return JSONResponse(
+            {"error": "message_required", "hint": "POST {\"message\": str}"},
+            status_code=400,
+        )
+    try:
+        result = goals.steer_goal(goal_id, message.strip())
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+    return JSONResponse(result)
+
+
 @mcp.custom_route("/goals/{goal_id}/events", methods=["GET"])
 async def goal_events(request: Request) -> Response:
     """SSE stream of events for the goal's CURRENT in_flight task/program.
