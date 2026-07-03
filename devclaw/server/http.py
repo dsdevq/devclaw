@@ -302,6 +302,126 @@ def _phase_index(current: str | None) -> int:
     return _TIMELINE_PHASES.index("executing")
 
 
+# Design taxonomy from Goal Detail.dc.html: cognition/subprocess/dispatch/
+# delivery/notify. Real backend event types are runner-specific and irregular,
+# so we normalize here with a best-effort mapper. PR#7 will tighten this by
+# stamping the kind at emit time.
+_KIND_EXACT = {
+    "cancelled": "notify",
+    "reaped": "notify",
+    "workspace_break_tripped": "notify",
+    "StdoutLine": "subprocess",
+    "StderrLine": "subprocess",
+    "StubBuildEvent": "dispatch",
+}
+
+
+def _event_kind(event_type: str) -> str:
+    if event_type in _KIND_EXACT:
+        return _KIND_EXACT[event_type]
+    t = event_type.lower()
+    if any(k in t for k in ("message", "llm", "think", "plan", "cognition")):
+        return "cognition"
+    if any(k in t for k in ("stdout", "stderr", "cmd", "shell", "bash", "exec")):
+        return "subprocess"
+    if any(k in t for k in ("action", "tool", "dispatch")):
+        return "dispatch"
+    if any(k in t for k in ("delivery", "merge", "commit", "pull_request", " pr ", "pr_")):
+        return "delivery"
+    return "notify"
+
+
+def _project_event_row(ev, *, kind: str, payload: object) -> dict:
+    """Frame shape the console's Goal Detail feed reads. Kept flat so the
+    React side can render without another normalization pass."""
+    return {
+        "id": ev.id,
+        "kind": kind,
+        "type": ev.type,
+        "source": ev.source,
+        "ts": ev.ts,
+        "payload": payload,
+    }
+
+
+@mcp.custom_route("/goals/{goal_id}/events", methods=["GET"])
+async def goal_events(request: Request) -> Response:
+    """SSE stream of events for the goal's CURRENT in_flight task/program.
+
+    Contract: the stream is keyed to the ref that was in_flight at connect
+    time. When the goal moves off that ref (new task, or no in_flight), we
+    emit a `done` frame; the client reconnects to pick up the new ref.
+    Resume: EventSource sends `last-event-id` on auto-reconnect; we use it as
+    the SQLite events.id cursor (same pattern as the existing programs SSE)."""
+    from sse_starlette.sse import EventSourceResponse  # local import: http-only
+
+    goal_id = request.path_params["goal_id"]
+    try:
+        g = goals.get_goal(goal_id)
+    except KeyError:
+        return PlainTextResponse(f"unknown goal: {goal_id}", status_code=404)
+
+    in_flight = g.get("in_flight")
+    if not in_flight:
+        # No live task — return an empty stream that immediately closes with a
+        # `done` frame. The client can reconnect once phase/in_flight change.
+        async def empty_gen():
+            yield {"comment": "no in_flight"}
+            yield {"event": "done", "data": json.dumps({"reason": "no_in_flight"})}
+
+        return EventSourceResponse(empty_gen())
+
+    # Pin the ref at connect time. list_events wants program_id OR task_id.
+    ref_kind = in_flight.get("ref_kind") or ("task" if in_flight.get("id") else "program")
+    ref_id = in_flight.get("id")
+    list_kwargs = (
+        {"task_id": ref_id} if ref_kind == "task" else {"program_id": ref_id}
+    )
+
+    leh = request.headers.get("last-event-id")
+    cursor = int(leh) if (leh and leh.isdigit() and int(leh) > 0) else 0
+
+    async def gen():
+        nonlocal cursor
+        yield {"comment": "ok"}
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                drained = store.list_events(since_id=cursor, limit=200, **list_kwargs)
+            except Exception as err:
+                yield {"event": "error", "data": json.dumps({"message": str(err)})}
+                return
+            for ev in drained:
+                payload = _safe_parse(ev.payload_json)
+                yield {
+                    "id": str(ev.id),
+                    "data": json.dumps(
+                        _project_event_row(
+                            ev, kind=_event_kind(ev.type), payload=payload
+                        )
+                    ),
+                }
+                cursor = ev.id
+            # Re-check the goal's in_flight — if it changed under us, close so
+            # the client reconnects and re-pins.
+            try:
+                current = goals.get_goal(goal_id)
+            except KeyError:
+                yield {"event": "done", "data": json.dumps({"reason": "goal_gone"})}
+                return
+            current_ref = (current.get("in_flight") or {}).get("id")
+            if current_ref != ref_id:
+                yield {
+                    "event": "done",
+                    "data": json.dumps({"reason": "in_flight_rotated"}),
+                }
+                return
+            await asyncio.sleep(0.75)
+
+    return EventSourceResponse(gen())
+
+
 @mcp.custom_route("/goals/{goal_id}.json", methods=["GET"])
 async def goal_json(request: Request) -> Response:
     """Goal Detail feed — header, objective, phase-timeline shape, pills.

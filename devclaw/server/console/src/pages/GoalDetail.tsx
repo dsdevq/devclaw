@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { fetchGoal, type GoalDetail as GD, type Verdict } from "../api";
+import { EventFeed } from "../components/EventFeed";
 import { mono, palettes } from "../theme";
 
 // PR#3 delivers the static frame of Goal Detail.dc.html: header, breadcrumb,
@@ -222,58 +223,7 @@ export function GoalDetail() {
 
           <PhaseTimeline nodes={data.timeline} palette={p} />
 
-          <div
-            style={{
-              flex: 1,
-              minHeight: 0,
-              display: "flex",
-              flexDirection: "column",
-              padding: "0 40px",
-              boxSizing: "border-box",
-            }}
-          >
-            <div
-              style={{
-                flexShrink: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "14px 0 10px",
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 11,
-                  fontWeight: 600,
-                  letterSpacing: "0.06em",
-                  textTransform: "uppercase",
-                  color: p.textSecondary,
-                }}
-              >
-                Event stream
-              </span>
-              <span style={{ fontFamily: mono, fontSize: 12, color: p.textMuted }}>
-                live feed in PR#4
-              </span>
-            </div>
-            <div
-              style={{
-                flex: 1,
-                minHeight: 0,
-                borderTop: `1px solid ${p.border}`,
-                padding: "18px 6px",
-                fontFamily: mono,
-                fontSize: 12,
-                color: p.textMuted,
-              }}
-            >
-              {data.inFlight
-                ? `in-flight: ${data.inFlight.tool} (${data.inFlight.id})`
-                : "no in-flight action"}
-              {data.blockedOn ? ` · blocked_on: ${data.blockedOn}` : ""}
-              {` · actions_dispatched=${data.actionsDispatched}`}
-            </div>
-          </div>
+          <EventFeed goalId={data.id} />
         </>
       )}
     </div>

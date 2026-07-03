@@ -85,3 +85,25 @@ export async function fetchGoal(id: string): Promise<GoalDetail> {
   if (!r.ok) throw new Error(`goal ${id}: ${r.status}`);
   return r.json();
 }
+
+export type EventKind = "cognition" | "subprocess" | "dispatch" | "delivery" | "notify";
+export const EVENT_KINDS: EventKind[] = [
+  "cognition",
+  "subprocess",
+  "dispatch",
+  "delivery",
+  "notify",
+];
+
+export interface StreamEvent {
+  id: number;
+  kind: EventKind;
+  type: string;
+  source: string;
+  ts: number | string;
+  payload: unknown;
+}
+
+export function goalEventsUrl(id: string): string {
+  return `/goals/${encodeURIComponent(id)}/events${tokenQS()}`;
+}
