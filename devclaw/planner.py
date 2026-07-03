@@ -175,13 +175,18 @@ def validate_plan(parsed: object) -> list[PlannedTask]:
     return ordered
 
 
-def _build_claude_argv(prompt: str, model: str | None) -> list[str]:
+def _build_claude_argv(prompt: str, model: str | None) -> list[str]:  # noqa: ARG001
     """Argv for a ``claude --print`` call. ``--model`` is inserted only when a
-    model is given (else the CLI uses the account default). Pure → unit-tested."""
+    model is given (else the CLI uses the account default). Pure → unit-tested.
+
+    The ``prompt`` parameter is kept for backwards-compat with the pre-2026-07-03
+    signature but is NO LONGER appended to argv — it now rides on stdin (see
+    :func:`call_claude`) to avoid ``[Errno 7] Argument list too long`` when the
+    goal-planner's prompt (log + deliveries + steering) crosses the OS ARG_MAX
+    limit (~128 KB on Linux). Live-hit closeloop-mission-v2 2026-07-03T18:35Z."""
     argv = [CLAUDE_BIN, "--print", "--output-format=text"]
     if model:
         argv += ["--model", model]
-    argv.append(prompt)
     return argv
 
 
@@ -212,10 +217,15 @@ async def call_claude(
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
-            # stdin=DEVNULL: the prompt rides on argv; without this, the CLI
-            # waits ~3s for stdin before proceeding and emits a "no stdin data
-            # received in 3s" warning into stdout that pollutes parsing.
-            stdin=asyncio.subprocess.DEVNULL,
+            # 2026-07-03 argv → stdin migration: the goal-planner's prompt (log
+            # + deliveries + steering) crossed ARG_MAX on closeloop-mission-v2
+            # after ~20 dispatches, and every subsequent plan attempt hit
+            # ``[Errno 7] Argument list too long``. The prompt now rides on
+            # stdin instead. ``claude --print`` reads the whole stdin as the
+            # prompt when argv doesn't provide one; closing stdin after write
+            # (via ``communicate(input=)``) avoids the "no stdin data received
+            # in 3s" warning the old ``stdin=DEVNULL`` path was working around.
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -234,7 +244,8 @@ async def call_claude(
 
     try:
         stdout_b, stderr_b = await asyncio.wait_for(
-            proc.communicate(), timeout=effective_timeout_ms / 1000
+            proc.communicate(input=prompt.encode("utf-8")),
+            timeout=effective_timeout_ms / 1000,
         )
     except asyncio.TimeoutError:
         proc.kill()
