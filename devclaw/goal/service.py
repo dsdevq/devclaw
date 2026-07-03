@@ -493,6 +493,9 @@ class GoalService:
         }
 
     def list_goals(self) -> list[dict]:
+        # Includes `workspace_dir`, `progress`, and `blocked_on` so
+        # project_registry.project_rollup can derive project↔goal association
+        # by workspace match — no stored goal_ids list to drift stale.
         out = []
         for gid in self._goal_store.list_goal_ids():
             g = self._goal_store.load_goal(gid)
@@ -500,8 +503,11 @@ class GoalService:
             out.append({
                 "id": gid,
                 "objective": g.objective[:140],
+                "workspace_dir": g.workspace_dir,
                 "phase": s.phase,
                 "lifecycle": s.lifecycle or "executing",
+                "blocked_on": s.blocked_on,
+                "progress": {"last_at": s.last_progress_at, "stalled": s.no_progress_notified},
                 "direction": s.last_eval_verdict,
                 "actions_dispatched": s.actions_dispatched,
             })

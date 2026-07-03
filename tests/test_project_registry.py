@@ -87,67 +87,98 @@ def test_persistence_across_reopen(tmp_path):
 
 
 # ---- rollup + health -------------------------------------------------------
+#
+# The rollup joins project↔goals by workspace_dir match, NOT by a stored
+# goal_ids list (retained as advisory only). Tests below build the input the
+# rollup actually gets — a full goals list — and assert the workspace match
+# is what drives association.
 
 
-def _goal_get(table: dict):
-    def get(gid: str) -> dict:
-        if gid not in table:
-            raise KeyError(gid)
-        return table[gid]
-    return get
+def _goal(id: str, workspace_dir: str, **fields) -> dict:
+    """Build a goals-list entry (goal_service.list_goals shape) for tests."""
+    base = {"id": id, "workspace_dir": workspace_dir}
+    base.update(fields)
+    return base
 
 
-def test_rollup_joins_live_goal_status(reg):
-    reg.create(id="todo", name="Todo")
-    reg.link_goal("todo", "g1")
-    table = {"g1": {"phase": "in_flight", "lifecycle": "executing",
-                    "blocked_on": None, "progress": {"stalled": False},
-                    "direction": {"verdict": "on_track"}}}
-    out = project_rollup(reg.get("todo"), _goal_get(table))
+def test_rollup_joins_by_workspace_dir(reg):
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo")
+    all_goals = [
+        _goal("g1", "/src/todo", phase="in_flight", lifecycle="executing",
+              blocked_on=None, progress={"stalled": False},
+              direction={"verdict": "on_track"}),
+        _goal("g-other", "/src/somewhere-else", phase="in_flight",
+              progress={"stalled": False}),
+    ]
+    out = project_rollup(reg.get("todo"), all_goals)
     assert out["health"] == "working"
-    assert out["goals"][0]["phase"] == "in_flight"
+    assert len(out["goals"]) == 1
+    assert out["goals"][0]["id"] == "g1"
     assert out["goals"][0]["direction"]["verdict"] == "on_track"
 
 
-def test_rollup_missing_goal_is_surfaced_not_dropped(reg):
-    reg.create(id="todo", name="Todo")
-    reg.link_goal("todo", "ghost")
-    out = project_rollup(reg.get("todo"), _goal_get({}))
-    assert out["goals"] == [{"id": "ghost", "missing": True}]
-    assert out["health"] == "idle"  # no live goals
+def test_rollup_normalizes_workspace_paths(reg):
+    """A trailing slash / double slash on either side of the join must not
+    hide a matching goal — projects and goals may set the workspace_dir via
+    different code paths that don't agree on formatting."""
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo/")
+    all_goals = [
+        _goal("g1", "/src//todo", phase="in_flight", progress={"stalled": False}),
+    ]
+    out = project_rollup(reg.get("todo"), all_goals)
+    assert len(out["goals"]) == 1 and out["goals"][0]["id"] == "g1"
+
+
+def test_rollup_ignores_stored_goal_ids(reg):
+    """Explicit link_goal calls do NOT bring an unrelated-workspace goal
+    into the rollup. This is the guard for the cancel-and-refile drift the
+    workspace-match design was introduced to eliminate."""
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo")
+    reg.link_goal("todo", "some-old-goal")  # advisory; must not affect rollup
+    all_goals = [
+        _goal("some-old-goal", "/src/other", phase="in_flight",
+              progress={"stalled": False}),
+    ]
+    out = project_rollup(reg.get("todo"), all_goals)
+    assert out["goals"] == []
+    assert out["health"] == "idle"
+
+
+def test_rollup_no_workspace_dir_yields_no_goals(reg):
+    reg.create(id="todo", name="Todo")  # no workspace_dir
+    all_goals = [_goal("g1", "/anything", phase="in_flight", progress={})]
+    out = project_rollup(reg.get("todo"), all_goals)
+    assert out["goals"] == [] and out["health"] == "idle"
 
 
 def test_rollup_health_blocked_on_phase(reg):
-    reg.create(id="todo", name="Todo")
-    reg.link_goal("todo", "g1")
-    table = {"g1": {"phase": "blocked", "lifecycle": "executing", "progress": {}}}
-    assert project_rollup(reg.get("todo"), _goal_get(table))["health"] == "blocked"
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo")
+    all_goals = [_goal("g1", "/src/todo", phase="blocked",
+                       lifecycle="executing", progress={})]
+    assert project_rollup(reg.get("todo"), all_goals)["health"] == "blocked"
 
 
 def test_rollup_health_blocked_on_stall(reg):
-    reg.create(id="todo", name="Todo")
-    reg.link_goal("todo", "g1")
-    table = {"g1": {"phase": "idle", "lifecycle": "executing", "progress": {"stalled": True}}}
-    assert project_rollup(reg.get("todo"), _goal_get(table))["health"] == "blocked"
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo")
+    all_goals = [_goal("g1", "/src/todo", phase="idle",
+                       lifecycle="executing", progress={"stalled": True})]
+    assert project_rollup(reg.get("todo"), all_goals)["health"] == "blocked"
 
 
 def test_rollup_health_done_when_all_done(reg):
-    reg.create(id="todo", name="Todo")
-    reg.link_goal("todo", "g1")
-    reg.link_goal("todo", "g2")
-    table = {
-        "g1": {"phase": "done", "progress": {}},
-        "g2": {"phase": "done", "progress": {}},
-    }
-    assert project_rollup(reg.get("todo"), _goal_get(table))["health"] == "done"
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo")
+    all_goals = [
+        _goal("g1", "/src/todo", phase="done", progress={}),
+        _goal("g2", "/src/todo", phase="done", progress={}),
+    ]
+    assert project_rollup(reg.get("todo"), all_goals)["health"] == "done"
 
 
 def test_rollup_health_archived_short_circuits(reg):
-    reg.create(id="todo", name="Todo")
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo")
     reg.update("todo", status="archived")
-    reg.link_goal("todo", "g1")
-    table = {"g1": {"phase": "in_flight", "progress": {}}}
-    assert project_rollup(reg.get("todo"), _goal_get(table))["health"] == "archived"
+    all_goals = [_goal("g1", "/src/todo", phase="in_flight", progress={})]
+    assert project_rollup(reg.get("todo"), all_goals)["health"] == "archived"
 
 
 def test_busy_timeout_pragma_applied(reg):

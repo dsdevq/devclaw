@@ -7,16 +7,26 @@ are the repos I'm working on, and here's the current status of each"* — the vi
 a control plane (chat / API / CLI) needs to answer "what are you doing?".
 
 A :class:`Project` is exactly that thin unifying record: a repo + its workspace +
-an optional live preview + a status + the goal(s) driving it. It does NOT own the
-goals or duplicate their state — it *links* to them by id and the rollup
-(:func:`project_rollup`) joins live goal status on read, so the registry never
-rots (it stores facts: name, repo, preview url; not "phase", which it reads live).
+an optional live preview + a status. It does NOT own the goals or duplicate
+their state — the rollup (:func:`project_rollup`) joins live goal status on
+read via **workspace_dir match**, so the registry never rots.
+
+Association model: a goal belongs to a project iff their ``workspace_dir``
+values match (normalized). This deliberately replaces the earlier stored
+``goal_ids`` list, which drifted on the cancel-and-refile pattern (v1
+missions cancelled but the v2 mission wasn't relinked → Projects Home read
+0 active goals for a project that had a live one). Workspace-dir is already
+the identity axis for verify / sandbox / PRs, so making it the project↔goal
+join key is coherent with the rest of the architecture. ``Project.goal_ids``
+is retained as advisory only (CLI ``link_goal`` still works for legacy
+compat) but is NOT consulted by the rollup.
 
 Deliberately small and decoupled: its own ``projects`` table on the shared SQLite
 file (registry writes are rare + human-driven), no dependency on the goal layer —
-the rollup takes a ``goal_get`` callable so both the MCP tools (goal_service) and
-the CLI (a GoalStore-backed getter) reuse one shape. Distinct from
-``project_store.Project``, which is the *build-from-scratch interview* artifact.
+the rollup takes a pre-fetched ``all_goals`` list (from
+``goal_service.list_goals``) so both the MCP tools and the CLI reuse one shape.
+Distinct from ``project_store.Project``, which is the *build-from-scratch
+interview* artifact.
 """
 
 from __future__ import annotations
@@ -272,34 +282,56 @@ class ProjectRegistry:
             self._db.commit()
 
 
-def project_rollup(project: Project, goal_get: GoalGet) -> dict:
-    """Join the project's stored facts with the LIVE status of each linked goal.
+def _normalize_workspace(path: Optional[str]) -> Optional[str]:
+    """Canonicalize workspace paths for join purposes: strip trailing slash,
+    collapse duplicate slashes, expand user. Stays purely string-shaped — we
+    do NOT hit the filesystem here (projects may point at paths that don't
+    exist on this host, e.g. the CLI reading a VPS registry snapshot)."""
+    if not path:
+        return None
+    p = str(path).strip()
+    if not p:
+        return None
+    # Expand a leading ~ without resolving symlinks/existence.
+    if p.startswith("~"):
+        p = str(Path(p).expanduser())
+    # Collapse `//` runs and drop any trailing slash (except root).
+    while "//" in p:
+        p = p.replace("//", "/")
+    if len(p) > 1 and p.endswith("/"):
+        p = p.rstrip("/")
+    return p
 
-    The registry never caches goal phase (that rots); the rollup reads it on
-    demand via ``goal_get`` (goal_service.get_goal or a GoalStore-backed getter).
-    A linked goal that no longer exists is surfaced as ``{"missing": true}`` rather
-    than dropped, so a dangling link is visible instead of silently hidden.
 
-    ``health`` is a cheap derived signal for the control plane: ``blocked`` if any
-    goal is blocked or flagged stalled by the watchdog, ``done`` if all goals are
-    done, ``working`` if any is active, else ``idle``."""
+def project_rollup(project: Project, all_goals: list[dict]) -> dict:
+    """Join a project with live goal state via workspace_dir match.
+
+    ``all_goals`` is the pre-fetched output of ``goal_service.list_goals()``
+    (or the CLI's GoalStore-backed equivalent). Every goal whose normalized
+    ``workspace_dir`` equals the project's normalized ``workspace_dir`` is
+    associated. Passing the full list in from the caller lets us render every
+    project in a single ``list_goals`` scan instead of an N-times per-project
+    fetch.
+
+    ``health`` is a cheap derived signal for the control plane: ``blocked`` if
+    any goal is blocked or flagged stalled by the watchdog, ``done`` if all
+    goals are done, ``working`` if any is active, else ``idle``."""
+    proj_ws = _normalize_workspace(project.workspace_dir)
     goals: list[dict] = []
-    for gid in project.goal_ids:
-        try:
-            g = goal_get(gid)
-        except KeyError:
-            goals.append({"id": gid, "missing": True})
-            continue
-        goals.append(
-            {
-                "id": gid,
-                "phase": g.get("phase"),
-                "lifecycle": g.get("lifecycle"),
-                "blocked_on": g.get("blocked_on"),
-                "progress": g.get("progress"),
-                "direction": g.get("direction"),
-            }
-        )
+    if proj_ws is not None:
+        for g in all_goals:
+            if _normalize_workspace(g.get("workspace_dir")) != proj_ws:
+                continue
+            goals.append(
+                {
+                    "id": g.get("id"),
+                    "phase": g.get("phase"),
+                    "lifecycle": g.get("lifecycle"),
+                    "blocked_on": g.get("blocked_on"),
+                    "progress": g.get("progress"),
+                    "direction": g.get("direction"),
+                }
+            )
     out = project.to_dict()
     out["goals"] = goals
     out["health"] = _health(project.status, goals)
