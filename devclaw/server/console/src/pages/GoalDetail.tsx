@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { fetchGoal, type GoalDetail as GD, type Verdict } from "../api";
+import { cancelGoal, fetchGoal, steerGoal, type GoalDetail as GD, type Verdict } from "../api";
 import { EventFeed } from "../components/EventFeed";
 import { mono, palettes } from "../theme";
 
@@ -32,6 +32,53 @@ export function GoalDetail() {
   const p = palettes.dark;
   const [data, setData] = useState<GD | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"cancel" | "steer" | null>(null);
+  const [flash, setFlash] = useState<string | null>(null);
+
+  const isTerminal =
+    data?.phase === "done" ||
+    data?.phase === "cancelled" ||
+    data?.phase === "achieved" ||
+    data?.phase === "error";
+
+  const reload = () => {
+    if (!id) return;
+    fetchGoal(id).then(setData).catch((e) => setErr(String(e)));
+  };
+
+  const onCancel = async () => {
+    if (!id || busy || isTerminal) return;
+    if (!window.confirm(`Cancel goal ${id}? This tears down any in-flight work.`))
+      return;
+    setBusy("cancel");
+    setFlash(null);
+    try {
+      const r = await cancelGoal(id);
+      setFlash(r.cancelled ? "goal cancelled" : `no-op: ${r.reason ?? r.phase}`);
+      reload();
+    } catch (e) {
+      setFlash(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onSteer = async () => {
+    if (!id || busy || isTerminal) return;
+    const msg = window.prompt("Steering message:");
+    if (msg === null || msg.trim() === "") return;
+    setBusy("steer");
+    setFlash(null);
+    try {
+      await steerGoal(id, msg.trim());
+      setFlash("steer sent");
+      reload();
+    } catch (e) {
+      setFlash(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     if (!id) return;
@@ -184,9 +231,21 @@ export function GoalDetail() {
               <div
                 style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}
               >
-                {/* Cancel + Steer are visual-only in PR#3; wiring lands in PR#6. */}
+                {flash && (
+                  <span
+                    style={{
+                      fontFamily: mono,
+                      fontSize: 11.5,
+                      color: p.textSecondary,
+                      marginRight: 4,
+                    }}
+                  >
+                    {flash}
+                  </span>
+                )}
                 <button
-                  disabled
+                  disabled={busy !== null || isTerminal}
+                  onClick={onCancel}
                   style={{
                     background: "transparent",
                     color: p.red,
@@ -195,14 +254,17 @@ export function GoalDetail() {
                     borderRadius: 5,
                     fontSize: 13,
                     fontWeight: 600,
-                    cursor: "not-allowed",
-                    opacity: 0.6,
+                    cursor:
+                      busy !== null || isTerminal ? "not-allowed" : "pointer",
+                    opacity: busy !== null || isTerminal ? 0.5 : 1,
+                    fontFamily: "'Inter', sans-serif",
                   }}
                 >
-                  Cancel
+                  {busy === "cancel" ? "…" : "Cancel"}
                 </button>
                 <button
-                  disabled
+                  disabled={busy !== null || isTerminal}
+                  onClick={onSteer}
                   style={{
                     background: p.accent,
                     color: "#ffffff",
@@ -211,11 +273,13 @@ export function GoalDetail() {
                     borderRadius: 5,
                     fontSize: 13,
                     fontWeight: 600,
-                    cursor: "not-allowed",
-                    opacity: 0.6,
+                    cursor:
+                      busy !== null || isTerminal ? "not-allowed" : "pointer",
+                    opacity: busy !== null || isTerminal ? 0.5 : 1,
+                    fontFamily: "'Inter', sans-serif",
                   }}
                 >
-                  Steer
+                  {busy === "steer" ? "…" : "Steer"}
                 </button>
               </div>
             </div>
