@@ -505,6 +505,19 @@ async def goal_json(request: Request) -> Response:
                 "timestampMs": _iso_to_ms(stamp_iso) if stamp_iso else None,
             }
         )
+    # Dispatch cap = the runaway backstop the goal tick already enforces
+    # (max(len(backlog)+2, len(checklist)+2) — see goal/tick.py:1028). Surface
+    # it so the console can show "N / cap" and, when phase=blocked, the banner
+    # can render "N of N dispatched — merge to unblock".
+    backlog_len = len(g.get("backlog") or [])
+    base_cap = backlog_len + 2
+    dispatch_cap: int
+    try:
+        checklist = store.read_checklist(goal_id)
+        cap_c = (len(checklist.items) + 2) if checklist else base_cap
+        dispatch_cap = max(base_cap, cap_c)
+    except Exception:
+        dispatch_cap = base_cap
     return JSONResponse(
         {
             "id": g["id"],
@@ -514,6 +527,7 @@ async def goal_json(request: Request) -> Response:
             "lifecycle": g.get("lifecycle"),
             "direction": g.get("direction"),
             "actionsDispatched": g.get("actions_dispatched", 0),
+            "dispatchCap": dispatch_cap,
             "inFlight": g.get("in_flight"),
             "timeline": timeline,
             "blockedOn": g.get("blocked_on"),

@@ -245,6 +245,19 @@ export function GoalDetail() {
                   value={verdictMeta.label}
                   dotColor={verdictMeta.color}
                 />
+                {data.dispatchCap > 0 && (
+                  <Pill
+                    labelColor={p.textMuted}
+                    border={p.border}
+                    label="Dispatched"
+                    value={`${data.actionsDispatched} / ${data.dispatchCap}`}
+                    dotColor={
+                      data.actionsDispatched >= data.dispatchCap
+                        ? p.amber
+                        : p.textMuted
+                    }
+                  />
+                )}
               </div>
               <div
                 style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}
@@ -305,6 +318,10 @@ export function GoalDetail() {
 
           <PhaseTimeline nodes={data.timeline} palette={p} />
 
+          {data.phase === "blocked" && (
+            <BlockedBanner blockedOn={data.blockedOn} palette={p} />
+          )}
+
           <PRList goalId={data.id} />
 
           <EventFeed goalId={data.id} />
@@ -361,6 +378,57 @@ function Pill({
         {label}
       </span>
       <span>{value}</span>
+    </div>
+  );
+}
+
+function BlockedBanner({
+  blockedOn,
+  palette: p,
+}: {
+  blockedOn: string | null;
+  palette: (typeof palettes)["dark"];
+}) {
+  // A blocked goal is common on standing missions — dispatch cap held so the
+  // owner can review. The banner names *why* rather than just showing a stalled
+  // pill; the hint routes the owner at the PR list below when the reason
+  // mentions dispatch cap.
+  const isDispatchCap = (blockedOn ?? "").toLowerCase().includes("dispatch cap");
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        padding: "12px 40px",
+        boxSizing: "border-box",
+        borderBottom: `1px solid ${p.border}`,
+        background: `${p.amber}18`,
+        display: "flex",
+        gap: 12,
+        alignItems: "center",
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: p.amber,
+          flexShrink: 0,
+        }}
+      />
+      <div style={{ flex: 1, minWidth: 0, fontSize: 13 }}>
+        <span style={{ color: p.textPrimary, fontWeight: 600 }}>
+          Goal is blocked.
+        </span>{" "}
+        <span style={{ color: p.textSecondary }}>
+          {blockedOn ?? "Reason unknown — check the log."}
+        </span>
+        {isDispatchCap && (
+          <span style={{ color: p.textMuted, marginLeft: 6 }}>
+            Merge one of the open PRs below to unblock the loop.
+          </span>
+        )}
+      </div>
     </div>
   );
 }
