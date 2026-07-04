@@ -6,7 +6,8 @@ export function App() {
   return (
     <div
       style={{
-        minHeight: "100vh",
+        height: "100vh",
+        overflow: "hidden",
         background: p.bg,
         color: p.textPrimary,
         fontFamily: sans,

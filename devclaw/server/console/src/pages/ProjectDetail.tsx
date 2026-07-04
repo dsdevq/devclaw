@@ -230,11 +230,12 @@ export function ProjectDetail() {
   return (
     <div
       style={{
-        minHeight: "100vh",
+        height: "100vh",
         width: "100%",
         boxSizing: "border-box",
         display: "flex",
         flexDirection: "column",
+        overflow: "hidden",
       }}
     >
       <div

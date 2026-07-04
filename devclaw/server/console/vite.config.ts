@@ -19,8 +19,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // dev-server proxy so `vite dev` can hit a running devclaw MCP for data.
+      // For local-→-VPS testing, run: ssh -N -L 8000:127.0.0.1:8000 lifekit-vps
       "/projects.json": "http://127.0.0.1:8000",
       "/goals.json": "http://127.0.0.1:8000",
+      "/projects": "http://127.0.0.1:8000",
+      "/goals": { target: "http://127.0.0.1:8000", ws: true },
+      "/prs": "http://127.0.0.1:8000",
     },
   },
 });
