@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { cancelGoal, fetchGoal, steerGoal, type GoalDetail as GD, type Verdict } from "../api";
 import { EventFeed } from "../components/EventFeed";
 import { PRList } from "../components/PRList";
+import { TasksSection } from "../components/TasksSection";
 import { mono, palettes } from "../theme";
 
 // PR#3 delivers the static frame of Goal Detail.dc.html: header, breadcrumb,
@@ -321,6 +322,12 @@ export function GoalDetail() {
           {data.phase === "blocked" && (
             <BlockedBanner blockedOn={data.blockedOn} palette={p} />
           )}
+
+          <TasksSection
+            title="Dispatched tasks"
+            tasks={data.tasks ?? []}
+            emptyLabel="No tasks dispatched yet — the goal heartbeat will file them here"
+          />
 
           <PRList goalId={data.id} />
 

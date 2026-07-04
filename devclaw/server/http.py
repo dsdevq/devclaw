@@ -266,6 +266,23 @@ def _goal_last_update_ms(goal_id: str) -> int | None:
     return int(ts.timestamp() * 1000)
 
 
+def _task_row(t) -> dict:
+    """Wire shape for a Task row in the console — used by both ProjectDetail
+    (loose tasks) and GoalDetail (dispatched tasks). Shape mirrors
+    ``devclaw/server/console/src/api.ts`` ``TaskRow``."""
+    return {
+        "id": t.id,
+        "kind": t.kind,
+        "status": t.status,
+        "goal": t.goal,
+        "workspaceDir": t.workspace_dir,
+        "parentGoalId": t.parent_goal_id,
+        "createdAt": t.created_at,
+        "completedAt": t.completed_at,
+        "prUrl": t.pr_url,
+    }
+
+
 def _goal_row(goal_id: str) -> dict:
     try:
         g = _goal_get(goal_id)
@@ -518,6 +535,13 @@ async def goal_json(request: Request) -> Response:
         dispatch_cap = max(base_cap, cap_c)
     except Exception:
         dispatch_cap = base_cap
+    # Dispatched tasks — every Task the goal heartbeat filed against this goal
+    # (parent_goal_id match). Includes both live and terminal tasks; the
+    # console renders them as a timeline of what the goal actually dispatched.
+    dispatched_tasks = [
+        _task_row(t)
+        for t in store.list_tasks(parent_goal_id=goal_id, limit=50)
+    ]
     return JSONResponse(
         {
             "id": g["id"],
@@ -531,6 +555,7 @@ async def goal_json(request: Request) -> Response:
             "inFlight": g.get("in_flight"),
             "timeline": timeline,
             "blockedOn": g.get("blocked_on"),
+            "tasks": dispatched_tasks,
         }
     )
 
@@ -731,6 +756,18 @@ async def project_json(request: Request) -> Response:
         (archived if row["phase"] in _TERMINAL_PHASES else active).append(row)
     active.sort(key=lambda r: r.get("lastUpdateMs") or 0, reverse=True)
     archived.sort(key=lambda r: r.get("lastUpdateMs") or 0, reverse=True)
+    # Recent standalone tasks in this project's workspace — the "loose" ones
+    # not owned by any goal (dispatch_task calls). Tasks owned by a goal show
+    # up inside that goal's Dispatched Tasks section, not here, so users don't
+    # see double-counts. See ~/memory/projects/devclaw/plan.md "The noun model".
+    loose_tasks: list[dict] = []
+    if p.workspace_dir:
+        for t in store.list_tasks(
+            workspace_dir=p.workspace_dir,
+            parent_goal_id_is_null=True,
+            limit=25,
+        ):
+            loose_tasks.append(_task_row(t))
     return JSONResponse(
         {
             "id": p.id,
@@ -740,6 +777,7 @@ async def project_json(request: Request) -> Response:
             "previewUrl": p.preview_url,
             "active": active,
             "archived": archived,
+            "tasks": loose_tasks,
         }
     )
 

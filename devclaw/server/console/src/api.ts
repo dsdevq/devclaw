@@ -30,6 +30,30 @@ export interface GoalRow {
   lastUpdateMs: number | null;
 }
 
+export type TaskKind =
+  | "implement_feature"
+  | "fix_bug"
+  | "review_repository"
+  | "onboard";
+export type TaskStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export interface TaskRow {
+  id: string;
+  kind: TaskKind;
+  status: TaskStatus;
+  goal: string;
+  workspaceDir: string;
+  parentGoalId: string | null;
+  createdAt: number;
+  completedAt: number | null;
+  prUrl: string | null;
+}
+
 export interface ProjectDetail {
   id: string;
   name: string;
@@ -38,6 +62,10 @@ export interface ProjectDetail {
   previewUrl: string | null;
   active: GoalRow[];
   archived: GoalRow[];
+  /** Recent standalone tasks in this project's workspace (parent_goal_id NULL).
+   *  Tasks owned by a goal show up inside that goal, not here — no double-count.
+   */
+  tasks: TaskRow[];
 }
 
 export async function fetchProject(id: string): Promise<ProjectDetail> {
@@ -78,6 +106,8 @@ export interface GoalDetail {
   timeline: TimelineNode[];
   blockedOn: string | null;
   projectId?: string;
+  /** Every task the goal heartbeat dispatched (parent_goal_id = this goal). */
+  tasks: TaskRow[];
 }
 
 export async function fetchGoal(id: string): Promise<GoalDetail> {

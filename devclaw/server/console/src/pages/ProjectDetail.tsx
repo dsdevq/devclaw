@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { fetchProject, type GoalRow, type ProjectDetail as PD } from "../api";
 import { mono, palettes } from "../theme";
 import { relativeTime } from "../util/time";
+import { TasksSection } from "../components/TasksSection";
 
 // Matches Project Detail.dc.html: 56px breadcrumb header, big project name +
 // live dot, GitHub/preview link row, Active goals table, collapsed Archived
@@ -430,6 +431,12 @@ export function ProjectDetail() {
                 </>
               )}
             </div>
+
+            <TasksSection
+              title="Recent tasks"
+              tasks={data.tasks ?? []}
+              emptyLabel="No standalone tasks — dispatched features/fixes without a goal will land here"
+            />
           </div>
         </>
       )}

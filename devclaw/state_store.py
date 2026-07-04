@@ -508,8 +508,22 @@ class StateStore:
         *,
         status: Optional[TaskStatus] = None,
         kind: Optional[TaskKind] = None,
+        parent_goal_id: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
+        parent_goal_id_is_null: bool = False,
         limit: int = 100,
     ) -> list[Task]:
+        """Recent tasks, newest first. Extra filters:
+
+        - ``parent_goal_id`` — only tasks owned by this goal (GoalDetail's
+          Dispatched Tasks section).
+        - ``workspace_dir`` — tasks whose workspace matches (ProjectDetail
+          Recent Tasks strip).
+        - ``parent_goal_id_is_null`` — restrict to standalone tasks (no goal
+          owns them). Combine with workspace_dir to get the "loose tasks in
+          this project" set — avoids double-counting tasks already visible
+          inside a goal.
+        """
         where: list[str] = []
         args: list[object] = []
         if status:
@@ -518,6 +532,14 @@ class StateStore:
         if kind:
             where.append("kind = ?")
             args.append(kind)
+        if parent_goal_id is not None:
+            where.append("parent_goal_id = ?")
+            args.append(parent_goal_id)
+        if parent_goal_id_is_null:
+            where.append("parent_goal_id IS NULL")
+        if workspace_dir is not None:
+            where.append("workspace_dir = ?")
+            args.append(workspace_dir)
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         args.append(limit)
         with self._lock:
