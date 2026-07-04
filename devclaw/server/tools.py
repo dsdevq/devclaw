@@ -22,18 +22,25 @@ from ._state import _goal_get, goals, mcp, queue, registry, store
 
 
 @mcp.tool
-async def implement_feature(
+async def dispatch_task(
+    kind: Literal["implement_feature", "fix_bug", "review_repository"],
     workspace_dir: str,
     goal: str,
     notify_url: Optional[str] = None,
     verify_cmd: Optional[str] = None,
     open_pr: bool = False,
 ) -> str:
-    """Submit a natural-language coding goal to be executed by OpenHands in the
-    given workspace_dir. Returns a task_id immediately; the task runs
-    asynchronously. Poll get_status(task_id), or pass notify_url to be pushed
-    the result. Use for new features / open-ended changes; prefer fix_bug for an
-    existing defect, and review_repository for a read-only review.
+    """One-shot dispatch of a code task to OpenHands in the given workspace_dir.
+    Returns a task_id immediately; the task runs asynchronously. Poll
+    get_status(task_id), or pass notify_url to be pushed the result.
+
+    ``kind`` selects the prompt bias:
+      - ``implement_feature`` — new features / open-ended changes.
+      - ``fix_bug`` — biases toward reading existing code first, making the
+        smallest fix, not refactoring unrelated code, and running the tests.
+      - ``review_repository`` — READ-ONLY code review; the agent inspects the
+        workspace and writes a report, prompt-instructed NOT to modify any
+        files. ``verify_cmd`` and ``open_pr`` are ignored for this kind.
 
     Pass verify_cmd (e.g. "dotnet test", "npm run build && npm run test:ci") to
     gate the task: after the agent finishes, DevClaw runs that command in the
@@ -42,19 +49,45 @@ async def implement_feature(
     command output captured.
 
     Pass open_pr=True to DELIVER a successful change as something you review: on
-    `done`, DevClaw commits it to a branch, pushes, and opens a PR (best-effort;
-    needs git push auth + a GitHub remote), recording the PR URL on the task."""
+    ``done``, DevClaw commits it to a branch, pushes, and opens a PR (best-effort;
+    needs git push auth + a GitHub remote), recording the PR URL on the task.
+
+    Prefer this over the older ``implement_feature`` / ``fix_bug`` /
+    ``review_repository`` tools — those are kept as back-compat aliases and
+    forward here."""
     if not workspace_dir or not goal:
-        raise ToolError("implement_feature requires workspace_dir and goal")
+        raise ToolError("dispatch_task requires workspace_dir and goal")
+    is_review = kind == "review_repository"
     task_id = queue.submit(
+        kind=kind,
+        workspace_dir=workspace_dir,
+        goal=goal,
+        notify_url=notify_url,
+        verify_cmd=None if is_review else verify_cmd,
+        deliver=False if is_review else open_pr,
+    )
+    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
+
+
+@mcp.tool
+async def implement_feature(
+    workspace_dir: str,
+    goal: str,
+    notify_url: Optional[str] = None,
+    verify_cmd: Optional[str] = None,
+    open_pr: bool = False,
+) -> str:
+    """DEPRECATED — thin forwarder to ``dispatch_task(kind="implement_feature")``.
+    Kept for back-compat with existing MCP callers; prefer ``dispatch_task``
+    for new integrations. See ``dispatch_task`` for full docs."""
+    return await dispatch_task(
         kind="implement_feature",
         workspace_dir=workspace_dir,
         goal=goal,
         notify_url=notify_url,
         verify_cmd=verify_cmd,
-        deliver=open_pr,
+        open_pr=open_pr,
     )
-    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
 @mcp.tool
@@ -65,44 +98,34 @@ async def fix_bug(
     verify_cmd: Optional[str] = None,
     open_pr: bool = False,
 ) -> str:
-    """Submit a bug-fix task. Like implement_feature, but with a prompt that
-    biases OpenHands toward reading existing code first, making the smallest
-    fix, not refactoring unrelated code, and running the tests. Returns task_id
-    immediately. Same optional notify_url as implement_feature.
-
-    Pass verify_cmd (e.g. the repo's test command) to gate the fix: DevClaw runs
-    it after the agent finishes and only marks the task done if it exits 0.
-    Pass open_pr=True to deliver a successful fix as a branch/PR you review."""
-    if not workspace_dir or not description:
+    """DEPRECATED — thin forwarder to ``dispatch_task(kind="fix_bug")``.
+    Kept for back-compat with existing MCP callers; prefer ``dispatch_task``
+    for new integrations. See ``dispatch_task`` for full docs."""
+    if not description:
         raise ToolError("fix_bug requires workspace_dir and description")
-    task_id = queue.submit(
+    return await dispatch_task(
         kind="fix_bug",
         workspace_dir=workspace_dir,
         goal=description,
         notify_url=notify_url,
         verify_cmd=verify_cmd,
-        deliver=open_pr,
+        open_pr=open_pr,
     )
-    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
 @mcp.tool
 async def review_repository(
     workspace_dir: str, focus: str = "", notify_url: Optional[str] = None
 ) -> str:
-    """Submit a READ-ONLY code review task. OpenHands inspects the workspace and
-    writes a review report; it is prompt-instructed NOT to modify any files.
-    Returns task_id immediately; the report appears in the task's result_json
-    agent_output once status=done. Same optional notify_url as implement_feature."""
-    if not workspace_dir:
-        raise ToolError("review_repository requires workspace_dir")
-    task_id = queue.submit(
+    """DEPRECATED — thin forwarder to ``dispatch_task(kind="review_repository")``.
+    Kept for back-compat with existing MCP callers; prefer ``dispatch_task``
+    for new integrations. See ``dispatch_task`` for full docs."""
+    return await dispatch_task(
         kind="review_repository",
         workspace_dir=workspace_dir,
         goal=focus or "general code review",
         notify_url=notify_url,
     )
-    return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
 @mcp.tool
