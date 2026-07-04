@@ -68,6 +68,11 @@ class Task:
     #: falls back to the engineer's own commit subject or the goal-derived
     #: heuristic.
     title: Optional[str] = None
+    #: The durable goal that owns this task. Set when the goal heartbeat
+    #: dispatches a task; None for standalone user-initiated dispatches
+    #: (``dispatch_task``). Orthogonal to ``program_id`` (ephemeral DAG-run
+    #: pointer) — a task can carry both, one, or neither.
+    parent_goal_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +95,7 @@ class Task:
             "deliver": self.deliver,
             "prUrl": self.pr_url,
             "title": self.title,
+            "parentGoalId": self.parent_goal_id,
         }
 
 
@@ -180,6 +186,9 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         deliver=bool(r["deliver"]),
         pr_url=r["pr_url"],
         title=r["title"] if "title" in r.keys() else None,
+        parent_goal_id=(
+            r["parent_goal_id"] if "parent_goal_id" in r.keys() else None
+        ),
     )
 
 
@@ -255,7 +264,8 @@ class StateStore:
                   verify_cmd      TEXT,
                   deliver         INTEGER NOT NULL DEFAULT 0,
                   pr_url          TEXT,
-                  title           TEXT
+                  title           TEXT,
+                  parent_goal_id  TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS programs (
@@ -323,6 +333,10 @@ class StateStore:
                 # reviewable-slice PRs, not direct-to-main commits.
                 "ALTER TABLE programs ADD COLUMN open_pr INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE programs ADD COLUMN verify_cmd TEXT",
+                # Durable goal-owner pointer (2026-07-04) — set by the goal
+                # heartbeat when it dispatches a task; null for standalone
+                # dispatch_task calls. Orthogonal to program_id.
+                "ALTER TABLE tasks ADD COLUMN parent_goal_id TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -336,6 +350,7 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at);
                 CREATE INDEX IF NOT EXISTS idx_tasks_kind       ON tasks(kind);
                 CREATE INDEX IF NOT EXISTS idx_tasks_program    ON tasks(program_id);
+                CREATE INDEX IF NOT EXISTS idx_tasks_parent_goal ON tasks(parent_goal_id);
                 CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
                 CREATE INDEX IF NOT EXISTS idx_events_program   ON events(program_id, id);
                 CREATE INDEX IF NOT EXISTS idx_events_task      ON events(task_id, id);
@@ -363,14 +378,15 @@ class StateStore:
         verify_cmd: Optional[str] = None,
         deliver: bool = False,
         title: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT INTO tasks
                      (id, kind, status, workspace_dir, goal, notify_url, created_at,
                       program_id, depends_on, order_idx, milestone, verify_cmd, deliver,
-                      title)
-                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      title, parent_goal_id)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     kind,
@@ -385,6 +401,7 @@ class StateStore:
                     verify_cmd,
                     1 if deliver else 0,
                     title,
+                    parent_goal_id,
                 ),
             )
             self._db.commit()

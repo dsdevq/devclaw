@@ -373,6 +373,7 @@ class TaskQueue:
         verify_cmd: Optional[str] = None,
         deliver: bool = False,
         title: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> str:
         task_id = str(uuid.uuid4())
         self._store.create_task(
@@ -384,6 +385,7 @@ class TaskQueue:
             verify_cmd=verify_cmd,
             deliver=deliver,
             title=title,
+            parent_goal_id=parent_goal_id,
         )
         self._pump()
         return task_id
