@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { cancelGoal, fetchGoal, steerGoal, type GoalDetail as GD, type Verdict } from "../api";
 import { EventFeed } from "../components/EventFeed";
+import { PRList } from "../components/PRList";
 import { mono, palettes } from "../theme";
 
 // PR#3 delivers the static frame of Goal Detail.dc.html: header, breadcrumb,
@@ -303,6 +304,8 @@ export function GoalDetail() {
           </div>
 
           <PhaseTimeline nodes={data.timeline} palette={p} />
+
+          <PRList goalId={data.id} />
 
           <EventFeed goalId={data.id} />
         </>
