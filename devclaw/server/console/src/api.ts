@@ -54,6 +54,12 @@ export interface TaskRow {
   prUrl: string | null;
 }
 
+export interface ProjectWarning {
+  code: string;
+  message: string;
+  goalIds?: string[];
+}
+
 export interface ProjectDetail {
   id: string;
   name: string;
@@ -66,6 +72,9 @@ export interface ProjectDetail {
    *  Tasks owned by a goal show up inside that goal, not here — no double-count.
    */
   tasks: TaskRow[];
+  /** Advisory warnings — currently only "multiple_active_goals" (warn-first
+   *  phase of the one-goal-per-project rule; 2026-07-04). */
+  warnings: ProjectWarning[];
 }
 
 export async function fetchProject(id: string): Promise<ProjectDetail> {

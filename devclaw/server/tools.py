@@ -935,11 +935,51 @@ async def update_project(
     return json.dumps(p.to_dict(), indent=2)
 
 
+_TERMINAL_GOAL_PHASES = {"done", "cancelled", "error", "achieved"}
+
+
+def _project_active_goal_ids(project) -> list[str]:
+    """All non-terminal goal ids that belong to this project — by workspace_dir
+    match (the authoritative join) OR by the advisory ``goal_ids`` list.
+
+    Used by the one-goal-per-project warn (2026-07-04): both entry points
+    (create_goal against a matching workspace, or link_goal directly) count
+    toward the "already-has-active-goal" state."""
+    from ..project_registry import _normalize_workspace
+
+    proj_ws = _normalize_workspace(project.workspace_dir)
+    seen: set[str] = set()
+    active: list[str] = []
+    for g in goals.list_goals():
+        gid = g.get("id")
+        if not gid:
+            continue
+        if g.get("phase") in _TERMINAL_GOAL_PHASES:
+            continue
+        matches_ws = (
+            proj_ws is not None
+            and _normalize_workspace(g.get("workspace_dir")) == proj_ws
+        )
+        matches_link = gid in (project.goal_ids or [])
+        if matches_ws or matches_link:
+            if gid not in seen:
+                seen.add(gid)
+                active.append(gid)
+    return active
+
+
 @mcp.tool
 async def link_goal(project_id: str, goal_id: str, unlink: bool = False) -> str:
     """Attach (or, with unlink=True, detach) a durable goal to/from a project. The
     link is by id only — the goal's status is joined live in list_projects /
-    project_status, never copied. Idempotent."""
+    project_status, never copied. Idempotent.
+
+    Warn-first one-goal-per-project (2026-07-04): if the project already has
+    an active goal, linking a second one still succeeds but the response
+    carries a ``warning`` field and the console renders a banner. Hard reject
+    lands in a follow-up PR after the warn phase has bake time. Under the
+    standing rule, a project pursues one well-defined goal at a time — if
+    you need a new direction, cancel + refile."""
     try:
         p = (
             registry.unlink_goal(project_id, goal_id)
@@ -948,7 +988,23 @@ async def link_goal(project_id: str, goal_id: str, unlink: bool = False) -> str:
         )
     except KeyError:
         raise ToolError(f"unknown project_id: {project_id}")
-    return json.dumps(p.to_dict(), indent=2)
+    out = p.to_dict()
+    if not unlink:
+        other_active = [gid for gid in _project_active_goal_ids(p) if gid != goal_id]
+        if other_active:
+            out["warning"] = {
+                "code": "multiple_active_goals",
+                "message": (
+                    "This project already has "
+                    f"{len(other_active)} active goal(s): "
+                    f"{', '.join(other_active)}. Under the one-goal-per-project "
+                    "rule (2026-07-04) a project pursues one goal at a time — "
+                    "cancel + refile instead of stacking. This will become a "
+                    "hard error after the warn-first phase."
+                ),
+                "otherActiveGoalIds": other_active,
+            }
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool

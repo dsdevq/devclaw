@@ -342,6 +342,27 @@ export function ProjectDetail() {
               boxSizing: "border-box",
             }}
           >
+            {(data.warnings ?? []).map((w) => (
+              <div
+                key={w.code}
+                style={{
+                  marginTop: 20,
+                  padding: "12px 14px",
+                  border: `1px solid ${p.amber}`,
+                  borderLeft: `3px solid ${p.amber}`,
+                  background: `${p.amber}12`,
+                  borderRadius: 4,
+                  fontSize: 12.5,
+                  color: p.textPrimary,
+                  lineHeight: 1.5,
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                  ⚠ {w.code === "multiple_active_goals" ? "Multiple active goals" : w.code}
+                </div>
+                <div style={{ color: p.textSecondary }}>{w.message}</div>
+              </div>
+            ))}
             <div style={{ marginTop: 28 }}>
               <div
                 style={{

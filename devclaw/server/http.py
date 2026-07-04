@@ -768,6 +768,22 @@ async def project_json(request: Request) -> Response:
             limit=25,
         ):
             loose_tasks.append(_task_row(t))
+    # Warn-first one-goal-per-project (2026-07-04): if >1 active goal is
+    # joined to this project, surface a banner. Under the standing rule a
+    # project pursues one goal at a time — cancel + refile instead of stacking.
+    warnings: list[dict] = []
+    if len(active) > 1:
+        warnings.append(
+            {
+                "code": "multiple_active_goals",
+                "message": (
+                    f"This project has {len(active)} active goals. Under the "
+                    "one-goal-per-project rule a project pursues one goal at "
+                    "a time — cancel the extras or refile."
+                ),
+                "goalIds": [row["id"] for row in active],
+            }
+        )
     return JSONResponse(
         {
             "id": p.id,
@@ -778,6 +794,7 @@ async def project_json(request: Request) -> Response:
             "active": active,
             "archived": archived,
             "tasks": loose_tasks,
+            "warnings": warnings,
         }
     )
 
