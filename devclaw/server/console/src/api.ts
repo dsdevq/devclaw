@@ -73,6 +73,7 @@ export interface GoalDetail {
   lifecycle: string | null;
   direction: { verdict: Verdict; at: string; note: string } | null;
   actionsDispatched: number;
+  dispatchCap: number;
   inFlight: { tool: string; id: string; is_done_check: boolean } | null;
   timeline: TimelineNode[];
   blockedOn: string | null;
