@@ -521,6 +521,175 @@ async def goal_json(request: Request) -> Response:
     )
 
 
+_GH_PR_URL_RE = __import__("re").compile(
+    r"^https?://github\.com/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/(\d+)/?$"
+)
+
+
+def _parse_pr_url(url: str) -> tuple[str, str, int] | None:
+    """Return (owner, repo, number) or None. Rejects non-github.com URLs — the
+    merge endpoint uses this as its allow-check so a spoofed pr_url can't
+    trick us into shelling `gh` at an arbitrary host/repo."""
+    if not isinstance(url, str):
+        return None
+    m = _GH_PR_URL_RE.match(url.strip())
+    if not m:
+        return None
+    return m.group(1), m.group(2), int(m.group(3))
+
+
+def _collect_goal_pr_rows(goal_id: str) -> list[dict]:
+    """Read delivery traces for this goal, extract PRs, dedupe by URL — the
+    LAST delivery for a given PR wins so if a mission re-mentions a PR (e.g.
+    on a retry) the newer action_label surfaces. Merge/close-state enrichment
+    happens in the endpoint (per-row `gh pr view` probe); this step only
+    reads local state.
+
+    Dedup relies on ``read_traces`` returning ascending id order — trace ids
+    are monotonic, so we don't need to compare wall-clock ts (which can tie
+    inside the same millisecond)."""
+    seen: dict[str, dict] = {}
+    for ev in store.read_traces(goal_id=goal_id, kind="delivery", limit=1000):
+        payload = ev.get("payload") or {}
+        pr_url = str(payload.get("pr_url") or "").strip()
+        if not pr_url:
+            continue
+        parsed = _parse_pr_url(pr_url)
+        if parsed is None:
+            continue
+        owner, repo, number = parsed
+        seen[pr_url] = {
+            "prUrl": pr_url,
+            "prNumber": number,
+            "repo": f"{owner}/{repo}",
+            "actionLabel": str(payload.get("action_label") or ""),
+            "gatePassed": payload.get("gate_passed"),
+            "ts": ev.get("ts") or "",
+            "_id": ev.get("id") or 0,
+        }
+    rows = list(seen.values())
+    rows.sort(key=lambda r: r.get("_id") or 0, reverse=True)
+    for r in rows:
+        r.pop("_id", None)
+    return rows
+
+
+async def _probe_pr_state(repo: str, number: int) -> dict:
+    """Live-fetch PR state via `gh pr view`. Failures degrade to unknown state
+    so a network hiccup or a deleted branch never blocks the whole page."""
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "view", str(number),
+        "--repo", repo,
+        "--json", "state,mergeable,mergeStateStatus,title,mergedAt",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=12.0)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return {"state": "UNKNOWN", "mergeable": "UNKNOWN", "error": "timeout"}
+    if proc.returncode != 0:
+        return {
+            "state": "UNKNOWN",
+            "mergeable": "UNKNOWN",
+            "error": (stderr.decode("utf-8", "replace") or "gh failed").strip()[:200],
+        }
+    try:
+        return json.loads(stdout.decode("utf-8", "replace"))
+    except json.JSONDecodeError:
+        return {"state": "UNKNOWN", "mergeable": "UNKNOWN", "error": "parse"}
+
+
+@mcp.custom_route("/goals/{goal_id}/prs.json", methods=["GET"])
+async def goal_prs_json(request: Request) -> Response:
+    """PRs opened by this goal, with live GitHub state so the console can show
+    the correct Merge button per row without another round-trip.
+
+    Sources: `traces(kind='delivery')` rows carry `pr_url` — parsed and deduped
+    locally. Each surviving row is enriched with a live `gh pr view` probe
+    (state/mergeable/title/mergedAt) so `state==OPEN and mergeable==MERGEABLE`
+    is the exact condition the Merge button enables on. Probes run in parallel
+    to keep page-load reasonable when a mission has many PRs open. Traces are
+    the intentional source over `deliveries.md`: structured payload, not
+    markdown extraction; and stays consistent with the SSE feed."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        goals.get_goal(goal_id)
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+
+    rows = _collect_goal_pr_rows(goal_id)
+    if not rows:
+        return JSONResponse({"prs": []})
+
+    states = await asyncio.gather(
+        *[_probe_pr_state(r["repo"], r["prNumber"]) for r in rows]
+    )
+    for row, state in zip(rows, states):
+        row["state"] = state.get("state") or "UNKNOWN"
+        row["mergeable"] = state.get("mergeable") or "UNKNOWN"
+        row["mergeStateStatus"] = state.get("mergeStateStatus") or None
+        row["title"] = state.get("title") or ""
+        row["mergedAt"] = state.get("mergedAt") or None
+        if state.get("error"):
+            row["error"] = state["error"]
+    return JSONResponse({"prs": rows})
+
+
+@mcp.custom_route("/prs/merge", methods=["POST"])
+async def pr_merge(request: Request) -> Response:
+    """Console-facing merge button. Body: `{"prUrl": "https://github.com/…"}`.
+
+    Guarded by `_parse_pr_url`: only URLs matching a canonical github.com PR
+    path are accepted, so a spoofed body can't turn this into an arbitrary
+    shell. Squash + delete-branch matches the merge policy we already use for
+    the closeloop mission chain — one-shot slice per PR."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    pr_url = (body or {}).get("prUrl")
+    parsed = _parse_pr_url(pr_url if isinstance(pr_url, str) else "")
+    if parsed is None:
+        return JSONResponse(
+            {"error": "invalid_pr_url", "hint": "expected https://github.com/<owner>/<repo>/pull/<n>"},
+            status_code=400,
+        )
+    owner, repo, number = parsed
+    slug = f"{owner}/{repo}"
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "merge", str(number),
+        "--repo", slug,
+        "--squash",
+        "--delete-branch",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=45.0)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        return JSONResponse(
+            {"merged": False, "error": "timeout"}, status_code=504
+        )
+    if proc.returncode != 0:
+        err = (stderr.decode("utf-8", "replace") or stdout.decode("utf-8", "replace")).strip()
+        return JSONResponse(
+            {"merged": False, "error": err[:400] or "gh pr merge failed"},
+            status_code=502,
+        )
+    return JSONResponse(
+        {"merged": True, "prUrl": pr_url, "output": stdout.decode("utf-8", "replace").strip()[:200]}
+    )
+
+
 @mcp.custom_route("/projects/{project_id}.json", methods=["GET"])
 async def project_json(request: Request) -> Response:
     """Project Detail feed — header (name, repo, preview) + active/archived goal

@@ -117,6 +117,47 @@ export async function cancelGoal(id: string): Promise<{ cancelled: boolean; phas
   return r.json();
 }
 
+export type PRState = "OPEN" | "MERGED" | "CLOSED" | "UNKNOWN";
+export type PRMergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
+export interface PRRow {
+  prUrl: string;
+  prNumber: number;
+  repo: string;
+  actionLabel: string;
+  gatePassed: boolean | null;
+  ts: string;
+  state: PRState;
+  mergeable: PRMergeable;
+  mergeStateStatus: string | null;
+  title: string;
+  mergedAt: string | null;
+  error?: string;
+}
+
+export async function fetchGoalPrs(id: string): Promise<PRRow[]> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/prs.json${tokenQS()}`);
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) throw new Error(`goal prs ${id}: ${r.status}`);
+  const j = await r.json();
+  return (j.prs ?? []) as PRRow[];
+}
+
+export async function mergePr(prUrl: string): Promise<{ merged: boolean; error?: string }> {
+  const r = await fetch(`/prs/merge${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prUrl }),
+  });
+  if (r.ok) return r.json();
+  // 4xx/5xx bodies also carry {merged:false, error} — surface that shape.
+  try {
+    return await r.json();
+  } catch {
+    return { merged: false, error: `merge failed: ${r.status}` };
+  }
+}
+
 export async function steerGoal(id: string, message: string): Promise<{ steered: boolean }> {
   const r = await fetch(`/goals/${encodeURIComponent(id)}/steer${tokenQS()}`, {
     method: "POST",
