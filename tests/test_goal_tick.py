@@ -875,6 +875,37 @@ async def test_tick_all_resolves_merger_per_goal(tmp_path, monkeypatch):
     # "off" project resolved to no merger — nothing else was merged anywhere.
 
 
+@pytest.mark.asyncio
+async def test_tick_all_resolves_verify_done_per_goal(tmp_path):
+    """Same per-goal-freshness contract as the merger, for the done-gate
+    re-check flag: tick_all must call verify_done_resolver once per goal (so a
+    project's verify_done override can't leak onto another goal in the sweep),
+    not resolve one fleet-wide value. Prove the resolver is invoked per goal_id."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "a", workspace_dir="/repos/a")
+    seed_goal(tmp_path, "b", workspace_dir="/repos/b")
+    store.save_status("a", GoalStatus(lifecycle="investigating"))
+    store.save_status("b", GoalStatus(lifecycle="investigating"))
+
+    seen: list[str] = []
+
+    def _vd_resolver(goal):
+        seen.append(goal.workspace_dir)
+        return goal.workspace_dir == "/repos/a"  # per-goal, distinct values
+
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine()
+    notifier = RecordingNotifier()
+
+    await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+        verify_done_resolver=_vd_resolver,
+    )
+
+    assert sorted(seen) == ["/repos/a", "/repos/b"]  # called fresh per goal
+
+
 # ---- outcome lifecycle: investigate before executing -----------------------
 
 

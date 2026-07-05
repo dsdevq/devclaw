@@ -154,7 +154,8 @@ class GoalService:
         workspace_dir = goal.workspace_dir if goal is not None else None
         if not goal_merge.resolve_automerge(self._project_registry, workspace_dir):
             return None
-        return goal_merge.default_merger()
+        strategy = goal_merge.resolve_merge_strategy(self._project_registry, workspace_dir)
+        return goal_merge.default_merger(strategy)
 
     def _merger_resolver(self) -> "Callable[[Goal], Optional[goal_merge.Merger]]":
         """Bound for tick_all, which ticks every goal in one sweep and needs a
@@ -170,6 +171,24 @@ class GoalService:
         if not goal_remote_checks.REMOTE_CHECKS_ENABLED:
             return None
         return goal_remote_checks.default_checker()
+
+    def _verify_done(self, goal: "Optional[Goal]" = None) -> bool:
+        """The done-gate re-check policy for THIS goal's repo: its owning
+        project's ``verify_done`` override if set, else the devclaw-wide
+        ``DEVCLAW_GOAL_VERIFY_DONE`` default (carried on the config). ``goal=None``
+        or no registry → the global default."""
+        default = self._cfg.verify_done
+        if self._project_registry is None or goal is None:
+            return default
+        return self._project_registry.resolve_override(
+            goal.workspace_dir, "verify_done", default
+        )
+
+    def _verify_done_resolver(self) -> "Callable[[Goal], bool]":
+        """Per-goal ``verify_done`` for tick_all's sweep — a project override
+        for one goal must not leak onto another (same reason as
+        :meth:`_merger_resolver`)."""
+        return self._verify_done
 
     def _trend_detector(self) -> "Optional[_trend_detector_mod.TrendDetector]":
         """The cross-session trend detector. ``None`` when disabled via
@@ -311,6 +330,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+            verify_done_resolver=self._verify_done_resolver(),
             summary_caller=self._summary(), merger_resolver=self._merger_resolver(),
             tracer_factory=self._make_tracer,
             trend_detector=self._trend_detector(),
@@ -325,7 +345,7 @@ class GoalService:
                 goal_id, store=self._goal_store, engine=self._engine,
                 planner_caller=self._planner(), evaluator_caller=self._evaluator(),
                 notifier=self._notifier, notify_url="",
-                eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+                eval_every=self._cfg.eval_every, verify_done=self._verify_done(goal),
                 summary_caller=self._summary(), merger=self._merger(goal),
                 trend_detector=self._trend_detector(),
                 remote_checker=self._remote_checker(),
@@ -620,7 +640,7 @@ class GoalService:
             store=self._goal_store, engine=self._engine,
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url=self._cfg.notify_url,
-            eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
+            eval_every=self._cfg.eval_every, verify_done=self._verify_done(goal),
             summary_caller=self._summary(), merger=self._merger(goal),
             remote_checker=self._remote_checker(),
         )

@@ -1496,6 +1496,7 @@ async def tick_all(
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     merger_resolver: "Callable[[Goal], _merge.Merger | None] | None" = None,
+    verify_done_resolver: "Callable[[Goal], bool] | None" = None,
     tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
     trend_detector: "object | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
@@ -1511,7 +1512,9 @@ async def tick_all(
     project's automerge override must not leak from one goal onto another in
     the same sweep) and takes precedence over the flat ``merger``. Plain
     ``merger`` stays supported for callers (and existing tests) with a single
-    fleet-wide value.
+    fleet-wide value. ``verify_done_resolver`` is the same idea for the
+    done-gate re-check flag: fresh per goal, taking precedence over the flat
+    ``verify_done``.
 
     ``trend_detector`` (typed as ``object`` to avoid the import cycle with
     ``devclaw.trend_detector``): when set, runs per-project signals inside each
@@ -1548,18 +1551,25 @@ async def tick_all(
             continue
         tracer = tracer_factory(goal_id) if tracer_factory else None
         goal_merger = merger
-        if merger_resolver is not None:
+        goal_verify_done = verify_done
+        # Load the goal once for whichever per-goal resolvers are wired (a bad
+        # goal.yaml must not sink the sweep — fall back to the flat values).
+        if merger_resolver is not None or verify_done_resolver is not None:
             try:
-                goal_merger = merger_resolver(store.load_goal(goal_id))
+                _g = store.load_goal(goal_id)
+                if merger_resolver is not None:
+                    goal_merger = merger_resolver(_g)
+                if verify_done_resolver is not None:
+                    goal_verify_done = verify_done_resolver(_g)
             except Exception:  # noqa: BLE001 — a bad goal.yaml must not sink the sweep
-                goal_merger = merger
+                goal_merger, goal_verify_done = merger, verify_done
         try:
             with _trace.tracer_scope(tracer):
                 outcomes[goal_id] = await tick_goal(
                     goal_id, store=store, engine=engine,
                     planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                     notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-                    eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+                    eval_every=eval_every, verify_done=goal_verify_done, no_progress_s=no_progress_s,
                     summary_caller=summary_caller, merger=goal_merger,
                     trend_detector=trend_detector,
                     remote_checker=remote_checker,
