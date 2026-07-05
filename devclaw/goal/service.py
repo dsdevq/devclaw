@@ -32,7 +32,7 @@ from .evaluator import ClaudeCaller
 from .models import Goal, GoalStatus
 from .notify import HttpNotifier, Notifier, NullNotifier
 from .store import GoalStore
-from .tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
+from .tick import AUTODEPLOY_ENABLED, EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
 from ..loom import trace as _trace
 from ..state_store import StateStore
 from ..task_queue import TaskQueue
@@ -75,6 +75,7 @@ class GoalConfig:
     tick_seconds: int
     eval_every: int
     verify_done: bool
+    autodeploy: bool = AUTODEPLOY_ENABLED
 
     @staticmethod
     def from_env() -> "GoalConfig":
@@ -85,6 +86,7 @@ class GoalConfig:
             tick_seconds=int(os.environ.get("DEVCLAW_GOAL_TICK_SECONDS", "900")),
             eval_every=EVAL_EVERY,
             verify_done=VERIFY_DONE,
+            autodeploy=AUTODEPLOY_ENABLED,
         )
 
 
@@ -189,6 +191,22 @@ class GoalService:
         for one goal must not leak onto another (same reason as
         :meth:`_merger_resolver`)."""
         return self._verify_done
+
+    def _autodeploy(self, goal: "Optional[Goal]" = None) -> bool:
+        """The on-complete auto-deploy policy for THIS goal's repo: its owning
+        project's ``autodeploy`` override if set, else the devclaw-wide
+        ``DEVCLAW_GOAL_AUTODEPLOY`` default (carried on the config)."""
+        default = self._cfg.autodeploy
+        if self._project_registry is None or goal is None:
+            return default
+        return self._project_registry.resolve_override(
+            goal.workspace_dir, "autodeploy", default
+        )
+
+    def _autodeploy_resolver(self) -> "Callable[[Goal], bool]":
+        """Per-goal ``autodeploy`` for tick_all's sweep (same reason as
+        :meth:`_merger_resolver`)."""
+        return self._autodeploy
 
     def _trend_detector(self) -> "Optional[_trend_detector_mod.TrendDetector]":
         """The cross-session trend detector. ``None`` when disabled via
@@ -331,6 +349,7 @@ class GoalService:
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
             verify_done_resolver=self._verify_done_resolver(),
+            autodeploy=self._cfg.autodeploy, autodeploy_resolver=self._autodeploy_resolver(),
             summary_caller=self._summary(), merger_resolver=self._merger_resolver(),
             tracer_factory=self._make_tracer,
             trend_detector=self._trend_detector(),
@@ -346,6 +365,7 @@ class GoalService:
                 planner_caller=self._planner(), evaluator_caller=self._evaluator(),
                 notifier=self._notifier, notify_url="",
                 eval_every=self._cfg.eval_every, verify_done=self._verify_done(goal),
+                autodeploy=self._autodeploy(goal),
                 summary_caller=self._summary(), merger=self._merger(goal),
                 trend_detector=self._trend_detector(),
                 remote_checker=self._remote_checker(),
@@ -641,6 +661,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url=self._cfg.notify_url,
             eval_every=self._cfg.eval_every, verify_done=self._verify_done(goal),
+            autodeploy=self._autodeploy(goal),
             summary_caller=self._summary(), merger=self._merger(goal),
             remote_checker=self._remote_checker(),
         )

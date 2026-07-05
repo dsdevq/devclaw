@@ -906,6 +906,49 @@ async def test_tick_all_resolves_verify_done_per_goal(tmp_path):
     assert sorted(seen) == ["/repos/a", "/repos/b"]  # called fresh per goal
 
 
+@pytest.mark.asyncio
+async def test_tick_all_resolves_autodeploy_per_goal(tmp_path):
+    """autodeploy gets the same per-goal-freshness treatment: tick_all calls
+    autodeploy_resolver once per goal so a project's autodeploy override can't
+    leak onto another goal in the sweep."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "a", workspace_dir="/repos/a")
+    seed_goal(tmp_path, "b", workspace_dir="/repos/b")
+    store.save_status("a", GoalStatus(lifecycle="investigating"))
+    store.save_status("b", GoalStatus(lifecycle="investigating"))
+
+    seen: list[str] = []
+
+    def _ad_resolver(goal):
+        seen.append(goal.workspace_dir)
+        return goal.workspace_dir == "/repos/a"
+
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine()
+    notifier = RecordingNotifier()
+
+    await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+        autodeploy_resolver=_ad_resolver,
+    )
+
+    assert sorted(seen) == ["/repos/a", "/repos/b"]
+
+
+@pytest.mark.asyncio
+async def test_auto_deploy_disabled_returns_empty_without_deploying(tmp_path):
+    """_auto_deploy honors its resolved `enabled` flag (no longer the env var):
+    enabled=False short-circuits to '' before any deploy attempt."""
+    from devclaw.goal.tick import _auto_deploy
+
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", workspace_dir="/repos/g")
+    goal = store.load_goal("g")
+    out = await _auto_deploy("g", goal, store, enabled=False)
+    assert out == ""
+
+
 # ---- outcome lifecycle: investigate before executing -----------------------
 
 

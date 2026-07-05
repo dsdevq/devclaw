@@ -65,6 +65,9 @@ NO_PROGRESS_S = int(os.environ.get("DEVCLAW_GOAL_NO_PROGRESS_S", "21600"))
 #: when True, a planner "done" proposal dispatches a read-only review of the repo
 #: against done_when and the evaluator judges THAT before the goal closes.
 VERIFY_DONE = os.environ.get("DEVCLAW_GOAL_VERIFY_DONE", "1") not in ("0", "false", "")
+#: when True, a goal reaching `achieved` auto-deploys the built app to a durable
+#: Tailscale URL. The devclaw-wide default; a project may override it.
+AUTODEPLOY_ENABLED = os.environ.get("DEVCLAW_GOAL_AUTODEPLOY", "1") not in ("0", "false", "")
 #: when True, the investigating phase dispatches the decomposer after the
 #: discovery brief is written — emitting an atomic checklist that the per-tick
 #: planner picks actions from instead of the free-form backlog. Pillar 1 of the
@@ -346,6 +349,7 @@ class TickContext:
     prepare_ws: WorkspacePrep = prepare_workspace
     eval_every: int = EVAL_EVERY
     verify_done: bool = VERIFY_DONE
+    autodeploy: bool = AUTODEPLOY_ENABLED
     no_progress_s: int = NO_PROGRESS_S
     decompose_enabled: bool = DECOMPOSE_ENABLED
     summary_caller: "ClaudeCaller | None" = None
@@ -426,6 +430,7 @@ async def tick_goal(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    autodeploy: bool = AUTODEPLOY_ENABLED,
     no_progress_s: int = NO_PROGRESS_S,
     decompose_enabled: bool = DECOMPOSE_ENABLED,
     summary_caller: "ClaudeCaller | None" = None,
@@ -452,7 +457,8 @@ async def tick_goal(
         store=store, engine=engine,
         planner_caller=planner_caller, evaluator_caller=evaluator_caller,
         notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-        eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+        eval_every=eval_every, verify_done=verify_done, autodeploy=autodeploy,
+        no_progress_s=no_progress_s,
         decompose_enabled=decompose_enabled,
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
@@ -489,6 +495,7 @@ async def _tick_goal_impl(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    autodeploy: bool = AUTODEPLOY_ENABLED,
     no_progress_s: int = NO_PROGRESS_S,
     decompose_enabled: bool = DECOMPOSE_ENABLED,
     summary_caller: "ClaudeCaller | None" = None,
@@ -513,7 +520,8 @@ async def _tick_goal_impl(
         store=store, engine=engine,
         planner_caller=planner_caller, evaluator_caller=evaluator_caller,
         notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-        eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
+        eval_every=eval_every, verify_done=verify_done, autodeploy=autodeploy,
+        no_progress_s=no_progress_s,
         decompose_enabled=decompose_enabled,
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
@@ -635,17 +643,21 @@ def _project_owns_its_deploy(workspace_dir: str) -> bool:
         return False
 
 
-async def _auto_deploy(goal_id: str, goal: Goal, store: GoalStore) -> str:
+async def _auto_deploy(goal_id: str, goal: Goal, store: GoalStore, *, enabled: bool) -> str:
     """Deploy the built app to a durable Tailscale URL on goal completion and return
     a short suffix to append to the completion notice (the live URL, or empty). Fully
     best-effort: any failure is logged and swallowed — a verified-complete goal must
-    never be reopened because hosting wobbled. Off via DEVCLAW_GOAL_AUTODEPLOY=0.
+    never be reopened because hosting wobbled.
+
+    ``enabled`` is resolved upstream (a project's ``autodeploy`` override, else
+    the devclaw-wide ``DEVCLAW_GOAL_AUTODEPLOY`` default — see
+    GoalService._autodeploy); this function no longer reads the env directly.
 
     Skipped when the target project owns its own deploy (see
     :func:`_project_owns_its_deploy`) — devclaw does not run a per-goal container
     for a project that already has a Dockerfile + CI deploy job of its own.
     """
-    if os.environ.get("DEVCLAW_GOAL_AUTODEPLOY", "1") == "0":
+    if not enabled:
         return ""
     if _project_owns_its_deploy(goal.workspace_dir):
         store.append_log(
@@ -671,6 +683,7 @@ async def _resolve_done_gate(
     *, store: GoalStore, evaluator_caller: ClaudeCaller, notifier: Notifier,
     summarize: "ClaudeCaller | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
+    autodeploy: bool = AUTODEPLOY_ENABLED,
 ) -> Outcome:
     """A done-gate review just finished — judge the repo against done_when. Only
     'achieved' closes the goal; otherwise corrections are steered back in and the
@@ -750,7 +763,7 @@ async def _resolve_done_gate(
         # Handoff: a completed goal should be a thing the owner can OPEN, not just a
         # closed ticket. Best-effort deploy the built app to a durable Tailscale URL.
         # NEVER let a deploy hiccup undo a verified-complete goal — the goal IS done.
-        live = await _auto_deploy(goal_id, goal, store)
+        live = await _auto_deploy(goal_id, goal, store, enabled=autodeploy)
         await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}{live}", summarize=summarize)
         return Outcome.DONE
     if ev.verdict in ("stalled", "needs_human"):
@@ -771,6 +784,7 @@ async def _open_done_gate(
     notifier: Notifier, notify_url: str, prepare_ws: WorkspacePrep, verify_done: bool,
     note: str, summarize: "ClaudeCaller | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
+    autodeploy: bool = AUTODEPLOY_ENABLED,
 ) -> Outcome:
     """The planner proposed done. Don't trust it: either dispatch a read-only
     review of the repo against done_when (the grounded path) and let the next
@@ -810,7 +824,7 @@ async def _open_done_gate(
     return await _resolve_done_gate(
         goal_id, goal, base, review_report="",  # no review run; artifact-only
         store=store, evaluator_caller=evaluator_caller, notifier=notifier,
-        summarize=summarize, remote_checker=remote_checker,
+        summarize=summarize, remote_checker=remote_checker, autodeploy=autodeploy,
     )
 
 
@@ -1260,6 +1274,7 @@ async def _resolve_polling_done_gate(
         goal_id, goal, new_status, review_report,
         store=ctx.store, evaluator_caller=ctx.evaluator_caller, notifier=ctx.notifier,
         summarize=ctx.summary_caller, remote_checker=ctx.remote_checker,
+        autodeploy=ctx.autodeploy,
     )
 
 
@@ -1468,6 +1483,7 @@ async def _handle_executing(
             notifier=ctx.notifier, notify_url=ctx.notify_url, prepare_ws=ctx.prepare_ws,
             verify_done=ctx.verify_done, note=result.note, summarize=ctx.summary_caller,
             remote_checker=ctx.remote_checker,
+            autodeploy=ctx.autodeploy,
         )
 
     # decision == "act"
@@ -1492,11 +1508,13 @@ async def tick_all(
     prepare_ws: WorkspacePrep = prepare_workspace,
     eval_every: int = EVAL_EVERY,
     verify_done: bool = VERIFY_DONE,
+    autodeploy: bool = AUTODEPLOY_ENABLED,
     no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
     merger_resolver: "Callable[[Goal], _merge.Merger | None] | None" = None,
     verify_done_resolver: "Callable[[Goal], bool] | None" = None,
+    autodeploy_resolver: "Callable[[Goal], bool] | None" = None,
     tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
     trend_detector: "object | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
@@ -1512,9 +1530,9 @@ async def tick_all(
     project's automerge override must not leak from one goal onto another in
     the same sweep) and takes precedence over the flat ``merger``. Plain
     ``merger`` stays supported for callers (and existing tests) with a single
-    fleet-wide value. ``verify_done_resolver`` is the same idea for the
-    done-gate re-check flag: fresh per goal, taking precedence over the flat
-    ``verify_done``.
+    fleet-wide value. ``verify_done_resolver`` and ``autodeploy_resolver`` are
+    the same idea for the done-gate re-check flag and the on-complete deploy
+    flag: fresh per goal, each taking precedence over its flat counterpart.
 
     ``trend_detector`` (typed as ``object`` to avoid the import cycle with
     ``devclaw.trend_detector``): when set, runs per-project signals inside each
@@ -1552,24 +1570,28 @@ async def tick_all(
         tracer = tracer_factory(goal_id) if tracer_factory else None
         goal_merger = merger
         goal_verify_done = verify_done
+        goal_autodeploy = autodeploy
         # Load the goal once for whichever per-goal resolvers are wired (a bad
         # goal.yaml must not sink the sweep — fall back to the flat values).
-        if merger_resolver is not None or verify_done_resolver is not None:
+        if any(r is not None for r in (merger_resolver, verify_done_resolver, autodeploy_resolver)):
             try:
                 _g = store.load_goal(goal_id)
                 if merger_resolver is not None:
                     goal_merger = merger_resolver(_g)
                 if verify_done_resolver is not None:
                     goal_verify_done = verify_done_resolver(_g)
+                if autodeploy_resolver is not None:
+                    goal_autodeploy = autodeploy_resolver(_g)
             except Exception:  # noqa: BLE001 — a bad goal.yaml must not sink the sweep
-                goal_merger, goal_verify_done = merger, verify_done
+                goal_merger, goal_verify_done, goal_autodeploy = merger, verify_done, autodeploy
         try:
             with _trace.tracer_scope(tracer):
                 outcomes[goal_id] = await tick_goal(
                     goal_id, store=store, engine=engine,
                     planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                     notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-                    eval_every=eval_every, verify_done=goal_verify_done, no_progress_s=no_progress_s,
+                    eval_every=eval_every, verify_done=goal_verify_done,
+                    autodeploy=goal_autodeploy, no_progress_s=no_progress_s,
                     summary_caller=summary_caller, merger=goal_merger,
                     trend_detector=trend_detector,
                     remote_checker=remote_checker,
