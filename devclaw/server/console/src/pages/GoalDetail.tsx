@@ -317,21 +317,31 @@ export function GoalDetail() {
             </div>
           </div>
 
-          <PhaseTimeline nodes={data.timeline} palette={p} />
+          {/* Scroll region: the header + objective/pills frame stays pinned;
+              everything below (timeline, blocked banner, tasks, PRs, events)
+              owns the scroll. flex:1 + minHeight:0 is what lets a flex child
+              actually scroll inside the height:100vh; overflow:hidden column —
+              without it the content stacks past the viewport and gets clipped
+              with no scroll anywhere (fixed 2026-07-05). The timeline lives
+              inside the scroll region (not pinned) so its absolutely-positioned
+              node labels don't overlap the scrolled rows below it. */}
+          <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+            <PhaseTimeline nodes={data.timeline} palette={p} />
 
-          {data.phase === "blocked" && (
-            <BlockedBanner blockedOn={data.blockedOn} palette={p} />
-          )}
+            {data.phase === "blocked" && (
+              <BlockedBanner blockedOn={data.blockedOn} palette={p} />
+            )}
 
-          <TasksSection
-            title="Dispatched tasks"
-            tasks={data.tasks ?? []}
-            emptyLabel="No tasks dispatched yet — the goal heartbeat will file them here"
-          />
+            <TasksSection
+              title="Dispatched tasks"
+              tasks={data.tasks ?? []}
+              emptyLabel="No tasks dispatched yet — the goal heartbeat will file them here"
+            />
 
-          <PRList goalId={data.id} />
+            <PRList goalId={data.id} />
 
-          <EventFeed goalId={data.id} />
+            <EventFeed goalId={data.id} />
+          </div>
         </>
       )}
     </div>
