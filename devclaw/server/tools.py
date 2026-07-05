@@ -872,17 +872,24 @@ async def register_project(
     workspace_dir: Optional[str] = None,
     preview_url: Optional[str] = None,
     notes: str = "",
+    automerge: Optional[Literal["on", "off"]] = None,
 ) -> str:
     """Register a repo in the project registry — the control plane's source of
     truth for 'what is devclaw working on'. ``project_id`` is a stable slug (e.g.
     'todo-fullstack-demo'). Link the goal(s) driving it with link_goal. Idempotent
-    failure: a taken id is an error (use update_project to change it)."""
+    failure: a taken id is an error (use update_project to change it).
+
+    ``automerge`` pins whether goals working in this project's workspace
+    auto-merge their gate-passed PRs, overriding the devclaw-wide default.
+    Omit it to inherit that default (the usual choice) — this is the ONLY
+    place auto-merge is configured; a goal itself has no automerge setting."""
     if not project_id or not name:
         raise ToolError("register_project requires project_id and name")
     try:
         p = registry.create(
             id=project_id, name=name, repo_url=repo_url,
             workspace_dir=workspace_dir, preview_url=preview_url, notes=notes,
+            automerge=(None if automerge is None else automerge == "on"),
         )
     except ProjectExists:
         raise ToolError(f"project already exists: {project_id}")
@@ -922,13 +929,23 @@ async def update_project(
     preview_url: Optional[str] = None,
     status: Optional[Literal["active", "paused", "archived"]] = None,
     notes: Optional[str] = None,
+    automerge: Optional[Literal["on", "off", "inherit"]] = None,
 ) -> str:
     """Update a registered project's facts — only the fields you pass change. Use to
-    record a preview URL, pause/archive it, or correct the repo/workspace."""
+    record a preview URL, pause/archive it, or correct the repo/workspace.
+
+    ``automerge``: 'on'/'off' pins whether this project's goals auto-merge
+    gate-passed PRs, overriding the devclaw-wide DEVCLAW_GOAL_AUTOMERGE
+    default; 'inherit' explicitly clears a prior override back to that
+    default. Omit entirely to leave whatever is currently set untouched."""
+    automerge_kwargs = {}
+    if automerge is not None:
+        automerge_kwargs["automerge"] = {"on": True, "off": False, "inherit": None}[automerge]
     try:
         p = registry.update(
             project_id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
             preview_url=preview_url, status=status, notes=notes,
+            **automerge_kwargs,
         )
     except KeyError:
         raise ToolError(f"unknown project_id: {project_id}")

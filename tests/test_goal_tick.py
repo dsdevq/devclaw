@@ -16,7 +16,7 @@ import pytest
 
 from devclaw.goal.models import GoalStatus, InFlight, PollResult
 from devclaw.goal.store import GoalStore
-from devclaw.goal.tick import Outcome, tick_goal
+from devclaw.goal.tick import Outcome, tick_all, tick_goal
 from tests.goal_fakes import Clock, FakeClaude, FakeEngine, RecordingNotifier, fake_prepare, seed_goal
 
 ACT = json.dumps(
@@ -618,6 +618,33 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_merge_fires_on_a_passed_merger_even_with_global_flag_off(tmp_path, monkeypatch):
+    """Regression lock for the per-project-override bug found 2026-07-05: a
+    project can pin automerge ON for its own repo even while the devclaw-wide
+    DEVCLAW_GOAL_AUTOMERGE default is off. GoalService resolves that into an
+    actual merger callable (or None) and hands it to the tick — this proves
+    the tick honors WHATEVER merger it's given and does not independently
+    re-check the raw global flag, which would silently override a project's
+    explicit 'on' with the fleet default."""
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", False)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _delivery_status())
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger()
+
+    # A project override resolved this ON despite the global default being off —
+    # simulated here by simply handing tick_goal a real merger regardless of flag.
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    assert merger.merged == ["https://github.com/o/r/pull/9"]
+
+
+@pytest.mark.asyncio
 async def test_checklist_mode_dispatch_is_not_auto_merged(tmp_path, monkeypatch):
     """Pillar 2 invariant: when the settled action carries checklist
     addresses, its PR is the SHARED goal-branch PR every item keeps pushing
@@ -699,7 +726,16 @@ async def test_failed_gate_is_not_auto_merged(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auto_merge_off_by_default(tmp_path):
-    """With AUTOMERGE unset (default), even a green PR is left for manual review."""
+    """With automerge disabled, no merger is ever passed down to a tick in the
+    first place — the enabled/disabled decision is resolved ONCE, by
+    GoalService._merger (project override, else the devclaw-wide
+    DEVCLAW_GOAL_AUTOMERGE default; see devclaw.goal.merge.resolve_automerge),
+    before a merger callable is even constructed. This tick layer's own
+    contract is simpler and absolute: given no merger (``merger=None``, what
+    GoalService actually produces when automerge is off), never attempt to
+    merge — it must not independently re-check any global flag itself, since
+    that would prevent a project's override from ever turning merging ON
+    against an off-by-default fleet (or OFF against an on-by-default one)."""
     store = _store(tmp_path, Clock())
     seed_goal(tmp_path, "g")
     store.save_status("g", _delivery_status())
@@ -708,11 +744,49 @@ async def test_auto_merge_off_by_default(tmp_path):
         terminal=True, status="done", detail="added /health",
         pr_url="https://github.com/o/r/pull/9", gate_passed=True,
     ))
-    notifier, merger = RecordingNotifier(), RecordingMerger()
+    notifier = RecordingNotifier()
 
-    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, merger=None)
 
-    assert merger.merged == []          # gated off → never merged
+    assert out is Outcome.DISPATCHED  # settled + planned the next action normally
+    assert not any("merged" in m.lower() for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_tick_all_resolves_merger_per_goal(tmp_path, monkeypatch):
+    """tick_all sweeps every goal in ONE pass. A project's automerge override
+    for one goal must not leak onto another goal in the same sweep — this is
+    what merger_resolver is for (GoalService._merger_resolver binds it to a
+    per-project lookup; see devclaw.goal.merge.resolve_automerge). Prove
+    tick_all actually calls the resolver fresh per goal_id rather than
+    resolving a single merger once for the whole fleet."""
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", False)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "on", workspace_dir="/repos/on")
+    seed_goal(tmp_path, "off", workspace_dir="/repos/off")
+    store.save_status("on", _delivery_status())
+    store.save_status("off", _delivery_status())
+
+    on_merger = RecordingMerger()
+
+    def _resolver(goal):
+        return on_merger if goal.workspace_dir == "/repos/on" else None
+
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier = RecordingNotifier()
+
+    await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+        merger_resolver=_resolver,
+    )
+
+    assert on_merger.merged == ["https://github.com/o/r/pull/9"]  # "on" project merged
+    # "off" project resolved to no merger — nothing else was merged anywhere.
 
 
 # ---- outcome lifecycle: investigate before executing -----------------------

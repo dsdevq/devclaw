@@ -37,7 +37,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from .state_store import SQLITE_BUSY_TIMEOUT_MS
 
@@ -45,6 +45,11 @@ ProjectStatus = Literal["active", "paused", "archived"]
 #: a read-only getter that returns a goal's live status dict (or raises KeyError);
 #: goal_service.get_goal and a GoalStore-backed getter both satisfy it.
 GoalGet = Callable[[str], dict]
+
+#: sentinel distinguishing "field not supplied" (leave unchanged) from an
+#: explicit ``None`` (clear the override, fall back to the global default) —
+#: only ``automerge`` needs this three-way partial-update semantics today.
+_UNSET: Any = object()
 
 
 def _now_ms() -> int:
@@ -62,6 +67,12 @@ class Project:
     #: durable goals driving this project — linked by id, never copied
     goal_ids: list[str] = field(default_factory=list)
     notes: str = ""
+    #: per-project auto-merge override. ``None`` (the default) means "inherit
+    #: the devclaw-wide DEVCLAW_GOAL_AUTOMERGE default"; ``True``/``False``
+    #: pins this project regardless of the global default. This is the ONLY
+    #: place auto-merge is configured — a goal's own goal.yaml has no
+    #: automerge field (see devclaw.goal.merge.resolve_automerge).
+    automerge: Optional[bool] = None
     created_at: int = field(default_factory=_now_ms)
     updated_at: int = field(default_factory=_now_ms)
 
@@ -75,6 +86,7 @@ class Project:
             "status": self.status,
             "goalIds": list(self.goal_ids),
             "notes": self.notes,
+            "automerge": self.automerge,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
@@ -89,6 +101,7 @@ def _row_to_project(r: sqlite3.Row) -> Project:
                 goal_ids = [x for x in parsed if isinstance(x, str)]
         except json.JSONDecodeError:
             pass  # tolerate a corrupt cell — treat as no links
+    raw_automerge = r["automerge"] if "automerge" in r.keys() else None
     return Project(
         id=r["id"],
         name=r["name"],
@@ -98,6 +111,7 @@ def _row_to_project(r: sqlite3.Row) -> Project:
         status=r["status"],
         goal_ids=goal_ids,
         notes=r["notes"] or "",
+        automerge=(None if raw_automerge is None else bool(raw_automerge)),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
     )
@@ -139,12 +153,21 @@ class ProjectRegistry:
                   status        TEXT NOT NULL DEFAULT 'active',
                   goal_ids      TEXT,
                   notes         TEXT,
+                  automerge     INTEGER,
                   created_at    INTEGER NOT NULL,
                   updated_at    INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
                 """
             )
+            # Migration for DBs created before `automerge` existed — CREATE
+            # TABLE IF NOT EXISTS above is a no-op on an already-existing
+            # table, so a pre-existing `projects` table needs the column
+            # added explicitly. NULL by default = "inherit the global
+            # DEVCLAW_GOAL_AUTOMERGE default", same as a freshly created row.
+            cols = {row[1] for row in self._db.execute("PRAGMA table_info(projects)")}
+            if "automerge" not in cols:
+                self._db.execute("ALTER TABLE projects ADD COLUMN automerge INTEGER")
             self._db.commit()
 
     # ---- CRUD --------------------------------------------------------------
@@ -159,21 +182,24 @@ class ProjectRegistry:
         preview_url: Optional[str] = None,
         notes: str = "",
         goal_ids: Optional[list[str]] = None,
+        automerge: Optional[bool] = None,
     ) -> Project:
         p = Project(
             id=id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
             preview_url=preview_url, notes=notes, goal_ids=list(goal_ids or []),
+            automerge=automerge,
         )
         with self._lock:
             try:
                 self._db.execute(
                     """INSERT INTO projects
                          (id, name, repo_url, workspace_dir, preview_url, status,
-                          goal_ids, notes, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          goal_ids, notes, automerge, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         p.id, p.name, p.repo_url, p.workspace_dir, p.preview_url,
                         p.status, json.dumps(p.goal_ids), p.notes,
+                        (None if p.automerge is None else int(p.automerge)),
                         p.created_at, p.updated_at,
                     ),
                 )
@@ -218,9 +244,17 @@ class ProjectRegistry:
         preview_url: Optional[str] = None,
         status: Optional[ProjectStatus] = None,
         notes: Optional[str] = None,
+        automerge: Optional[bool] = _UNSET,
     ) -> Project:
         """Partial update — only the supplied fields change. Returns the updated
-        project. Raises KeyError if unknown. ``updated_at`` always bumps."""
+        project. Raises KeyError if unknown. ``updated_at`` always bumps.
+
+        ``automerge`` uses three-way semantics (unlike the other fields):
+        omit it entirely to leave the current override untouched; pass
+        ``True``/``False`` to pin it; pass ``None`` explicitly to CLEAR the
+        override back to "inherit the global default". Passing the sentinel
+        default (i.e. not supplying the kwarg) is how "don't touch" is
+        distinguished from an explicit clear."""
         p = self.get(project_id)
         if p is None:
             raise KeyError(project_id)
@@ -236,6 +270,8 @@ class ProjectRegistry:
             p.status = status
         if notes is not None:
             p.notes = notes
+        if automerge is not _UNSET:
+            p.automerge = automerge
         p.updated_at = _now_ms()
         self._save(p)
         return p
@@ -272,14 +308,32 @@ class ProjectRegistry:
             self._db.execute(
                 """UPDATE projects SET
                      name=?, repo_url=?, workspace_dir=?, preview_url=?, status=?,
-                     goal_ids=?, notes=?, updated_at=?
+                     goal_ids=?, notes=?, automerge=?, updated_at=?
                    WHERE id=?""",
                 (
                     p.name, p.repo_url, p.workspace_dir, p.preview_url, p.status,
-                    json.dumps(p.goal_ids), p.notes, p.updated_at, p.id,
+                    json.dumps(p.goal_ids), p.notes,
+                    (None if p.automerge is None else int(p.automerge)),
+                    p.updated_at, p.id,
                 ),
             )
             self._db.commit()
+
+    def find_by_workspace_dir(self, workspace_dir: Optional[str]) -> Optional[Project]:
+        """The reverse of the rollup join: given a goal's ``workspace_dir``,
+        find the project that owns it (normalized match, same rule as
+        :func:`project_rollup`). Returns ``None`` if the workspace is empty or
+        no project claims it. Used by the auto-merge resolver — a goal has no
+        automerge setting of its own, only its owning project does."""
+        target = _normalize_workspace(workspace_dir)
+        if target is None:
+            return None
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM projects").fetchall()
+        for r in rows:
+            if _normalize_workspace(r["workspace_dir"]) == target:
+                return _row_to_project(r)
+        return None
 
 
 def _normalize_workspace(path: Optional[str]) -> Optional[str]:

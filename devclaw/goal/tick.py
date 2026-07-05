@@ -1227,6 +1227,15 @@ async def _resolve_polling_action(
     # merged by devclaw itself, with a plain owner ping. Best-effort + gated —
     # a failed merge just leaves the PR for review.
     #
+    # ``ctx.merger`` being non-None IS the enabled decision — GoalService
+    # resolves it per-goal (project automerge override, else the devclaw-wide
+    # DEVCLAW_GOAL_AUTOMERGE default; see devclaw.goal.merge.resolve_automerge)
+    # BEFORE it ever reaches this tick. This function must not re-check the
+    # raw global flag itself — doing so would mean a project's explicit
+    # override could never turn merging ON when the fleet-wide default is off
+    # (or off when the default is on), defeating the whole point of a
+    # per-project override.
+    #
     # Pillar 2 exception: when this action was a checklist-mode dispatch
     # (action carries ``addresses`` of one or more checklist items), the PR
     # is the SHARED goal-branch PR that subsequent items will keep pushing
@@ -1238,7 +1247,7 @@ async def _resolve_polling_action(
     # cumulative work.
     in_checklist_dispatch = bool(getattr(ref, "addresses", None))
     if (
-        _merge.AUTOMERGE_ENABLED and ctx.merger is not None
+        ctx.merger is not None
         and poll.status == "done" and poll.gate_passed and poll.pr_url
         and not in_checklist_dispatch
     ):
@@ -1376,6 +1385,7 @@ async def tick_all(
     no_progress_s: int = NO_PROGRESS_S,
     summary_caller: "ClaudeCaller | None" = None,
     merger: "_merge.Merger | None" = None,
+    merger_resolver: "Callable[[Goal], _merge.Merger | None] | None" = None,
     tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
     trend_detector: "object | None" = None,
 ) -> dict[str, Outcome]:
@@ -1385,6 +1395,12 @@ async def tick_all(
     ``tracer_factory(goal_id) -> Tracer | None`` is the seam GoalService uses
     to attach a :class:`PersistentTracer` per goal-tick so the cascade's
     cognition / dispatch / delivery events land in the durable trace store.
+
+    ``merger_resolver``, when given, computes automerge FRESH per goal (a
+    project's automerge override must not leak from one goal onto another in
+    the same sweep) and takes precedence over the flat ``merger``. Plain
+    ``merger`` stays supported for callers (and existing tests) with a single
+    fleet-wide value.
 
     ``trend_detector`` (typed as ``object`` to avoid the import cycle with
     ``devclaw.trend_detector``): when set, runs per-project signals inside each
@@ -1405,6 +1421,12 @@ async def tick_all(
 
     for goal_id in store.list_goal_ids():
         tracer = tracer_factory(goal_id) if tracer_factory else None
+        goal_merger = merger
+        if merger_resolver is not None:
+            try:
+                goal_merger = merger_resolver(store.load_goal(goal_id))
+            except Exception:  # noqa: BLE001 — a bad goal.yaml must not sink the sweep
+                goal_merger = merger
         try:
             with _trace.tracer_scope(tracer):
                 outcomes[goal_id] = await tick_goal(
@@ -1412,7 +1434,7 @@ async def tick_all(
                     planner_caller=planner_caller, evaluator_caller=evaluator_caller,
                     notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
                     eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
-                    summary_caller=summary_caller, merger=merger,
+                    summary_caller=summary_caller, merger=goal_merger,
                     trend_detector=trend_detector,
                 )
         except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
