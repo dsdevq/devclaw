@@ -77,13 +77,13 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 | `DEVCLAW_GOALS_DIR` | `~/memory/goals` | Root holding one folder per durable goal (`<id>/goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md`). |
 | `DEVCLAW_GOAL_TICK_SECONDS` | `900` | Goal heartbeat interval. Also poked in-process the moment a task settles. |
 | `DEVCLAW_GOAL_EVAL_EVERY` | `3` | Deliveries between periodic direction evaluations. `0` → evaluate only at the done-gate. |
-| `DEVCLAW_GOAL_VERIFY_DONE` | `1` | Done-gate: a planner `done` proposal triggers a grounded review vs `done_when` before closing. `0` → trust the artifact-only done eval. |
+| `DEVCLAW_GOAL_VERIFY_DONE` | `1` | Done-gate: a planner `done` proposal triggers a grounded review vs `done_when` before closing. `0` → trust the artifact-only done eval. Devclaw-wide DEFAULT — a project may override per repo (`verify_done: on\|off` via `register_project`/`update_project` / `devclaw projects … --verify-done`); the project override wins when set. |
 | `DEVCLAW_GOAL_NO_PROGRESS_S` | `21600` | Wall-clock seconds an executing goal may go without a delivery before the watchdog pings the owner once. Zero-token check; complements the per-task timeout. `0` disables. |
 | `DEVCLAW_GOAL_NOTIFY_URL` | — | Notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough). |
 | `DEVCLAW_GOAL_INVESTIGATE` | `1` | Whether a new outcome goal investigates the repo before executing (one-shot discovery brief). |
-| `DEVCLAW_GOAL_AUTODEPLOY` | `1` | When a goal reaches `achieved`, auto-fire `deploy_project`. `0` disables. |
+| `DEVCLAW_GOAL_AUTODEPLOY` | `1` | When a goal reaches `achieved`, auto-fire `deploy_project`. `0` disables. Devclaw-wide DEFAULT — a project may override per repo (`autodeploy: on\|off`); the project override wins when set. |
 | `DEVCLAW_GOAL_AUTOMERGE` | `0` | Devclaw-wide DEFAULT for auto-merging a delivered PR once its verify gate passes (owner-pinged, best-effort). Off by default. A project registered via `register_project`/`update_project` can override this per repo (`automerge: on\|off`) — the project override always wins over this default when set; this env var only applies to projects with no override. There is deliberately no per-goal `automerge` field in `goal.yaml` — automerge is an ops/repo-scope decision, not something a goal's own objective carries. |
-| `DEVCLAW_GOAL_MERGE_STRATEGY` | `squash` | `gh pr merge --<strategy>`. Valid: `squash` / `merge` / `rebase`. |
+| `DEVCLAW_GOAL_MERGE_STRATEGY` | `squash` | `gh pr merge --<strategy>`. Valid: `squash` / `merge` / `rebase`. Devclaw-wide DEFAULT — a project may override per repo (`merge_strategy: squash\|merge\|rebase`); the project override wins when set. |
 | `DEVCLAW_GOAL_PLAIN_SUMMARY` | `1` | One-line plain-prose summary per delivery for `deliveries.md` (one `claude` call per delivery). |
 | `DEVCLAW_NOTIFY_ALTITUDE` | `owner` | Floor for goal-layer notifications: `owner` (only real blockers / direction questions / completions) or `task` (also includes per-task chatter). |
 
@@ -91,7 +91,7 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 
 | Var | Default | Purpose |
 |---|---|---|
-| `DEVCLAW_REVIEW_GATE` | `1` | The adversarial diff-review gate after the verify gate + test-integrity pass, before the PR opens. `0` disables (escape hatch + quota lever — one `claude` call per successful code task). |
+| `DEVCLAW_REVIEW_GATE` | `1` | The adversarial diff-review gate after the verify gate + test-integrity pass, before the PR opens. `0` disables (escape hatch + quota lever — one `claude` call per successful code task). Devclaw-wide DEFAULT — a project may override per repo (`review_gate: on\|off`); the project override wins when set. |
 | `DEVCLAW_REVIEW_MODEL` | `sonnet` | Model tier for the review-gate `claude` pass. |
 | `DEVCLAW_REVIEW_MAX_DIFF_CHARS` | `60000` | Truncation cap on the diff fed to the reviewer. |
 

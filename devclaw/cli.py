@@ -85,9 +85,15 @@ def _print_show(p: dict) -> None:
     print(f"  repo:      {p.get('repoUrl') or '—'}")
     print(f"  workspace: {p.get('workspaceDir') or '—'}")
     print(f"  preview:   {p.get('previewUrl') or '—'}")
-    automerge = p.get("automerge")
-    automerge_str = "inherit (devclaw default)" if automerge is None else ("on" if automerge else "off")
-    print(f"  automerge: {automerge_str}")
+    def _ovr(val, on="on", off="off") -> str:
+        return "inherit (devclaw default)" if val is None else (on if val else off)
+
+    print(f"  automerge: {_ovr(p.get('automerge'))}")
+    ms = p.get("mergeStrategy")
+    print(f"  merge-strategy: {ms if ms is not None else 'inherit (devclaw default)'}")
+    print(f"  autodeploy: {_ovr(p.get('autodeploy'))}")
+    print(f"  review-gate: {_ovr(p.get('reviewGate'))}")
+    print(f"  verify-done: {_ovr(p.get('verifyDone'))}")
     if p.get("notes"):
         print(f"  notes:     {p['notes']}")
     goals = p.get("goals", [])
@@ -134,11 +140,16 @@ def _cmd_show(reg: ProjectRegistry, all_goals, args) -> int:
 
 def _cmd_register(reg: ProjectRegistry, all_goals, args) -> int:
     try:
+        _onoff = {"on": True, "off": False}
         p = reg.create(
             id=args.id, name=args.name, repo_url=args.repo_url,
             workspace_dir=args.workspace_dir, preview_url=args.preview_url,
             notes=args.notes or "",
             automerge=(None if args.automerge is None else args.automerge == "on"),
+            merge_strategy=args.merge_strategy,
+            autodeploy=(None if args.autodeploy is None else _onoff[args.autodeploy]),
+            review_gate=(None if args.review_gate is None else _onoff[args.review_gate]),
+            verify_done=(None if args.verify_done is None else _onoff[args.verify_done]),
         )
     except ProjectExists:
         print(f"project already exists: {args.id}", file=sys.stderr)
@@ -148,15 +159,20 @@ def _cmd_register(reg: ProjectRegistry, all_goals, args) -> int:
 
 
 def _cmd_update(reg: ProjectRegistry, all_goals, args) -> int:
-    automerge_kwargs = {}
-    if args.automerge is not None:
-        automerge_kwargs["automerge"] = {"on": True, "off": False, "inherit": None}[args.automerge]
+    override_kwargs: dict = {}
+    _onoff = {"on": True, "off": False, "inherit": None}
+    for field, val in (("automerge", args.automerge), ("autodeploy", args.autodeploy),
+                       ("review_gate", args.review_gate), ("verify_done", args.verify_done)):
+        if val is not None:
+            override_kwargs[field] = _onoff[val]
+    if args.merge_strategy is not None:
+        override_kwargs["merge_strategy"] = None if args.merge_strategy == "inherit" else args.merge_strategy
     try:
         reg.update(
             args.id, name=args.name, repo_url=args.repo_url,
             workspace_dir=args.workspace_dir, preview_url=args.preview_url,
             status=args.status, notes=args.notes,
-            **automerge_kwargs,
+            **override_kwargs,
         )
     except KeyError:
         print(f"unknown project: {args.id}", file=sys.stderr)
@@ -355,6 +371,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--automerge", choices=["on", "off"],
                         help="pin auto-merge for this project; omit to inherit "
                              "the devclaw-wide DEVCLAW_GOAL_AUTOMERGE default")
+    p_reg.add_argument("--merge-strategy", choices=["squash", "merge", "rebase"],
+                        help="pin the gh merge strategy; omit to inherit the default")
+    p_reg.add_argument("--autodeploy", choices=["on", "off"],
+                        help="pin deploy-on-completion; omit to inherit the default")
+    p_reg.add_argument("--review-gate", choices=["on", "off"],
+                        help="pin the pre-PR review gate; omit to inherit the default")
+    p_reg.add_argument("--verify-done", choices=["on", "off"],
+                        help="pin the grounded done-gate re-check; omit to inherit the default")
     p_reg.set_defaults(func=_cmd_register)
 
     p_upd = psub.add_parser("update", help="update project fields")
@@ -369,6 +393,14 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="'on'/'off' pins auto-merge for this project; "
                              "'inherit' clears a prior override back to the "
                              "devclaw-wide default; omit to leave unchanged")
+    p_upd.add_argument("--merge-strategy", choices=["squash", "merge", "rebase", "inherit"],
+                        help="pin the gh merge strategy; 'inherit' clears; omit to leave unchanged")
+    p_upd.add_argument("--autodeploy", choices=["on", "off", "inherit"],
+                        help="pin deploy-on-completion; 'inherit' clears; omit to leave unchanged")
+    p_upd.add_argument("--review-gate", choices=["on", "off", "inherit"],
+                        help="pin the pre-PR review gate; 'inherit' clears; omit to leave unchanged")
+    p_upd.add_argument("--verify-done", choices=["on", "off", "inherit"],
+                        help="pin the grounded done-gate re-check; 'inherit' clears; omit to leave unchanged")
     p_upd.set_defaults(func=_cmd_update)
 
     p_link = psub.add_parser("link", help="link/unlink a goal to a project")
