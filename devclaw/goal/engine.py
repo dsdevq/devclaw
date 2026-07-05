@@ -104,6 +104,15 @@ class InProcessEngine:
     def clear_global_pause(self) -> None:
         self._store.clear_global_pause()
 
+    def operator_block(self, now_ms: int) -> tuple[bool, str]:
+        """The manual-hold + daily run-window gate (``dispatch_gate.operator_block``),
+        read by the goal heartbeat beside the quota pause. Delegates to the same
+        StateStore the task queue reads, so both loops gate identically."""
+        from ..dispatch_gate import operator_block
+        return operator_block(
+            self._store.operator_hold(), self._store.get_run_schedule(), now_ms
+        )
+
     # ---- internals ---------------------------------------------------------
 
     def _poll_task(self, task_id: str) -> PollResult:

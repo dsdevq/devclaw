@@ -906,6 +906,55 @@ class StateStore:
         self.delete_meta("pause_until_ms")
         self.delete_meta("pause_reason")
 
+    # ---- operator dispatch controls (manual pause + daily run window) ----
+    # Human-facing siblings of the quota pause above. Distinct meta keys, so the
+    # automatic quota pause expiring/clearing never lifts a hold a person set on
+    # purpose (and vice-versa). Read by ``dispatch_gate`` at both heartbeat gates.
+
+    def set_operator_hold(self, on: bool, reason: str = "") -> None:
+        """Manually pause (``on=True``) or resume (``on=False``) ALL new dispatch."""
+        if on:
+            self.set_meta("operator_hold", json.dumps({"on": True, "reason": reason or ""}))
+        else:
+            self.delete_meta("operator_hold")
+
+    def operator_hold(self) -> tuple[bool, str]:
+        """Return ``(on, reason)``. ``(False, "")`` when no hold is set."""
+        raw = self.get_meta("operator_hold")
+        if not raw:
+            return False, ""
+        try:
+            data = json.loads(raw)
+            return bool(data.get("on")), str(data.get("reason") or "")
+        except (ValueError, TypeError):
+            return False, ""
+
+    def set_run_schedule(self, enabled: bool, start: str, end: str, tz: str) -> None:
+        """Daily window during which dispatch is allowed. Outside it, new dispatch
+        is gated (in-flight finishes). ``start``/``end`` are ``'HH:MM'`` in ``tz``."""
+        self.set_meta("run_schedule", json.dumps(
+            {"enabled": bool(enabled), "start": start, "end": end, "tz": tz}
+        ))
+
+    def get_run_schedule(self) -> dict:
+        """The run-schedule dict; a disabled 09:00–18:00 Europe/Kyiv default when
+        none is set (or the stored value is corrupt). Shape mirrors
+        ``dispatch_gate.DEFAULT_SCHEDULE``."""
+        from .dispatch_gate import DEFAULT_SCHEDULE
+        raw = self.get_meta("run_schedule")
+        if not raw:
+            return dict(DEFAULT_SCHEDULE)
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return dict(DEFAULT_SCHEDULE)
+        return {
+            "enabled": bool(data.get("enabled")),
+            "start": str(data.get("start") or DEFAULT_SCHEDULE["start"]),
+            "end": str(data.get("end") or DEFAULT_SCHEDULE["end"]),
+            "tz": str(data.get("tz") or DEFAULT_SCHEDULE["tz"]),
+        }
+
     # ---- workspace circuit-breaker (per-workspace pause) -----------------
 
     def count_recent_task_failures(self, workspace_dir: str, since_ms: int) -> int:

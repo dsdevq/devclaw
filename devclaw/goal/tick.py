@@ -1403,6 +1403,13 @@ async def tick_all(
             return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
         _engine_clear_pause(engine)
 
+    # Operator controls: a manual pause toggle or a daily run-window can hold ALL
+    # goal cognition (0 tokens) the same way the quota pause does. Tasks already
+    # dispatched finish; nothing new is planned while gated. Re-checked every tick.
+    blocked, _why = _engine_operator_block(engine)
+    if blocked:
+        return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
+
     for goal_id in store.list_goal_ids():
         tracer = tracer_factory(goal_id) if tracer_factory else None
         try:
@@ -1453,6 +1460,13 @@ def _engine_clear_pause(engine: GoalEngine) -> None:
     fn = getattr(engine, "clear_global_pause", None)
     if callable(fn):
         fn()
+
+
+def _engine_operator_block(engine: GoalEngine) -> tuple[bool, str]:
+    """Read the operator hold + run-window gate via the engine, if it exposes one
+    (the in-process engine does; test doubles may not → treated as open)."""
+    fn = getattr(engine, "operator_block", None)
+    return fn(_now_ms()) if callable(fn) else (False, "")
 
 
 def _maybe_pause(engine: GoalEngine, store: GoalStore, goal_id: str, err: str) -> "Outcome | None":
