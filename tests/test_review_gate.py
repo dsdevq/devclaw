@@ -234,6 +234,49 @@ async def test_review_skipped_when_disabled(store, monkeypatch):
     assert store.get_task(tid).status == "done" and called["n"] == 0
 
 
+async def test_project_review_gate_override_off_skips_even_when_global_on(store, monkeypatch, tmp_path):
+    """A project pinning review_gate=off skips the gate even though the
+    devclaw-wide REVIEW_GATE_ENABLED default is on (forced on by the autouse
+    fixture) — the per-project override wins."""
+    from devclaw.project_registry import ProjectRegistry
+
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    reg = ProjectRegistry(str(tmp_path / "devclaw.db"))
+    reg.create(id="p", name="P", workspace_dir="/ws", review_gate=False)
+
+    called = {"n": 0}
+
+    async def reviewer(*, goal, kind, diff):
+        called["n"] += 1
+        return {"verdict": "request_changes", "summary": "x", "issues": [], "blocking": [
+            {"severity": "major", "location": "a", "problem": "b", "fix": "c"}]}
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=reviewer)
+    q.set_registry(reg)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    assert store.get_task(tid).status == "done" and called["n"] == 0
+
+
+async def test_project_review_gate_override_on_runs_even_when_global_off(store, monkeypatch, tmp_path):
+    """Inverse: global default off, but the project pins review_gate=on — the
+    gate runs. Proves the override can turn the gate ON against an off fleet,
+    not just off."""
+    from devclaw.project_registry import ProjectRegistry
+
+    monkeypatch.setattr(task_queue, "REVIEW_GATE_ENABLED", False)
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    reg = ProjectRegistry(str(tmp_path / "devclaw.db"))
+    reg.create(id="p", name="P", workspace_dir="/ws", review_gate=True)
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=_reviewer(["approve"]))
+    q.set_registry(reg)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    # gate ran (approve verdict) and the task shipped.
+    assert store.get_task(tid).status == "done"
+
+
 async def test_diff_uses_workspace_path_verbatim_not_host_translation(store, monkeypatch):
     # Regression: the post-gate git diff (shared by the test-integrity guard AND
     # the review gate) runs in THIS process, so it must use the workspace path as
