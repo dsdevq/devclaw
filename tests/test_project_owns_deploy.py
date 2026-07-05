@@ -69,7 +69,7 @@ async def test_auto_deploy_skips_when_dockerfile_present(tmp_path):
     store = GoalStore(goals_dir)
 
     with patch("devclaw.goal.tick._deploy.deploy_project", new_callable=AsyncMock) as mock_deploy:
-        suffix = await _auto_deploy(goal.id, goal, store)
+        suffix = await _auto_deploy(goal.id, goal, store, enabled=True)
 
     assert suffix == ""
     mock_deploy.assert_not_called()
@@ -98,17 +98,18 @@ async def test_auto_deploy_still_fires_without_dockerfile(tmp_path):
         "devclaw.goal.tick._deploy.deploy_project", new_callable=AsyncMock
     ) as mock_deploy:
         mock_deploy.return_value = fake_result
-        suffix = await _auto_deploy(goal.id, goal, store)
+        suffix = await _auto_deploy(goal.id, goal, store, enabled=True)
 
     mock_deploy.assert_called_once_with(str(tmp_path), goal.id)
     assert "https://vps.tail.ts.net:8090/" in suffix
 
 
-async def test_auto_deploy_env_kill_switch_still_works(tmp_path, monkeypatch):
-    """The DEVCLAW_GOAL_AUTODEPLOY=0 kill switch takes precedence over both
-    branches — the pre-existing env-level opt-out is preserved."""
+async def test_auto_deploy_kill_switch_still_works(tmp_path):
+    """The autodeploy kill switch (now the resolved ``enabled=False`` flag —
+    a project override or the DEVCLAW_GOAL_AUTODEPLOY default, resolved upstream
+    in GoalService) takes precedence over both branches: disabled means no
+    deploy, no matter the Dockerfile."""
     (tmp_path / "Dockerfile").write_text("FROM alpine\n")  # would-normally-skip
-    monkeypatch.setenv("DEVCLAW_GOAL_AUTODEPLOY", "0")
     goal = _make_goal(str(tmp_path))
     goals_dir = tmp_path / "goals"
     goals_dir.mkdir()
@@ -116,7 +117,7 @@ async def test_auto_deploy_env_kill_switch_still_works(tmp_path, monkeypatch):
     store = GoalStore(goals_dir)
 
     with patch("devclaw.goal.tick._deploy.deploy_project", new_callable=AsyncMock) as mock_deploy:
-        suffix = await _auto_deploy(goal.id, goal, store)
+        suffix = await _auto_deploy(goal.id, goal, store, enabled=False)
 
     assert suffix == ""
     mock_deploy.assert_not_called()
