@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { cancelGoal, fetchGoal, steerGoal, type GoalDetail as GD, type Verdict } from "../api";
 import { EventFeed } from "../components/EventFeed";
+import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
 import { TasksSection } from "../components/TasksSection";
 import { mono, palettes } from "../theme";
@@ -331,6 +332,8 @@ export function GoalDetail() {
             {data.phase === "blocked" && (
               <BlockedBanner blockedOn={data.blockedOn} palette={p} />
             )}
+
+            <GoalRunWindow goalId={data.id} />
 
             <TasksSection
               title="Dispatched tasks"
