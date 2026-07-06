@@ -31,13 +31,13 @@ def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
 
-async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None):
+async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None, remote_checker=None):
     return await tick_goal(
         goal_id, store=store, engine=engine,
         planner_caller=planner, evaluator_caller=evaluator, notifier=notifier,
         notify_url="http://relay", prepare_ws=fake_prepare,
         eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller,
-        merger=merger,
+        merger=merger, remote_checker=remote_checker,
     )
 
 
@@ -1110,3 +1110,170 @@ def test_done_gate_review_brief_carries_both_axes(tmp_path):
         assert smell in body, f"structural section should name {smell!r} as a thing to catch"
     # the summary must speak to BOTH axes — not just clauses
     assert "BOTH axes" in brief or "both axes" in brief or "covering BOTH" in brief
+
+
+# ---- grounded remote-checks at the done-gate (2026-07-06 benchmark fix) -----
+#
+# Backstory: closeloop-bench-2026-07-05 closed `achieved` while all 32 GitHub
+# Actions runs on its goal branch were startup_failure — the sandbox gate was
+# green and nothing ever looked at the repo's real check surface. When a
+# remote checker is bound and the goal works on a shared goal branch, an
+# `achieved` must survive the real CI state before the goal closes.
+
+_ACHIEVED_EVAL = json.dumps({
+    "verdict": "achieved",
+    "rationale": "all clauses met",
+    "clauses": [
+        {"clause": "/health returns 200", "satisfied": True,
+         "evidence": "src/Health.cs:12; HealthTests.cs:8 passes"},
+    ],
+    "structural_health": "clean",
+})
+
+
+class FakeRemoteChecker:
+    """Records (repo_url, branch) calls; returns a canned result or raises."""
+
+    def __init__(self, result=None, exc: Exception | None = None):
+        from devclaw.goal.remote_checks import RemoteChecksResult
+
+        self.result = result or RemoteChecksResult("passing", "all green")
+        self.exc = exc
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, repo_url: str, branch: str):
+        self.calls.append((repo_url, branch))
+        if self.exc:
+            raise self.exc
+        return self.result
+
+
+def _verifying_checklist_goal(store, tmp_path, goal_id="g"):
+    """Seed a checklist-mode goal parked at the done-gate review settle."""
+    from devclaw.goal.models import Checklist, ChecklistItem
+
+    seed_goal(tmp_path, goal_id)
+    store.write_checklist(goal_id, Checklist(items=[
+        ChecklistItem(
+            id="scaffold", requirement="Create the csproj.",
+            evidence_target="backend/src/Foo.csproj",
+            addresses_files=["backend/src/Foo.csproj"], status="done",
+        ),
+    ]))
+    store.save_status(goal_id, GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+
+
+@pytest.mark.asyncio
+async def test_failing_remote_checks_block_the_close(tmp_path):
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(RemoteChecksResult("failing", "32 failed of 32 (32× startup_failure)"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.SLEPT                       # not done — steered back in
+    assert checker.calls == [("https://example.com/demo.git", "goal/g")]
+    s = store.load_status("g")
+    assert s.phase == "idle" and s.phase != "done"
+    assert s.last_eval_verdict == "off_track"
+    assert "remote checks (goal/g): failing" in store.recent_log("g")
+    # the correction steers the fix
+    steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    assert "[remote-checks]" in steering
+    assert "startup_failure" in steering
+
+
+@pytest.mark.asyncio
+async def test_never_ran_ci_blocks_the_close(tmp_path):
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(RemoteChecksResult("none", "workflows exist but zero runs"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.SLEPT
+    assert store.load_status("g").phase != "done"
+    steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    assert "ZERO" in steering or "zero" in steering
+
+
+@pytest.mark.asyncio
+async def test_passing_remote_checks_let_the_goal_close(tmp_path):
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker()  # passing
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert store.load_status("g").phase == "done"
+    assert "remote checks (goal/g): passing" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_unknown_remote_state_fails_open_but_logs(tmp_path):
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(RemoteChecksResult("unknown", "gh: network unreachable"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    # infra uncertainty must not wedge a verified goal — but it IS observable
+    assert out is Outcome.DONE
+    assert "remote checks (goal/g): unknown" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_checker_exception_fails_open(tmp_path):
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(exc=RuntimeError("gh exploded"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert "unknown" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_legacy_goal_without_checklist_skips_the_checker(tmp_path):
+    # No shared goal branch → nothing meaningful to check; behaviour unchanged.
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+    checker = FakeRemoteChecker()
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert checker.calls == []

@@ -33,6 +33,7 @@ from . import evaluator as _evaluator
 from ..delivery import deploy as _deploy
 from . import merge as _merge
 from . import planner as _planner
+from . import remote_checks as _remote_checks
 from . import research as _research
 from . import world_research as _world_research
 from . import summary as _goal_summary
@@ -353,6 +354,12 @@ class TickContext:
     #: ``world_research.default_caller()``; explicit injection lets tests stub
     #: the brief without touching subprocess.
     world_research_caller: "ClaudeCaller | None" = None
+    #: grounded remote-checks verification at the done-gate (the 2026-07-06
+    #: benchmark fix: ``achieved`` is only honored when the goal branch's REAL
+    #: CI doesn't contradict it). None → skipped (legacy behaviour);
+    #: goal_service binds the gh-backed checker, tests inject a fake — the
+    #: same subprocess-free-tick seam as ``merger``.
+    remote_checker: "_remote_checks.RemoteChecker | None" = None
 
 
 class Phase(str, Enum):
@@ -421,6 +428,7 @@ async def tick_goal(
     decomposer_caller: "ClaudeCaller | None" = None,
     world_research_caller: "ClaudeCaller | None" = None,
     trend_detector: "object | None" = None,
+    remote_checker: "_remote_checks.RemoteChecker | None" = None,
 ) -> Outcome:
     """Run one heartbeat and record a single ``tick`` trace event with the
     incoming (lifecycle, phase) and outgoing outcome — the only place the trace
@@ -444,6 +452,7 @@ async def tick_goal(
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
         world_research_caller=world_research_caller,
+        remote_checker=remote_checker,
     )
     if trend_detector is not None:
         try:
@@ -481,6 +490,7 @@ async def _tick_goal_impl(
     merger: "_merge.Merger | None" = None,
     decomposer_caller: "ClaudeCaller | None" = None,
     world_research_caller: "ClaudeCaller | None" = None,
+    remote_checker: "_remote_checks.RemoteChecker | None" = None,
 ) -> Outcome:
     """Run one heartbeat. Reads the goal's status, classifies it into a
     :class:`Phase`, dispatches to the matching handler.
@@ -503,6 +513,7 @@ async def _tick_goal_impl(
         summary_caller=summary_caller, merger=merger,
         decomposer_caller=decomposer_caller,
         world_research_caller=world_research_caller,
+        remote_checker=remote_checker,
     )
 
     # Effective goal = goal.yaml overlaid with firmed.yaml outputs when firming
@@ -654,10 +665,21 @@ async def _resolve_done_gate(
     goal_id: str, goal: Goal, status: GoalStatus, review_report: str,
     *, store: GoalStore, evaluator_caller: ClaudeCaller, notifier: Notifier,
     summarize: "ClaudeCaller | None" = None,
+    remote_checker: "_remote_checks.RemoteChecker | None" = None,
 ) -> Outcome:
     """A done-gate review just finished — judge the repo against done_when. Only
     'achieved' closes the goal; otherwise corrections are steered back in and the
-    goal continues (its next tick plans the next step)."""
+    goal continues (its next tick plans the next step).
+
+    An ``achieved`` verdict additionally has to survive the grounded
+    remote-checks verification (when a checker is bound and the goal works on
+    a shared goal branch): the branch's REAL CI state is queried and a
+    failing / never-ran / still-running check surface converts the verdict to
+    ``off_track`` with a steering correction. The 2026-07-06 benchmark closed
+    a goal whose 32 GitHub Actions runs had all failed at startup — the
+    sandbox gate was green and nothing ever looked at the repo's actual
+    checks. ``unknown`` / ``no_workflows`` do NOT block (fail-open on infra
+    uncertainty, fail-closed on evidence of a problem) but are logged."""
     try:
         ev = await _evaluator.evaluate(
             goal, status, store.recent_log(goal_id), store.recent_deliveries(goal_id),
@@ -669,6 +691,49 @@ async def _resolve_done_gate(
         store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate eval failed: {exc}")
         return Outcome.ERROR
+    if ev.verdict == "achieved" and remote_checker is not None and goal.repo_url:
+        # Only checklist-mode goals accumulate work on a shared goal branch
+        # whose check surface is meaningful at close time; legacy per-action
+        # PRs were already merged (or reviewed) one by one.
+        if store.read_checklist(goal_id) is not None:
+            branch = f"goal/{goal_id}"
+            try:
+                rc = await remote_checker(goal.repo_url, branch)
+            except Exception as exc:  # noqa: BLE001 — checker trouble must not wedge the gate
+                rc = _remote_checks.RemoteChecksResult(
+                    "unknown", f"{exc.__class__.__name__}: {exc}",
+                )
+            store.append_log(
+                goal_id, f"done-gate remote checks ({branch}): {rc.state} — {rc.detail[:200]}",
+            )
+            if rc.blocks_done:
+                correction = {
+                    "failing": (
+                        f"the target repo's REAL CI for {branch} is failing "
+                        f"({rc.detail}). The sandbox gate is not CI — fix the "
+                        f"workflows/runs until the branch's checks are green, "
+                        f"then re-propose done."
+                    ),
+                    "none": (
+                        f"the target repo has workflows but CI produced ZERO "
+                        f"runs for {branch}'s head commit ({rc.detail}). Find "
+                        f"out why Actions never ran (triggers, permissions, "
+                        f"billing) and get a green run before re-proposing done."
+                    ),
+                    "pending": (
+                        f"remote checks for {branch} are still running "
+                        f"({rc.detail}). Let them settle green, then re-propose "
+                        f"done."
+                    ),
+                }[rc.state]
+                ev = replace(
+                    ev, verdict="off_track",
+                    rationale=(
+                        f"all done_when clauses pass but the branch's real CI "
+                        f"contradicts the close: remote checks are {rc.state}."
+                    ),
+                    corrections=[f"[remote-checks] {correction}"],
+                )
     now = store.now_iso()
     base = replace(
         status, last_eval_verdict=ev.verdict, last_eval_at=now,
@@ -700,6 +765,7 @@ async def _open_done_gate(
     *, store: GoalStore, engine: GoalEngine, evaluator_caller: ClaudeCaller,
     notifier: Notifier, notify_url: str, prepare_ws: WorkspacePrep, verify_done: bool,
     note: str, summarize: "ClaudeCaller | None" = None,
+    remote_checker: "_remote_checks.RemoteChecker | None" = None,
 ) -> Outcome:
     """The planner proposed done. Don't trust it: either dispatch a read-only
     review of the repo against done_when (the grounded path) and let the next
@@ -739,7 +805,7 @@ async def _open_done_gate(
     return await _resolve_done_gate(
         goal_id, goal, base, review_report="",  # no review run; artifact-only
         store=store, evaluator_caller=evaluator_caller, notifier=notifier,
-        summarize=summarize,
+        summarize=summarize, remote_checker=remote_checker,
     )
 
 
@@ -1174,7 +1240,7 @@ async def _resolve_polling_done_gate(
     return await _resolve_done_gate(
         goal_id, goal, new_status, review_report,
         store=ctx.store, evaluator_caller=ctx.evaluator_caller, notifier=ctx.notifier,
-        summarize=ctx.summary_caller,
+        summarize=ctx.summary_caller, remote_checker=ctx.remote_checker,
     )
 
 
@@ -1349,6 +1415,7 @@ async def _handle_executing(
             store=ctx.store, engine=ctx.engine, evaluator_caller=ctx.evaluator_caller,
             notifier=ctx.notifier, notify_url=ctx.notify_url, prepare_ws=ctx.prepare_ws,
             verify_done=ctx.verify_done, note=result.note, summarize=ctx.summary_caller,
+            remote_checker=ctx.remote_checker,
         )
 
     # decision == "act"
@@ -1378,6 +1445,7 @@ async def tick_all(
     merger: "_merge.Merger | None" = None,
     tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
     trend_detector: "object | None" = None,
+    remote_checker: "_remote_checks.RemoteChecker | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others, and a usage
     limit pauses the whole layer (0 tokens) rather than crashing per-goal.
@@ -1429,6 +1497,7 @@ async def tick_all(
                     eval_every=eval_every, verify_done=verify_done, no_progress_s=no_progress_s,
                     summary_caller=summary_caller, merger=merger,
                     trend_detector=trend_detector,
+                    remote_checker=remote_checker,
                 )
         except Exception as exc:  # noqa: BLE001 — isolate per-goal blast radius
             # the goal's OWN cognition (claude --print) hitting a limit pauses the
