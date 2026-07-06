@@ -1110,3 +1110,18 @@ def test_done_gate_review_brief_carries_both_axes(tmp_path):
         assert smell in body, f"structural section should name {smell!r} as a thing to catch"
     # the summary must speak to BOTH axes — not just clauses
     assert "BOTH axes" in brief or "both axes" in brief or "covering BOTH" in brief
+
+
+def test_done_gate_review_brief_forbids_existence_only_test_evidence(tmp_path):
+    """The in-sandbox reviewer must be told the same rule the evaluator
+    enforces: spec files existing ≠ tests passing (closeloop-bench-2026-07-05
+    shipped a verify.sh that only grepped for the Playwright files)."""
+    from devclaw.goal.tick import _done_gate_review_brief
+    from devclaw.goal.models import Goal
+
+    brief = _done_gate_review_brief(Goal(
+        id="g", objective="o", cadence="1d", engine="devclaw", workspace_dir="/ws",
+        done_when="the flow is tested end to end",
+    ))
+    assert "merely EXIST" in brief
+    assert "does NOT satisfy" in brief

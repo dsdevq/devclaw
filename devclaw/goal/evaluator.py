@@ -213,6 +213,37 @@ def _looks_like_stub(text: str) -> bool:
     return any(m in s for m in _STUB_MARKERS)
 
 
+#: The closeloop-bench-2026-07-05 failure mode this net closes: the goal's
+#: verify.sh asserted that the Playwright spec files EXISTED (a grep-shaped
+#: check()), never executed them, and the done-gate stamped the test clause
+#: green. Existence is not execution: a test-shaped clause whose evidence
+#: speaks of file presence with no run marker is flipped to unsatisfied.
+_TEST_CLAUSE_RE = re.compile(
+    r"\btest(?:s|ed|ing)?\b|\bcoverage\b|\be2e\b", re.IGNORECASE,
+)
+_EXISTENCE_EVIDENCE_RE = re.compile(
+    r"\bexists?\b|\bexistence\b|\bpresent\b|\bchecked[- ]in\b",
+    re.IGNORECASE,
+)
+_EXECUTION_EVIDENCE_RE = re.compile(
+    r"\bpass(?:es|ed|ing)?\b|\bran\b|\bruns?\b|\bexecut(?:ed|es|ion)\b"
+    r"|\bexit (?:code )?0\b|\bgreen\b|\b\d+\s+(?:tests?|specs?|cases?)\b",
+    re.IGNORECASE,
+)
+
+
+def _test_clause_existence_only(clause: ClauseVerdict) -> bool:
+    """True when a test-shaped clause is being satisfied by evidence that
+    proves the test files are PRESENT but never says they EXECUTED. Deliberately
+    conservative: both conditions must hold (existence wording present AND no
+    execution wording), so "HealthTests.cs:8 Health_Returns200 passes" and
+    "suite green in verify.sh" are untouched."""
+    if not _TEST_CLAUSE_RE.search(clause.clause):
+        return False
+    ev = clause.evidence
+    return bool(_EXISTENCE_EVIDENCE_RE.search(ev)) and not _EXECUTION_EVIDENCE_RE.search(ev)
+
+
 _VERB_PREFIXES = ("get", "list", "fetch", "read", "describe", "show")
 
 
@@ -356,6 +387,21 @@ def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: lis
                         ),
                     ))
                     continue
+            # Execution-evidence enforcement for test clauses: presence of the
+            # spec files is not coverage. The flip message names what WOULD
+            # satisfy the clause so the correction steers the next action.
+            if c.satisfied and c.evidence and _test_clause_existence_only(c):
+                normalized.append(ClauseVerdict(
+                    clause=c.clause, satisfied=False,
+                    evidence=(
+                        f"existence-only test evidence — ({c.evidence!s}) proves "
+                        f"the test files are PRESENT, not that they EXECUTED and "
+                        f"passed. A test clause needs run evidence: the verify "
+                        f"gate's run output, a test count, or the passing suite "
+                        f"log. An existence grep does not satisfy a test clause."
+                    ),
+                ))
+                continue
             normalized.append(c)
         clauses = normalized
         unsatisfied = [c for c in clauses if not c.satisfied or not c.evidence]
