@@ -113,8 +113,12 @@ def test_settle_success_with_pr_and_gate_marks_done_with_evidence(tmp_path):
     item = next(i for i in cl.items if i.id == "scaffold")
     assert item.status == "done"
     assert item.evidence is not None
-    assert "PR https://x/pr/1" in item.evidence
-    assert "gate=passed" in item.evidence
+    # Honest-wording contract (closeloop-bench 2026-07-05): the evidence names
+    # the PR's real state (checklist PRs are never auto-merged) and the gate
+    # as the sandbox gate, so "PR <url> · gate=passed" can't read as
+    # "merged and CI-green" downstream.
+    assert "PR https://x/pr/1 (unmerged)" in item.evidence
+    assert "sandbox gate=passed" in item.evidence
 
 
 def test_settle_success_no_gate_still_marks_done(tmp_path):
