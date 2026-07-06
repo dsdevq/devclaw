@@ -1411,6 +1411,14 @@ async def tick_all(
         return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
 
     for goal_id in store.list_goal_ids():
+        # Per-goal run-window: a goal can carry its OWN night/off-hours schedule
+        # on top of the engine-wide gate above (e.g. a token-heavy standing loop
+        # confined to nights while other goals run all day). Outside its window,
+        # skip just this goal — 0 tokens for it — while the others still tick.
+        g_blocked, _gwhy = _engine_goal_operator_block(engine, goal_id)
+        if g_blocked:
+            outcomes[goal_id] = Outcome.RATE_LIMITED
+            continue
         tracer = tracer_factory(goal_id) if tracer_factory else None
         try:
             with _trace.tracer_scope(tracer):
@@ -1467,6 +1475,14 @@ def _engine_operator_block(engine: GoalEngine) -> tuple[bool, str]:
     (the in-process engine does; test doubles may not → treated as open)."""
     fn = getattr(engine, "operator_block", None)
     return fn(_now_ms()) if callable(fn) else (False, "")
+
+
+def _engine_goal_operator_block(engine: GoalEngine, goal_id: str) -> tuple[bool, str]:
+    """Read one goal's OWN run-window gate via the engine, if it exposes one (the
+    in-process engine does; test doubles may not → treated as open, so existing
+    fakes tick every goal exactly as before)."""
+    fn = getattr(engine, "goal_operator_block", None)
+    return fn(goal_id, _now_ms()) if callable(fn) else (False, "")
 
 
 def _maybe_pause(engine: GoalEngine, store: GoalStore, goal_id: str, err: str) -> "Outcome | None":

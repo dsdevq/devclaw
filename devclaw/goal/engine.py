@@ -113,6 +113,14 @@ class InProcessEngine:
             self._store.operator_hold(), self._store.get_run_schedule(), now_ms
         )
 
+    def goal_operator_block(self, goal_id: str, now_ms: int) -> tuple[bool, str]:
+        """A single goal's OWN run-window gate — applied on top of the engine-wide
+        :meth:`operator_block` so a goal dispatches only if the global controls AND
+        its own window both allow it. Schedule-only (a person pausing everything
+        uses the global hold); an unset per-goal window never blocks (fail-open)."""
+        from ..dispatch_gate import schedule_blocks
+        return schedule_blocks(self._store.get_run_schedule(goal_id), now_ms)
+
     # ---- internals ---------------------------------------------------------
 
     def _poll_task(self, task_id: str) -> PollResult:

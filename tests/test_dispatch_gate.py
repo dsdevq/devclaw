@@ -159,3 +159,54 @@ def test_engine_operator_block_reflects_store(store):
     blocked, reason = _engine_operator_block(eng)
     assert blocked and reason == "manual"
     assert eng.operator_block(_now_ms())[0] is True
+
+
+# ---- per-goal run-window (an extra narrowing on top of the global one) -----
+
+def test_per_goal_schedule_roundtrip_and_isolation(store):
+    """A goal's own window is stored + read independently of the global one, and
+    listing surfaces only the per-goal windows."""
+    assert store.get_run_schedule("g") == gate.DEFAULT_SCHEDULE   # unset → disabled default
+    store.set_run_schedule(True, "22:00", "06:00", "Europe/Kyiv", goal_id="g")
+    assert store.get_run_schedule("g") == {
+        "enabled": True, "start": "22:00", "end": "06:00", "tz": "Europe/Kyiv",
+    }
+    assert store.get_run_schedule() == gate.DEFAULT_SCHEDULE      # global untouched
+    assert store.list_goal_schedules() == {"g": store.get_run_schedule("g")}
+
+
+def test_per_goal_schedule_clear_falls_back(store):
+    store.set_run_schedule(True, "22:00", "06:00", "UTC", goal_id="g")
+    store.clear_run_schedule("g")
+    assert store.get_run_schedule("g") == gate.DEFAULT_SCHEDULE
+    assert store.list_goal_schedules() == {}
+
+
+def test_list_goal_schedules_ignores_global_key(store):
+    """The global ``run_schedule`` meta key must not leak into the per-goal list."""
+    store.set_run_schedule(True, "09:00", "18:00", "UTC")            # global
+    store.set_run_schedule(True, "22:00", "06:00", "UTC", "night")   # per-goal
+    assert list(store.list_goal_schedules()) == ["night"]
+
+
+def test_engine_goal_operator_block_reflects_store(store):
+    """The per-goal gate is schedule-only and independent of the global gate:
+    a goal outside its own window blocks even with no global hold/window set."""
+    from devclaw.goal.engine import InProcessEngine
+    from devclaw.goal.tick import _engine_goal_operator_block
+    from devclaw.task_queue import TaskQueue
+
+    eng = InProcessEngine(TaskQueue(store), store)
+    noon = _ms(2026, 7, 5, 12, 0)
+    assert eng.goal_operator_block("g", noon) == (False, "")     # no per-goal window
+    store.set_run_schedule(True, "00:00", "00:30", "UTC", goal_id="g")  # closed at noon
+    blocked, reason = eng.goal_operator_block("g", noon)
+    assert blocked and "run window" in reason
+    assert eng.operator_block(noon) == (False, "")               # global still open
+
+
+def test_engine_goal_operator_block_open_for_test_doubles():
+    """A test double lacking the method reads open (existing fakes tick unchanged)."""
+    from devclaw.goal.tick import _engine_goal_operator_block
+
+    assert _engine_goal_operator_block(object(), "g") == (False, "")
