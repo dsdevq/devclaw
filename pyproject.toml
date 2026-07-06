@@ -22,6 +22,11 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["devclaw"]
+# The console bundle (devclaw/server/console/dist) is BUILT during the image
+# build (npm run build), not committed — it's .gitignored. hatchling respects
+# VCS ignores by default, so force-include the built output here or the wheel
+# ships without a console (server 503s). Glob matches the vite output tree.
+artifacts = ["devclaw/server/console/dist/**"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

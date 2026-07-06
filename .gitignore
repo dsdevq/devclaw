@@ -41,3 +41,8 @@ auth-profiles.json
 # Eval run artifacts (results, not source)
 evals/runs/
 .claude/
+
+# Console build output — the Vite+React SPA is built at image-build time
+# (compose/devclaw-mcp/Dockerfile), not vendored. hatchling force-includes it
+# into the wheel via `tool.hatch.build.targets.wheel.artifacts` in pyproject.
+devclaw/server/console/dist/
