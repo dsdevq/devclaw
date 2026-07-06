@@ -419,6 +419,7 @@ async def control_json(request: Request) -> Response:
     return JSONResponse({
         "operatorHold": {"on": on, "reason": hold_reason},
         "schedule": schedule,
+        "goalSchedules": store.list_goal_schedules(),
         "quotaPause": {"activeUntilMs": q_until if quota_active else 0, "reason": q_reason},
         "blocked": blocked,
         "reason": reason,
@@ -448,13 +449,11 @@ async def control_resume(request: Request) -> Response:
     return JSONResponse({"operatorHold": {"on": False, "reason": ""}})
 
 
-@mcp.custom_route("/control/schedule", methods=["POST"])
-async def control_schedule(request: Request) -> Response:
-    """Set the daily run-window. Body:
-    ``{"enabled": bool, "start": "HH:MM", "end": "HH:MM", "tz": "Area/City"}``.
-    Missing fields keep their current value. A bad time or timezone is rejected
-    (400) rather than silently accepted — the gate fails open, so a typo here
-    would quietly disable the window."""
+async def _apply_schedule(request: Request, goal_id: "str | None") -> Response:
+    """Validate a schedule body and persist it (global when ``goal_id`` is None,
+    else that goal's own window). Shared by the global and per-goal routes so the
+    same fail-closed validation guards both — a typo must 400, never silently
+    disable the window (the gate fails open)."""
     from zoneinfo import ZoneInfo
 
     from ..dispatch_gate import _parse_hhmm
@@ -464,7 +463,7 @@ async def control_schedule(request: Request) -> Response:
     except Exception:
         return JSONResponse({"error": "invalid_json"}, status_code=400)
     b = body or {}
-    cur = store.get_run_schedule()
+    cur = store.get_run_schedule(goal_id)
     enabled = bool(b.get("enabled", cur["enabled"]))
     start = str(b.get("start") or cur["start"])
     end = str(b.get("end") or cur["end"])
@@ -479,8 +478,36 @@ async def control_schedule(request: Request) -> Response:
         return JSONResponse(
             {"error": "bad_tz", "hint": "IANA name, e.g. Europe/Kyiv"}, status_code=400
         )
-    store.set_run_schedule(enabled, start, end, tz)
-    return JSONResponse({"schedule": store.get_run_schedule()})
+    store.set_run_schedule(enabled, start, end, tz, goal_id=goal_id)
+    return JSONResponse({"schedule": store.get_run_schedule(goal_id)})
+
+
+@mcp.custom_route("/control/schedule", methods=["POST"])
+async def control_schedule(request: Request) -> Response:
+    """Set the engine-wide daily run-window. Body:
+    ``{"enabled": bool, "start": "HH:MM", "end": "HH:MM", "tz": "Area/City"}``.
+    Missing fields keep their current value. A bad time or timezone is rejected
+    (400) rather than silently accepted — the gate fails open, so a typo here
+    would quietly disable the window."""
+    return await _apply_schedule(request, None)
+
+
+@mcp.custom_route("/goals/{goal_id}/schedule", methods=["GET"])
+async def goal_schedule_get(request: Request) -> Response:
+    """This goal's OWN run-window (a night/off-hours narrowing on top of the
+    engine-wide window). A disabled default means the goal follows only the
+    global window."""
+    goal_id = request.path_params["goal_id"]
+    return JSONResponse({"goalId": goal_id, "schedule": store.get_run_schedule(goal_id)})
+
+
+@mcp.custom_route("/goals/{goal_id}/schedule", methods=["POST"])
+async def goal_schedule_set(request: Request) -> Response:
+    """Set THIS goal's own daily run-window — same body + validation as the global
+    route. Confines a token-heavy standing goal to off-hours without gating the
+    rest of the engine. Send ``{"enabled": false}`` to stop it restricting."""
+    goal_id = request.path_params["goal_id"]
+    return await _apply_schedule(request, goal_id)
 
 
 @mcp.custom_route("/goals/{goal_id}/events", methods=["GET"])
