@@ -286,6 +286,84 @@ async def test_planner_blocked_notifies(tmp_path):
     assert any("auth provider" in m for m in notifier.sent)
 
 
+SLEEP = json.dumps({"decision": "sleep", "note": "waiting"})
+
+
+@pytest.mark.asyncio
+async def test_verified_delivery_refunds_dispatch_cap(tmp_path):
+    """A dispatch that settles done + gate-passed hands its cap budget back —
+    the cap measures outstanding unproductive dispatches, not lifetime
+    throughput, so an auto-merging mission goal never blocks on healthy work
+    (live-found 2026-07-07: closeloop-mission-v2 blocked at cap 6 while
+    shipping real merged PRs)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=4,
+            in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+        ),
+    )
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "poll",
+    [
+        # failed run — no refund
+        PollResult(terminal=True, status="failed", detail="agent died"),
+        # done but gate FAILED — unverified, no refund
+        PollResult(terminal=True, status="done", detail="broke tests",
+                   pr_url="https://github.com/o/r/pull/9", gate_passed=False),
+        # done with NO gate (review / gateless task) — a loop of these is the
+        # runaway the cap must still catch, no refund
+        PollResult(terminal=True, status="done", detail="repo analysis"),
+    ],
+)
+async def test_unproductive_settle_keeps_dispatch_count(tmp_path, poll):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=4,
+            in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+        ),
+    )
+    engine = FakeEngine(poll_result=poll)
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 4
+
+
+@pytest.mark.asyncio
+async def test_refund_never_goes_negative(tmp_path):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=0,
+            in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+        ),
+    )
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 0
+
+
 def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
     """steer_goal must zero actions_dispatched when unblocking so the dispatch
     cap doesn't re-fire on the very next tick after the human resolves the block."""
