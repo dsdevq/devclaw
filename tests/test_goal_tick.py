@@ -170,6 +170,11 @@ async def test_finished_action_records_delivery_and_replans(tmp_path):
     # grounded delivery captured + PR logged
     assert "added /health" in store.recent_deliveries("g")
     assert "PR https://github.com/o/r/pull/9" in store.recent_log("g")
+    # Honest-wording contract (closeloop-bench 2026-07-05): the gate is named
+    # as the SANDBOX gate (not CI), and the planner is told the PR's real
+    # merge state instead of left to assume "gate=passed" means "merged".
+    assert "sandbox gate=passed" in store.recent_log("g")
+    assert "pr_state=open (unmerged — owner review pending)" in planner.last_prompt
 
 
 @pytest.mark.asyncio
@@ -693,6 +698,9 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 
     assert merger.merged == ["https://github.com/o/r/pull/9"]
     assert any("merged" in m.lower() for m in notifier.sent)
+    # The planner's finished-detail reflects the merge that just happened —
+    # built AFTER the auto-merge attempt, not before.
+    assert "pr_state=merged" in planner.last_prompt
 
 
 @pytest.mark.asyncio
