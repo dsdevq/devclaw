@@ -16,6 +16,7 @@ layer sits *above* the program/task engine and dispatches into it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -72,6 +73,32 @@ class Goal:
     #: universal devclaw skill bundle + any repo-committed ``.agent/skills/``
     #: contents. Admission validates each slug exists in the library.
     skills_required: list[str] = field(default_factory=list)
+
+
+#: case-insensitive markers by which a ``done_when`` disclaims boundedness —
+#: the owner is saying "this goal has no terminal completion state; judge each
+#: delivery, don't ever close it". The closeloop-bench-2026-07-05 contract read
+#: "Not applicable as a bounded criterion — this is a standing goal" and the
+#: done-gate still returned a terminal ``achieved``; :func:`is_standing` is how
+#: the evaluator honors that wording instead of overriding it. Deliberately a
+#: short, conservative list: a false positive merely routes the close decision
+#: to the owner (needs_human), a false negative reproduces the benchmark bug —
+#: extend it when a real contract phrasing slips through, not speculatively.
+_STANDING_DONE_WHEN = re.compile(
+    r"standing goal"
+    r"|not a bounded criterion"
+    r"|not applicable as a bounded"
+    r"|no terminal (?:state|completion)",
+    re.IGNORECASE,
+)
+
+
+def is_standing(done_when: str) -> bool:
+    """True when ``done_when`` declares the goal standing (unbounded). Such a
+    goal must never terminally close via the done-gate — completion is the
+    owner's call (``cancel_goal`` / re-aim), so an all-clauses-pass done-gate
+    verdict becomes ``needs_human`` instead of ``achieved``."""
+    return bool(done_when and _STANDING_DONE_WHEN.search(done_when))
 
 
 @dataclass(frozen=True)

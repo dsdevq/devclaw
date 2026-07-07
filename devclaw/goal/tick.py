@@ -993,9 +993,16 @@ def _settle_addressed_items(
     if success:
         ev_parts: list[str] = []
         if poll.pr_url:
-            ev_parts.append(f"PR {poll.pr_url}")
+            # Checklist dispatches never auto-merge (the shared goal-branch PR
+            # stays open for the owner), so state that in the evidence itself.
+            # An unqualified "PR <url> · gate=passed" reads as "merged and
+            # green" to every downstream consumer — the closeloop-bench
+            # 2026-07-05 run logged "PR merged (gate passed)" for a PR that
+            # was never merged because this string let it.
+            ev_parts.append(f"PR {poll.pr_url} (unmerged)")
         if poll.gate_passed is not None:
-            ev_parts.append("gate=passed" if poll.gate_passed else "gate=FAILED")
+            # devclaw's sandbox verify_cmd, not the target repo's CI.
+            ev_parts.append("sandbox gate=passed" if poll.gate_passed else "sandbox gate=FAILED")
         evidence = " · ".join(ev_parts) or "settled (no PR or gate)"
         new_status = "done"
     else:
@@ -1030,6 +1037,13 @@ async def _dispatch_action(
     # 5-item backlog is normal); take the MAX so a checklist goal doesn't
     # block every backlog-size dispatches. Live-found 2026-06-26 when
     # finance-sentry-mcp-v3 hit a cap=7 with 22 ready items left.
+    #
+    # The counter is progress-aware: a dispatch that settles as a verified
+    # delivery (done + gate passed) is refunded on settle (see
+    # _resolve_polling_action), so the cap measures OUTSTANDING unproductive
+    # dispatches, not lifetime throughput. A healthy auto-merging mission goal
+    # never trips it; a spinning planner still does. Live-found 2026-07-07
+    # when closeloop-mission-v2 blocked at cap 6 despite shipping real work.
     base_cap = len(goal.backlog) + 2
     checklist = store.read_checklist(goal_id)
     cap = max(base_cap, len(checklist.items) + 2) if checklist else base_cap
@@ -1203,7 +1217,11 @@ async def _resolve_polling_action(
     if poll.pr_url:
         evidence.append(f"PR {poll.pr_url}")
     if poll.gate_passed is not None:
-        evidence.append("gate=passed" if poll.gate_passed else "gate=FAILED")
+        # Say WHICH gate: devclaw's sandbox verify_cmd, not the target repo's
+        # CI. The bare "gate=passed" wording let the closeloop-bench 2026-07-05
+        # planner treat sandbox-green as CI-green while every real GitHub
+        # Actions run was failing at startup.
+        evidence.append("sandbox gate=passed" if poll.gate_passed else "sandbox gate=FAILED")
     ev_str = (" — " + ", ".join(evidence)) if evidence else ""
 
     ctx.store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
@@ -1217,12 +1235,17 @@ async def _resolve_polling_action(
         goal_id=goal_id, action_label=_action_label(ref),
         gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
     )
-    finished_detail = f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}\n{poll.detail}"
-
     delivered = 1 if poll.status == "done" else 0
+    # A verified delivery (done + gate passed) hands back its dispatch-cap
+    # budget: the cap exists to stop a planner that spins without producing,
+    # not to ration verified throughput. Failures, gate-failed work, and
+    # gateless settles (reviews, no-gate tasks) still accumulate — a loop of
+    # those is exactly the runaway the cap must catch.
+    productive = 1 if (poll.status == "done" and poll.gate_passed) else 0
     new_status = replace(
         status, in_flight=None, phase="idle",
         deliveries_since_eval=status.deliveries_since_eval + delivered,
+        actions_dispatched=max(0, status.actions_dispatched - productive),
         # a delivery is forward progress → reset the no-progress watchdog.
         last_progress_at=(ctx.store.now_iso() if delivered else status.last_progress_at),
         no_progress_notified=(False if delivered else status.no_progress_notified),
@@ -1242,12 +1265,14 @@ async def _resolve_polling_action(
     # done-gate is the natural moment for a single human review of the
     # cumulative work.
     in_checklist_dispatch = bool(getattr(ref, "addresses", None))
+    merged_now = False
     if (
         _merge.AUTOMERGE_ENABLED and ctx.merger is not None
         and poll.status == "done" and poll.gate_passed and poll.pr_url
         and not in_checklist_dispatch
     ):
         if await ctx.merger(poll.pr_url):
+            merged_now = True
             ctx.store.append_log(goal_id, f"auto-merged {poll.pr_url}")
             await _notify(
                 ctx.notifier, NotifyLevel.TASK,
@@ -1256,6 +1281,19 @@ async def _resolve_polling_action(
             )
         else:
             ctx.store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
+
+    # Built AFTER the auto-merge attempt so the planner is told the PR's real
+    # state instead of inferring it. "open (unmerged — owner review pending)"
+    # is the closeloop-bench 2026-07-05 fix: the planner's done-proposal prose
+    # claimed "PR merged (gate passed)" for a PR nothing had merged, because
+    # the detail string never said otherwise.
+    pr_state = ""
+    if poll.pr_url:
+        pr_state = (
+            " pr_state=merged" if merged_now
+            else " pr_state=open (unmerged — owner review pending)"
+        )
+    finished_detail = f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}{pr_state}\n{poll.detail}"
 
     # Persist IMMEDIATELY — the next-action planner can raise on a usage limit;
     # if the cleared state isn't durable first the tick aborts with in_flight
