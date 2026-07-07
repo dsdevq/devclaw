@@ -198,6 +198,106 @@ export async function mergePr(prUrl: string): Promise<{ merged: boolean; error?:
   }
 }
 
+// ---- dispatch controls (global operator pause + daily run window) --------
+
+export interface OperatorHold {
+  on: boolean;
+  reason: string;
+}
+
+export interface RunSchedule {
+  enabled: boolean;
+  start: string; // "HH:MM"
+  end: string; // "HH:MM"
+  tz: string; // IANA name, e.g. "Europe/Kyiv"
+}
+
+export interface ControlState {
+  operatorHold: OperatorHold;
+  schedule: RunSchedule;
+  quotaPause: { activeUntilMs: number; reason: string };
+  /** True when NEW dispatch is currently gated (by hold, schedule, or quota). */
+  blocked: boolean;
+  reason: string;
+}
+
+export async function fetchControl(): Promise<ControlState> {
+  const r = await fetch(`/control.json${tokenQS()}`);
+  if (!r.ok) throw new Error(`control.json ${r.status}`);
+  return r.json();
+}
+
+export async function pauseDispatch(reason?: string): Promise<{ operatorHold: OperatorHold }> {
+  const r = await fetch(`/control/pause${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ reason: reason ?? "" }),
+  });
+  if (!r.ok) throw new Error(`pause: ${r.status}`);
+  return r.json();
+}
+
+export async function resumeDispatch(): Promise<{ operatorHold: OperatorHold }> {
+  const r = await fetch(`/control/resume${tokenQS()}`, { method: "POST" });
+  if (!r.ok) throw new Error(`resume: ${r.status}`);
+  return r.json();
+}
+
+export async function setSchedule(s: RunSchedule): Promise<{ schedule: RunSchedule }> {
+  const r = await fetch(`/control/schedule${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!r.ok) {
+    let msg = `schedule: ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.error) msg = `${j.error}${j.hint ? ` — ${j.hint}` : ""}`;
+    } catch {
+      /* keep status-code message */
+    }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+// ---- per-goal run window (a night/off-hours narrowing on top of the global
+// one; a goal dispatches only if BOTH the global controls and its own window
+// allow). Backend: server/http.py GET/POST /goals/{id}/schedule. -------------
+
+export async function fetchGoalSchedule(id: string): Promise<RunSchedule> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/schedule${tokenQS()}`);
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) throw new Error(`goal schedule ${id}: ${r.status}`);
+  const j = await r.json();
+  return j.schedule as RunSchedule;
+}
+
+export async function setGoalSchedule(
+  id: string,
+  s: RunSchedule,
+): Promise<{ schedule: RunSchedule }> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/schedule${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(s),
+  });
+  if (!r.ok) {
+    // 400 bodies carry {error, hint} (bad_time / bad_tz) — surface them the same
+    // way the global setSchedule does, so a typo shows the reason not a 400.
+    let msg = `goal schedule: ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.error) msg = `${j.error}${j.hint ? ` — ${j.hint}` : ""}`;
+    } catch {
+      /* keep status-code message */
+    }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
 export async function steerGoal(id: string, message: string): Promise<{ steered: boolean }> {
   const r = await fetch(`/goals/${encodeURIComponent(id)}/steer${tokenQS()}`, {
     method: "POST",

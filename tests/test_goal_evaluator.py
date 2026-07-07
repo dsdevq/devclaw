@@ -510,3 +510,177 @@ async def test_evaluate_threads_stub_acceptable_through_to_validate():
     )
     assert r.verdict == "off_track"
     assert "cashflow" in r.corrections[0].lower()
+
+
+# ---- execution-evidence enforcement for test clauses (2026-07-06 benchmark) -
+#
+# Backstory: closeloop-bench-2026-07-05's verify.sh asserted the Playwright
+# spec files EXISTED (grep-shaped check()) but never executed them, and the
+# done-gate stamped the test clause green. Presence is not coverage: a
+# test-shaped clause needs run evidence (output, counts, gate log) to satisfy.
+
+
+def _achieved_with(clauses: list[dict]) -> dict:
+    return {"verdict": "achieved", "rationale": "all met", "clauses": clauses}
+
+
+def test_test_clause_with_existence_only_evidence_is_downgraded():
+    r = validate(
+        _achieved_with([
+            {
+                "clause": "the walking skeleton is covered by a Playwright E2E test",
+                "satisfied": True,
+                "evidence": "tests/e2e/walking-skeleton.spec.ts exists; verify.sh asserts the file is present",
+            },
+        ]),
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert not r.clauses[0].satisfied
+    assert "existence-only" in r.clauses[0].evidence
+    assert len(r.corrections) == 1
+
+
+def test_test_clause_with_run_evidence_stays_achieved():
+    r = validate(
+        _achieved_with([
+            {
+                "clause": "/health is tested",
+                "satisfied": True,
+                "evidence": "HealthTests.cs:8 Health_Returns200 — suite passes in the verify gate (14 tests)",
+            },
+        ]),
+        at_done_gate=True,
+    )
+    assert r.verdict == "achieved"
+    assert r.clauses[0].satisfied
+
+
+def test_non_test_clause_with_exists_evidence_is_untouched():
+    # "exists" is fine evidence for a non-test clause (docs, infra files).
+    r = validate(
+        _achieved_with([
+            {
+                "clause": "a multi-stage production Dockerfile is present at the repo root",
+                "satisfied": True,
+                "evidence": "Dockerfile exists at repo root with two FROM stages and a production CMD",
+            },
+        ]),
+        at_done_gate=True,
+    )
+    assert r.verdict == "achieved"
+    assert r.clauses[0].satisfied
+
+
+def test_existence_only_net_applies_only_at_done_gate():
+    r = validate(
+        {"verdict": "on_track", "rationale": "progress", "clauses": [
+            {
+                "clause": "the flow is tested end to end",
+                "satisfied": True,
+                "evidence": "spec files exist under tests/e2e/",
+            },
+        ]},
+    )
+    # pre-done-gate: recorded as-is; the net only guards the CLOSE.
+    assert r.verdict == "on_track"
+    assert r.clauses[0].satisfied
+
+
+def test_evaluator_prompt_names_the_existence_is_not_execution_rule():
+    prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries", at_done_gate=True)
+    assert "EXECUTED" in prompt
+    assert "presence, not coverage" in prompt
+
+
+# ---- standing-goal contract (the 2026-07-06 benchmark safety net) ----------
+#
+# Backstory: closeloop-bench-2026-07-05's done_when read "Not applicable as a
+# bounded criterion — this is a standing goal ... Fail any → off_track" and the
+# done-gate still terminally closed it `achieved`. A standing goal is closed by
+# the OWNER (cancel_goal / re-aim), never by the gate: an all-axes-pass verdict
+# must become needs_human, which blocks + notifies instead of closing.
+
+
+def _standing_goal() -> Goal:
+    return Goal(
+        id="g", objective="closeloop mirrors best-in-class CRMs", cadence="6h",
+        engine="devclaw", workspace_dir="/ws",
+        done_when=(
+            "Not applicable as a bounded criterion — this is a standing goal. "
+            "Judge each delivery against the four axes; fail any → off_track."
+        ),
+        backlog=["notifications engine"],
+    )
+
+
+_ALL_PASS_ACHIEVED = {
+    "verdict": "achieved",
+    "rationale": "all axes pass",
+    "clauses": [
+        {"clause": "research is real", "satisfied": True, "evidence": "docs/research/crm.md"},
+        {"clause": "synthesis argued", "satisfied": True, "evidence": "docs/features/x.md Borrowed/Rejected"},
+    ],
+    "structural_health": "clean",
+}
+
+
+def test_is_standing_matches_contract_phrasings():
+    from devclaw.goal.models import is_standing
+
+    assert is_standing("this is a standing goal")
+    assert is_standing("Not applicable as a bounded criterion — judge deliveries")
+    assert is_standing("NOT A BOUNDED CRITERION")
+    assert is_standing("there is no terminal state for this goal")
+    # bounded contracts stay bounded
+    assert not is_standing("/health returns 200 and is tested")
+    assert not is_standing("all backlog items merged")
+    assert not is_standing("")
+
+
+def test_standing_done_gate_achieved_becomes_needs_human():
+    r = validate(_ALL_PASS_ACHIEVED, at_done_gate=True, standing=True)
+    assert r.verdict == "needs_human"
+    assert "standing" in r.question.lower()
+    # the grading survives the conversion — the owner sees WHAT passed
+    assert len(r.clauses) == 2 and all(c.satisfied for c in r.clauses)
+    assert r.structural_health == "clean"
+
+
+def test_standing_does_not_soften_off_track():
+    # standing only intercepts the CLOSE; a failing axis still steers as usual.
+    r = validate(
+        {
+            "verdict": "off_track", "rationale": "axis 3 failed",
+            "corrections": ["[clause 1] fix the JWT fallback"],
+        },
+        at_done_gate=True, standing=True,
+    )
+    assert r.verdict == "off_track"
+    assert r.corrections == ["[clause 1] fix the JWT fallback"]
+
+
+def test_non_standing_achieved_is_unaffected():
+    r = validate(_ALL_PASS_ACHIEVED, at_done_gate=True, standing=False)
+    assert r.verdict == "achieved"
+
+
+def test_standing_prompt_carries_the_contract_note():
+    prompt = build_prompt(_standing_goal(), GoalStatus(), "log", "deliveries", at_done_gate=True)
+    assert "STANDING-GOAL CONTRACT" in prompt
+    # bounded goals don't get the note
+    bounded = build_prompt(_goal(), GoalStatus(), "log", "deliveries", at_done_gate=True)
+    assert "STANDING-GOAL CONTRACT" not in bounded
+
+
+@pytest.mark.asyncio
+async def test_evaluate_threads_standing_through_to_validate():
+    async def caller(prompt: str) -> str:
+        return json.dumps(_ALL_PASS_ACHIEVED)
+
+    r = await evaluate(
+        _standing_goal(), GoalStatus(), "log", "deliveries",
+        claude_caller=caller, at_done_gate=True,
+    )
+    assert r.verdict == "needs_human"
+    assert "standing" in r.question.lower()

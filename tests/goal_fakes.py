@@ -91,6 +91,7 @@ def seed_goal(
     goals_dir, goal_id: str = "demo", *, cadence: str = "1d", backlog: list[str] | None = None,
     repo_url: str | None = "https://example.com/demo.git",
     workspace_dir: str = "/repos/demo",
+    done_when: str = "all backlog items merged",
 ) -> None:
     """Write a minimal goal.yaml under goals_dir/<goal_id>/.
 
@@ -102,6 +103,9 @@ def seed_goal(
     ``workspace_dir`` defaults to a shared fake path; override it when a test
     needs distinct goals to resolve to distinct projects (e.g. per-project
     automerge — see test_goal_tick.py's tick_all merger_resolver tests).
+
+    Pass a standing-shaped ``done_when`` ("this is a standing goal") to
+    exercise the standing-goal done-gate contract.
     """
     import yaml
 
@@ -117,7 +121,7 @@ def seed_goal(
                 "repo_url": repo_url,
                 "verify_cmd": "pytest -q",
                 "open_pr": True,
-                "done_when": "all backlog items merged",
+                "done_when": done_when,
                 "backlog": backlog or ["add a /health endpoint", "add request logging"],
             }
         )

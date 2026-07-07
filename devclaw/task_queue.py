@@ -47,6 +47,7 @@ from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .quality import format_feedback, review_diff
 from .engine.sandcastle import run_sandcastle
+from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
@@ -486,6 +487,14 @@ class TaskQueue:
                 return
             self._store.clear_global_pause()
             sys.stderr.write(f"task-queue: quota pause expired ({reason[:80]}) — resuming\n")
+        # Operator controls (manual pause toggle / daily run-window): hold ALL new
+        # launches while active. In-flight tasks run to completion; the tick loop
+        # re-checks every TICK_SECONDS, so dispatch resumes when the window opens.
+        blocked, _why = operator_block(
+            self._store.operator_hold(), self._store.get_run_schedule(), _now_ms()
+        )
+        if blocked:
+            return
         if not self._store.has_active_work():
             return
         running = self._store.count_running()

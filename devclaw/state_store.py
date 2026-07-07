@@ -886,6 +886,19 @@ class StateStore:
             self._db.execute("DELETE FROM meta WHERE key = ?", (key,))
             self._db.commit()
 
+    def list_meta_keys(self, prefix: str = "") -> list[str]:
+        """Meta keys, optionally filtered to those starting with ``prefix``. Used
+        to enumerate per-goal run-windows (``run_schedule:<goal_id>``)."""
+        with self._lock:
+            if prefix:
+                rows = self._db.execute(
+                    "SELECT key FROM meta WHERE key LIKE ? ESCAPE '\\'",
+                    (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",),
+                ).fetchall()
+            else:
+                rows = self._db.execute("SELECT key FROM meta").fetchall()
+        return [r["key"] for r in rows]
+
     def set_global_pause(self, until_ms: int, reason: str) -> None:
         """Pause ALL dispatch until ``until_ms`` (epoch ms) — the whole OAuth quota
         is account-wide, so a limit on one task pauses everything. Persisted so a
@@ -905,6 +918,86 @@ class StateStore:
     def clear_global_pause(self) -> None:
         self.delete_meta("pause_until_ms")
         self.delete_meta("pause_reason")
+
+    # ---- operator dispatch controls (manual pause + daily run window) ----
+    # Human-facing siblings of the quota pause above. Distinct meta keys, so the
+    # automatic quota pause expiring/clearing never lifts a hold a person set on
+    # purpose (and vice-versa). Read by ``dispatch_gate`` at both heartbeat gates.
+
+    def set_operator_hold(self, on: bool, reason: str = "") -> None:
+        """Manually pause (``on=True``) or resume (``on=False``) ALL new dispatch."""
+        if on:
+            self.set_meta("operator_hold", json.dumps({"on": True, "reason": reason or ""}))
+        else:
+            self.delete_meta("operator_hold")
+
+    def operator_hold(self) -> tuple[bool, str]:
+        """Return ``(on, reason)``. ``(False, "")`` when no hold is set."""
+        raw = self.get_meta("operator_hold")
+        if not raw:
+            return False, ""
+        try:
+            data = json.loads(raw)
+            return bool(data.get("on")), str(data.get("reason") or "")
+        except (ValueError, TypeError):
+            return False, ""
+
+    #: meta-key prefix for a per-goal run-window. The global window keeps the bare
+    #: ``run_schedule`` key; a goal's own window is ``run_schedule:<goal_id>``.
+    _GOAL_SCHEDULE_PREFIX = "run_schedule:"
+
+    def _schedule_key(self, goal_id: "str | None") -> str:
+        return "run_schedule" if not goal_id else f"{self._GOAL_SCHEDULE_PREFIX}{goal_id}"
+
+    def set_run_schedule(
+        self, enabled: bool, start: str, end: str, tz: str, goal_id: "str | None" = None
+    ) -> None:
+        """Daily window during which dispatch is allowed. Outside it, new dispatch
+        is gated (in-flight finishes). ``start``/``end`` are ``'HH:MM'`` in ``tz``.
+
+        With ``goal_id`` set this writes a PER-GOAL window (an extra narrowing on
+        top of the global one), stored under ``run_schedule:<goal_id>``; without
+        it, the engine-wide window."""
+        self.set_meta(self._schedule_key(goal_id), json.dumps(
+            {"enabled": bool(enabled), "start": start, "end": end, "tz": tz}
+        ))
+
+    def clear_run_schedule(self, goal_id: "str | None" = None) -> None:
+        """Remove a schedule so it stops restricting dispatch (a per-goal window
+        cleared this way falls back to the global window only)."""
+        self.delete_meta(self._schedule_key(goal_id))
+
+    def get_run_schedule(self, goal_id: "str | None" = None) -> dict:
+        """The run-schedule dict; a disabled 09:00–18:00 Europe/Kyiv default when
+        none is set (or the stored value is corrupt). Shape mirrors
+        ``dispatch_gate.DEFAULT_SCHEDULE``. With ``goal_id`` set, returns that
+        goal's own window (disabled-default when it has none — the global window
+        is applied separately at the outer gate, so an unset per-goal window must
+        add no restriction)."""
+        from .dispatch_gate import DEFAULT_SCHEDULE
+        raw = self.get_meta(self._schedule_key(goal_id))
+        if not raw:
+            return dict(DEFAULT_SCHEDULE)
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return dict(DEFAULT_SCHEDULE)
+        return {
+            "enabled": bool(data.get("enabled")),
+            "start": str(data.get("start") or DEFAULT_SCHEDULE["start"]),
+            "end": str(data.get("end") or DEFAULT_SCHEDULE["end"]),
+            "tz": str(data.get("tz") or DEFAULT_SCHEDULE["tz"]),
+        }
+
+    def list_goal_schedules(self) -> dict[str, dict]:
+        """Every per-goal window keyed by goal_id (skips the global one). Lets the
+        console/control surface show which goals carry their own window."""
+        out: dict[str, dict] = {}
+        for key in self.list_meta_keys(prefix=self._GOAL_SCHEDULE_PREFIX):
+            goal_id = key[len(self._GOAL_SCHEDULE_PREFIX):]
+            if goal_id:
+                out[goal_id] = self.get_run_schedule(goal_id)
+        return out
 
     # ---- workspace circuit-breaker (per-workspace pause) -----------------
 

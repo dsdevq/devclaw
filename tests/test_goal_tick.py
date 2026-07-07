@@ -31,13 +31,13 @@ def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
 
-async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None):
+async def _tick(store, goal_id, planner, evaluator, engine, notifier, *, eval_every=99, verify_done=True, summary_caller=None, merger=None, remote_checker=None):
     return await tick_goal(
         goal_id, store=store, engine=engine,
         planner_caller=planner, evaluator_caller=evaluator, notifier=notifier,
         notify_url="http://relay", prepare_ws=fake_prepare,
         eval_every=eval_every, verify_done=verify_done, summary_caller=summary_caller,
-        merger=merger,
+        merger=merger, remote_checker=remote_checker,
     )
 
 
@@ -170,6 +170,11 @@ async def test_finished_action_records_delivery_and_replans(tmp_path):
     # grounded delivery captured + PR logged
     assert "added /health" in store.recent_deliveries("g")
     assert "PR https://github.com/o/r/pull/9" in store.recent_log("g")
+    # Honest-wording contract (closeloop-bench 2026-07-05): the gate is named
+    # as the SANDBOX gate (not CI), and the planner is told the PR's real
+    # merge state instead of left to assume "gate=passed" means "merged".
+    assert "sandbox gate=passed" in store.recent_log("g")
+    assert "pr_state=open (unmerged — owner review pending)" in planner.last_prompt
 
 
 @pytest.mark.asyncio
@@ -284,6 +289,84 @@ async def test_planner_blocked_notifies(tmp_path):
     assert out is Outcome.BLOCKED
     assert store.load_status("g").blocked_on == "which auth provider?"
     assert any("auth provider" in m for m in notifier.sent)
+
+
+SLEEP = json.dumps({"decision": "sleep", "note": "waiting"})
+
+
+@pytest.mark.asyncio
+async def test_verified_delivery_refunds_dispatch_cap(tmp_path):
+    """A dispatch that settles done + gate-passed hands its cap budget back —
+    the cap measures outstanding unproductive dispatches, not lifetime
+    throughput, so an auto-merging mission goal never blocks on healthy work
+    (live-found 2026-07-07: closeloop-mission-v2 blocked at cap 6 while
+    shipping real merged PRs)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=4,
+            in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+        ),
+    )
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "poll",
+    [
+        # failed run — no refund
+        PollResult(terminal=True, status="failed", detail="agent died"),
+        # done but gate FAILED — unverified, no refund
+        PollResult(terminal=True, status="done", detail="broke tests",
+                   pr_url="https://github.com/o/r/pull/9", gate_passed=False),
+        # done with NO gate (review / gateless task) — a loop of these is the
+        # runaway the cap must still catch, no refund
+        PollResult(terminal=True, status="done", detail="repo analysis"),
+    ],
+)
+async def test_unproductive_settle_keeps_dispatch_count(tmp_path, poll):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=4,
+            in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+        ),
+    )
+    engine = FakeEngine(poll_result=poll)
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 4
+
+
+@pytest.mark.asyncio
+async def test_refund_never_goes_negative(tmp_path):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=0,
+            in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+        ),
+    )
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 0
 
 
 def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
@@ -615,6 +698,9 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 
     assert merger.merged == ["https://github.com/o/r/pull/9"]
     assert any("merged" in m.lower() for m in notifier.sent)
+    # The planner's finished-detail reflects the merge that just happened —
+    # built AFTER the auto-merge attempt, not before.
+    assert "pr_state=merged" in planner.last_prompt
 
 
 @pytest.mark.asyncio
@@ -1184,3 +1270,231 @@ def test_done_gate_review_brief_carries_both_axes(tmp_path):
         assert smell in body, f"structural section should name {smell!r} as a thing to catch"
     # the summary must speak to BOTH axes — not just clauses
     assert "BOTH axes" in brief or "both axes" in brief or "covering BOTH" in brief
+
+
+# ---- grounded remote-checks at the done-gate (2026-07-06 benchmark fix) -----
+#
+# Backstory: closeloop-bench-2026-07-05 closed `achieved` while all 32 GitHub
+# Actions runs on its goal branch were startup_failure — the sandbox gate was
+# green and nothing ever looked at the repo's real check surface. When a
+# remote checker is bound and the goal works on a shared goal branch, an
+# `achieved` must survive the real CI state before the goal closes.
+
+_ACHIEVED_EVAL = json.dumps({
+    "verdict": "achieved",
+    "rationale": "all clauses met",
+    "clauses": [
+        {"clause": "/health returns 200", "satisfied": True,
+         "evidence": "src/Health.cs:12; HealthTests.cs:8 passes"},
+    ],
+    "structural_health": "clean",
+})
+
+
+class FakeRemoteChecker:
+    """Records (repo_url, branch) calls; returns a canned result or raises."""
+
+    def __init__(self, result=None, exc: Exception | None = None):
+        from devclaw.goal.remote_checks import RemoteChecksResult
+
+        self.result = result or RemoteChecksResult("passing", "all green")
+        self.exc = exc
+        self.calls: list[tuple[str, str]] = []
+
+    async def __call__(self, repo_url: str, branch: str):
+        self.calls.append((repo_url, branch))
+        if self.exc:
+            raise self.exc
+        return self.result
+
+
+def _verifying_checklist_goal(store, tmp_path, goal_id="g"):
+    """Seed a checklist-mode goal parked at the done-gate review settle."""
+    from devclaw.goal.models import Checklist, ChecklistItem
+
+    seed_goal(tmp_path, goal_id)
+    store.write_checklist(goal_id, Checklist(items=[
+        ChecklistItem(
+            id="scaffold", requirement="Create the csproj.",
+            evidence_target="backend/src/Foo.csproj",
+            addresses_files=["backend/src/Foo.csproj"], status="done",
+        ),
+    ]))
+    store.save_status(goal_id, GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+
+
+@pytest.mark.asyncio
+async def test_failing_remote_checks_block_the_close(tmp_path):
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(RemoteChecksResult("failing", "32 failed of 32 (32× startup_failure)"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.SLEPT                       # not done — steered back in
+    assert checker.calls == [("https://example.com/demo.git", "goal/g")]
+    s = store.load_status("g")
+    assert s.phase == "idle" and s.phase != "done"
+    assert s.last_eval_verdict == "off_track"
+    assert "remote checks (goal/g): failing" in store.recent_log("g")
+    # the correction steers the fix
+    steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    assert "[remote-checks]" in steering
+    assert "startup_failure" in steering
+
+
+@pytest.mark.asyncio
+async def test_never_ran_ci_blocks_the_close(tmp_path):
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(RemoteChecksResult("none", "workflows exist but zero runs"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.SLEPT
+    assert store.load_status("g").phase != "done"
+    steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    assert "ZERO" in steering or "zero" in steering
+
+
+@pytest.mark.asyncio
+async def test_passing_remote_checks_let_the_goal_close(tmp_path):
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker()  # passing
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert store.load_status("g").phase == "done"
+    assert "remote checks (goal/g): passing" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_unknown_remote_state_fails_open_but_logs(tmp_path):
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(RemoteChecksResult("unknown", "gh: network unreachable"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    # infra uncertainty must not wedge a verified goal — but it IS observable
+    assert out is Outcome.DONE
+    assert "remote checks (goal/g): unknown" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_checker_exception_fails_open(tmp_path):
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(exc=RuntimeError("gh exploded"))
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert "unknown" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_legacy_goal_without_checklist_skips_the_checker(tmp_path):
+    # No shared goal branch → nothing meaningful to check; behaviour unchanged.
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+    checker = FakeRemoteChecker()
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert checker.calls == []
+
+
+def test_done_gate_review_brief_forbids_existence_only_test_evidence(tmp_path):
+    """The in-sandbox reviewer must be told the same rule the evaluator
+    enforces: spec files existing ≠ tests passing (closeloop-bench-2026-07-05
+    shipped a verify.sh that only grepped for the Playwright files)."""
+    from devclaw.goal.tick import _done_gate_review_brief
+    from devclaw.goal.models import Goal
+
+    brief = _done_gate_review_brief(Goal(
+        id="g", objective="o", cadence="1d", engine="devclaw", workspace_dir="/ws",
+        done_when="the flow is tested end to end",
+    ))
+    assert "merely EXIST" in brief
+    assert "does NOT satisfy" in brief
+
+
+# ---- standing-goal done-gate (the 2026-07-06 benchmark fix) -----------------
+
+
+@pytest.mark.asyncio
+async def test_standing_goal_done_gate_blocks_instead_of_closing(tmp_path):
+    """closeloop-bench-2026-07-05: a done_when that declares the goal STANDING
+    ("not a bounded criterion") must never terminally close via the done-gate.
+    An all-axes-pass review becomes needs_human → the goal BLOCKS and the owner
+    gets the close-or-steer decision; phase stays out of 'done'."""
+    store = _store(tmp_path, Clock())
+    seed_goal(
+        tmp_path, "g",
+        done_when=(
+            "Not applicable as a bounded criterion — this is a standing goal. "
+            "Judge each delivery against the four axes; fail any → off_track."
+        ),
+    )
+    store.save_status("g", GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+    planner = FakeClaude(ACT)  # must NOT be called
+    evaluator = FakeClaude(json.dumps({
+        "verdict": "achieved",
+        "rationale": "every axis passes",
+        "clauses": [
+            {"clause": "research is real", "satisfied": True, "evidence": "docs/research/crm.md"},
+        ],
+        "structural_health": "clean",
+    }))
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    s = store.load_status("g")
+    assert s.phase == "blocked"
+    assert s.phase != "done"
+    assert "standing" in (s.blocked_on or "").lower()
+    # the evaluator prompt carried the contract note
+    assert "STANDING-GOAL CONTRACT" in evaluator.last_prompt
+    # owner was told, not bypassed
+    assert any("standing" in m.lower() for m in notifier.sent)

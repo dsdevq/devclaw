@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchProjects, type ProjectRow } from "../api";
+import { DispatchControls } from "../components/DispatchControls";
 import { mono, palettes } from "../theme";
 import { relativeTime } from "../util/time";
 
@@ -89,8 +90,11 @@ export function ProjectsHome() {
         <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.01em" }}>
           devclaw console
         </div>
-        <div style={{ fontFamily: mono, fontSize: 12, color: p.textMuted }}>
-          {VERSION_LABEL}
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <DispatchControls />
+          <div style={{ fontFamily: mono, fontSize: 12, color: p.textMuted }}>
+            {VERSION_LABEL}
+          </div>
         </div>
       </div>
 

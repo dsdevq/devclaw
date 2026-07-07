@@ -213,6 +213,87 @@ def _cmd_scorecard(args) -> int:
     return 0
 
 
+def _fmt_schedule(s: dict) -> str:
+    state = "enabled" if s.get("enabled") else "disabled"
+    return f"{state}  {s.get('start')}–{s.get('end')} {s.get('tz')}"
+
+
+def _cmd_schedule_show(args) -> int:
+    """Show the engine-wide run-window and, without ``--goal``, every per-goal
+    window; with ``--goal G`` just that goal's own window."""
+    store = StateStore(_db_path())
+    try:
+        if args.goal:
+            s = store.get_run_schedule(args.goal)
+            if args.json:
+                print(json.dumps({"goal": args.goal, "schedule": s}, indent=2))
+            else:
+                print(f"{args.goal}: {_fmt_schedule(s)}")
+            return 0
+        glob = store.get_run_schedule()
+        per_goal = store.list_goal_schedules()
+        if args.json:
+            print(json.dumps({"global": glob, "goals": per_goal}, indent=2))
+            return 0
+        print(f"global: {_fmt_schedule(glob)}")
+        if per_goal:
+            print("per-goal:")
+            for gid, s in sorted(per_goal.items()):
+                print(f"  {gid:<28} {_fmt_schedule(s)}")
+        else:
+            print("per-goal: (none)")
+        return 0
+    finally:
+        store.close()
+
+
+def _cmd_schedule_set(args) -> int:
+    """Set the engine-wide window, or a single goal's own window with ``--goal``.
+    Rejects a bad time/timezone (the gate fails open, so a silent typo would
+    quietly disable the window)."""
+    from zoneinfo import ZoneInfo
+
+    from .dispatch_gate import _parse_hhmm
+
+    store = StateStore(_db_path())
+    try:
+        cur = store.get_run_schedule(args.goal)
+        enabled = cur["enabled"]
+        if args.enable:
+            enabled = True
+        elif args.disable:
+            enabled = False
+        start = args.start or cur["start"]
+        end = args.end or cur["end"]
+        tz = args.tz or cur["tz"]
+        if _parse_hhmm(start) is None or _parse_hhmm(end) is None:
+            print("bad time: start/end must be HH:MM", file=sys.stderr)
+            return 1
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            print(f"bad timezone: {tz} (use an IANA name, e.g. Europe/Kyiv)", file=sys.stderr)
+            return 1
+        store.set_run_schedule(enabled, start, end, tz, goal_id=args.goal)
+        who = args.goal or "global"
+        print(f"{who}: {_fmt_schedule(store.get_run_schedule(args.goal))}")
+        return 0
+    finally:
+        store.close()
+
+
+def _cmd_schedule_clear(args) -> int:
+    """Remove a window so it stops restricting dispatch (a cleared per-goal window
+    falls back to the global window only)."""
+    store = StateStore(_db_path())
+    try:
+        store.clear_run_schedule(args.goal)
+        print(f"cleared {args.goal or 'global'} run-window")
+        return 0
+    finally:
+        store.close()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="devclaw", description="devclaw control-plane CLI")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -225,6 +306,31 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="lookback window in hours (default 168 = 1 week)")
     p_score.add_argument("--json", action="store_true")
     p_score.set_defaults(func=lambda reg, get, a: _cmd_scorecard(a))
+
+    p_sched = sub.add_parser(
+        "schedule",
+        help="daily run-window (engine-wide or per-goal) that gates NEW dispatch",
+    )
+    ssub = p_sched.add_subparsers(dest="cmd", required=True)
+
+    s_show = ssub.add_parser("show", help="show the global window + per-goal windows")
+    s_show.add_argument("--goal", help="show only this goal's own window")
+    s_show.add_argument("--json", action="store_true")
+    s_show.set_defaults(func=lambda reg, get, a: _cmd_schedule_show(a))
+
+    s_set = ssub.add_parser("set", help="set the global or (with --goal) a per-goal window")
+    s_set.add_argument("--goal", help="target goal id (omit for the engine-wide window)")
+    s_set.add_argument("--start", help="window start HH:MM (local to --tz)")
+    s_set.add_argument("--end", help="window end HH:MM; may wrap past midnight")
+    s_set.add_argument("--tz", help="IANA timezone, e.g. Europe/Kyiv")
+    grp = s_set.add_mutually_exclusive_group()
+    grp.add_argument("--enable", action="store_true", help="enable the window")
+    grp.add_argument("--disable", action="store_true", help="disable (keep times, stop gating)")
+    s_set.set_defaults(func=lambda reg, get, a: _cmd_schedule_set(a))
+
+    s_clr = ssub.add_parser("clear", help="remove a window (per-goal falls back to global)")
+    s_clr.add_argument("--goal", help="target goal id (omit for the engine-wide window)")
+    s_clr.set_defaults(func=lambda reg, get, a: _cmd_schedule_clear(a))
 
     projects = sub.add_parser("projects", help="manage the project registry")
     psub = projects.add_subparsers(dest="cmd", required=True)

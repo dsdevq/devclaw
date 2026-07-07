@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 from . import evaluator as goal_evaluator
 from . import merge as goal_merge
 from . import planner as goal_planner
+from . import remote_checks as goal_remote_checks
 from . import research as goal_research
 from . import summary as goal_summary
 from .engine import InProcessEngine
@@ -160,6 +161,15 @@ class GoalService:
         fresh per-goal automerge decision rather than one value for the whole
         fleet (a project override for goal A must not leak onto goal B)."""
         return self._merger
+
+    def _remote_checker(self) -> "Optional[goal_remote_checks.RemoteChecker]":
+        """Grounded remote-checks verification at the done-gate (the 2026-07-06
+        benchmark fix). On by default; DEVCLAW_GOAL_REMOTE_CHECKS=0 disables —
+        the checker itself fails open on infra errors, so opting out is only
+        for environments with no gh at all."""
+        if not goal_remote_checks.REMOTE_CHECKS_ENABLED:
+            return None
+        return goal_remote_checks.default_checker()
 
     def _trend_detector(self) -> "Optional[_trend_detector_mod.TrendDetector]":
         """The cross-session trend detector. ``None`` when disabled via
@@ -304,6 +314,7 @@ class GoalService:
             summary_caller=self._summary(), merger_resolver=self._merger_resolver(),
             tracer_factory=self._make_tracer,
             trend_detector=self._trend_detector(),
+            remote_checker=self._remote_checker(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 
@@ -317,6 +328,7 @@ class GoalService:
                 eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
                 summary_caller=self._summary(), merger=self._merger(goal),
                 trend_detector=self._trend_detector(),
+                remote_checker=self._remote_checker(),
             )
         return outcome.value
 
@@ -610,6 +622,7 @@ class GoalService:
             notifier=self._notifier, notify_url=self._cfg.notify_url,
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
             summary_caller=self._summary(), merger=self._merger(goal),
+            remote_checker=self._remote_checker(),
         )
         result = await handler.handle_answer(goal_id, answers, ctx=ctx)
         # Decomposer + first executor tick fire on the next heartbeat; poke it now

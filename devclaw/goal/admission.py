@@ -243,6 +243,31 @@ def _check_skills_required(skills_required: list[str]) -> list[AdmissionConditio
     return out
 
 
+def _check_standing_done_when(done_when: str) -> Optional[AdmissionCondition]:
+    """Warn (not reject) when done_when disclaims boundedness. Standing goals
+    are a legitimate shape (the closeloop missions are exactly this), but the
+    owner should know what they filed: the done-gate will NEVER terminally
+    close such a goal — an all-axes-pass verdict becomes ``needs_human`` and
+    the close decision comes back to the owner. Filed as a warn so mission
+    goals stay filable; reject would outlaw the pattern."""
+    from .models import is_standing
+
+    if not done_when or not is_standing(done_when):
+        return None
+    return AdmissionCondition(
+        code="standing_done_when",
+        message=(
+            "done_when declares this a STANDING goal (unbounded — no terminal "
+            "completion state). The done-gate will never close it 'achieved': "
+            "when everything passes, it blocks with needs_human and hands the "
+            "close decision to you. If you want terminal completion, file a "
+            "bounded done_when instead."
+        ),
+        severity="warn",
+        field="done_when",
+    )
+
+
 def _check_bare_verify_cmd(verify_cmd: Optional[str]) -> Optional[AdmissionCondition]:
     """Pre-admission this was a warning (and stays a warning here). A bare
     tool name may not be on PATH inside the sandbox — flag, don't reject."""
@@ -321,9 +346,12 @@ def verify_goal(
     conditions.extend(_check_skills_required(list(skills_required or [])))
 
     # 5. warnings (do not block admission).
-    w = _check_bare_verify_cmd(verify_cmd)
-    if w is not None:
-        conditions.append(w)
+    for w in (
+        _check_standing_done_when(done_when),
+        _check_bare_verify_cmd(verify_cmd),
+    ):
+        if w is not None:
+            conditions.append(w)
 
     admitted = not any(c.severity == "reject" for c in conditions)
     return AdmissionResult(admitted=admitted, conditions=conditions)

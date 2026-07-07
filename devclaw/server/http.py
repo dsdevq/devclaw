@@ -400,6 +400,116 @@ async def goal_steer(request: Request) -> Response:
     return JSONResponse(result)
 
 
+@mcp.custom_route("/control.json", methods=["GET"])
+async def control_json(request: Request) -> Response:
+    """Dispatch-control state for the console: the manual operator hold, the daily
+    run-window, and the (automatic) quota pause — plus whether NEW dispatch is
+    blocked right now and why. Read by the console's Dispatch panel."""
+    from ..dispatch_gate import operator_block
+    from ..state_store import _now_ms
+
+    now = _now_ms()
+    on, hold_reason = store.operator_hold()
+    schedule = store.get_run_schedule()
+    q_until, q_reason = store.global_pause()
+    quota_active = q_until > now
+    op_blocked, op_reason = operator_block((on, hold_reason), schedule, now)
+    blocked = op_blocked or quota_active
+    reason = op_reason if op_blocked else (f"quota: {q_reason}" if quota_active else "")
+    return JSONResponse({
+        "operatorHold": {"on": on, "reason": hold_reason},
+        "schedule": schedule,
+        "goalSchedules": store.list_goal_schedules(),
+        "quotaPause": {"activeUntilMs": q_until if quota_active else 0, "reason": q_reason},
+        "blocked": blocked,
+        "reason": reason,
+    })
+
+
+@mcp.custom_route("/control/pause", methods=["POST"])
+async def control_pause(request: Request) -> Response:
+    """Turn on the manual operator hold — stops all NEW dispatch (in-flight tasks
+    finish). Optional JSON body ``{"reason": "..."}``. Idempotent."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = str((body or {}).get("reason") or "").strip()
+    store.set_operator_hold(True, reason)
+    on, r = store.operator_hold()
+    return JSONResponse({"operatorHold": {"on": on, "reason": r}})
+
+
+@mcp.custom_route("/control/resume", methods=["POST"])
+async def control_resume(request: Request) -> Response:
+    """Clear the manual operator hold. Does NOT touch an active quota pause or the
+    run-window — those gate independently, so dispatch resumes only if nothing
+    else is holding it."""
+    store.set_operator_hold(False)
+    return JSONResponse({"operatorHold": {"on": False, "reason": ""}})
+
+
+async def _apply_schedule(request: Request, goal_id: "str | None") -> Response:
+    """Validate a schedule body and persist it (global when ``goal_id`` is None,
+    else that goal's own window). Shared by the global and per-goal routes so the
+    same fail-closed validation guards both — a typo must 400, never silently
+    disable the window (the gate fails open)."""
+    from zoneinfo import ZoneInfo
+
+    from ..dispatch_gate import _parse_hhmm
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    b = body or {}
+    cur = store.get_run_schedule(goal_id)
+    enabled = bool(b.get("enabled", cur["enabled"]))
+    start = str(b.get("start") or cur["start"])
+    end = str(b.get("end") or cur["end"])
+    tz = str(b.get("tz") or cur["tz"])
+    if _parse_hhmm(start) is None or _parse_hhmm(end) is None:
+        return JSONResponse(
+            {"error": "bad_time", "hint": "start/end must be HH:MM"}, status_code=400
+        )
+    try:
+        ZoneInfo(tz)
+    except Exception:
+        return JSONResponse(
+            {"error": "bad_tz", "hint": "IANA name, e.g. Europe/Kyiv"}, status_code=400
+        )
+    store.set_run_schedule(enabled, start, end, tz, goal_id=goal_id)
+    return JSONResponse({"schedule": store.get_run_schedule(goal_id)})
+
+
+@mcp.custom_route("/control/schedule", methods=["POST"])
+async def control_schedule(request: Request) -> Response:
+    """Set the engine-wide daily run-window. Body:
+    ``{"enabled": bool, "start": "HH:MM", "end": "HH:MM", "tz": "Area/City"}``.
+    Missing fields keep their current value. A bad time or timezone is rejected
+    (400) rather than silently accepted — the gate fails open, so a typo here
+    would quietly disable the window."""
+    return await _apply_schedule(request, None)
+
+
+@mcp.custom_route("/goals/{goal_id}/schedule", methods=["GET"])
+async def goal_schedule_get(request: Request) -> Response:
+    """This goal's OWN run-window (a night/off-hours narrowing on top of the
+    engine-wide window). A disabled default means the goal follows only the
+    global window."""
+    goal_id = request.path_params["goal_id"]
+    return JSONResponse({"goalId": goal_id, "schedule": store.get_run_schedule(goal_id)})
+
+
+@mcp.custom_route("/goals/{goal_id}/schedule", methods=["POST"])
+async def goal_schedule_set(request: Request) -> Response:
+    """Set THIS goal's own daily run-window — same body + validation as the global
+    route. Confines a token-heavy standing goal to off-hours without gating the
+    rest of the engine. Send ``{"enabled": false}`` to stop it restricting."""
+    goal_id = request.path_params["goal_id"]
+    return await _apply_schedule(request, goal_id)
+
+
 @mcp.custom_route("/goals/{goal_id}/events", methods=["GET"])
 async def goal_events(request: Request) -> Response:
     """SSE stream of events for the goal's CURRENT in_flight task/program.
