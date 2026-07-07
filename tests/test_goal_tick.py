@@ -1196,3 +1196,49 @@ def test_done_gate_review_brief_carries_both_axes(tmp_path):
         assert smell in body, f"structural section should name {smell!r} as a thing to catch"
     # the summary must speak to BOTH axes — not just clauses
     assert "BOTH axes" in brief or "both axes" in brief or "covering BOTH" in brief
+
+
+# ---- standing-goal done-gate (the 2026-07-06 benchmark fix) -----------------
+
+
+@pytest.mark.asyncio
+async def test_standing_goal_done_gate_blocks_instead_of_closing(tmp_path):
+    """closeloop-bench-2026-07-05: a done_when that declares the goal STANDING
+    ("not a bounded criterion") must never terminally close via the done-gate.
+    An all-axes-pass review becomes needs_human → the goal BLOCKS and the owner
+    gets the close-or-steer decision; phase stays out of 'done'."""
+    store = _store(tmp_path, Clock())
+    seed_goal(
+        tmp_path, "g",
+        done_when=(
+            "Not applicable as a bounded criterion — this is a standing goal. "
+            "Judge each delivery against the four axes; fail any → off_track."
+        ),
+    )
+    store.save_status("g", GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+    planner = FakeClaude(ACT)  # must NOT be called
+    evaluator = FakeClaude(json.dumps({
+        "verdict": "achieved",
+        "rationale": "every axis passes",
+        "clauses": [
+            {"clause": "research is real", "satisfied": True, "evidence": "docs/research/crm.md"},
+        ],
+        "structural_health": "clean",
+    }))
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    s = store.load_status("g")
+    assert s.phase == "blocked"
+    assert s.phase != "done"
+    assert "standing" in (s.blocked_on or "").lower()
+    # the evaluator prompt carried the contract note
+    assert "STANDING-GOAL CONTRACT" in evaluator.last_prompt
+    # owner was told, not bypassed
+    assert any("standing" in m.lower() for m in notifier.sent)

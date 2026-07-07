@@ -90,13 +90,16 @@ class Clock:
 def seed_goal(
     goals_dir, goal_id: str = "demo", *, cadence: str = "1d", backlog: list[str] | None = None,
     repo_url: str | None = "https://example.com/demo.git",
+    done_when: str = "all backlog items merged",
 ) -> None:
     """Write a minimal goal.yaml under goals_dir/<goal_id>/.
 
     ``repo_url`` defaults to a fake existing-repo URL so the investigating
     phase takes the repo-research path (which most tests historically
     exercise). Pass ``repo_url=None`` to seed a from-scratch goal that
-    triggers the world-research path instead.
+    triggers the world-research path instead. Pass a standing-shaped
+    ``done_when`` ("this is a standing goal") to exercise the standing-goal
+    done-gate contract.
     """
     import yaml
 
@@ -112,7 +115,7 @@ def seed_goal(
                 "repo_url": repo_url,
                 "verify_cmd": "pytest -q",
                 "open_pr": True,
-                "done_when": "all backlog items merged",
+                "done_when": done_when,
                 "backlog": backlog or ["add a /health endpoint", "add request logging"],
             }
         )
