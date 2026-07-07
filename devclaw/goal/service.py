@@ -19,7 +19,7 @@ import sys
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from . import evaluator as goal_evaluator
 from . import merge as goal_merge
@@ -29,7 +29,7 @@ from . import research as goal_research
 from . import summary as goal_summary
 from .engine import InProcessEngine
 from .evaluator import ClaudeCaller
-from .models import GoalStatus
+from .models import Goal, GoalStatus
 from .notify import HttpNotifier, Notifier, NullNotifier
 from .store import GoalStore
 from .tick import EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
@@ -38,6 +38,9 @@ from ..state_store import StateStore
 from ..task_queue import TaskQueue
 from ..engine.workspace import prepare_workspace
 from .. import trend_detector as _trend_detector_mod
+
+if TYPE_CHECKING:
+    from ..project_registry import ProjectRegistry
 
 
 # Telemetry: opt-out via env. Default ON in production so heartbeats leave a
@@ -96,6 +99,7 @@ class GoalService:
         evaluator_caller: Optional[ClaudeCaller] = None,
         summary_caller: Optional[ClaudeCaller] = None,
         notifier: Optional[Notifier] = None,
+        project_registry: "Optional[ProjectRegistry]" = None,
     ) -> None:
         self._cfg = config or GoalConfig.from_env()
         self._goal_store = GoalStore(self._cfg.goals_dir)
@@ -105,6 +109,9 @@ class GoalService:
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
         self._summary_caller = summary_caller
+        #: used only to resolve per-project automerge overrides (see _merger).
+        #: None is fine — automerge just falls back to the global default.
+        self._project_registry = project_registry
         self._notifier: Notifier = notifier or (
             HttpNotifier(self._cfg.notify_url) if self._cfg.notify_url else NullNotifier()
         )
@@ -137,12 +144,23 @@ class GoalService:
             self._summary_caller = goal_summary.default_caller()
         return self._summary_caller
 
-    def _merger(self) -> "Optional[goal_merge.Merger]":
-        """The auto-merger for hands-off delivery (decision 2). None unless
-        DEVCLAW_GOAL_AUTOMERGE=1 — merging to the default branch is opt-in."""
-        if not goal_merge.AUTOMERGE_ENABLED:
+    def _merger(self, goal: "Optional[Goal]" = None) -> "Optional[goal_merge.Merger]":
+        """The auto-merger for hands-off delivery (decision 2) — resolved for
+        THIS goal's repo: its owning project's ``automerge`` override if one is
+        set, else the devclaw-wide ``DEVCLAW_GOAL_AUTOMERGE`` default. Merging
+        to the default branch is opt-in either way. ``goal=None`` (e.g. the
+        firming phase, which never merges) just falls back to the global
+        default since there's no workspace to look up a project by."""
+        workspace_dir = goal.workspace_dir if goal is not None else None
+        if not goal_merge.resolve_automerge(self._project_registry, workspace_dir):
             return None
         return goal_merge.default_merger()
+
+    def _merger_resolver(self) -> "Callable[[Goal], Optional[goal_merge.Merger]]":
+        """Bound for tick_all, which ticks every goal in one sweep and needs a
+        fresh per-goal automerge decision rather than one value for the whole
+        fleet (a project override for goal A must not leak onto goal B)."""
+        return self._merger
 
     def _remote_checker(self) -> "Optional[goal_remote_checks.RemoteChecker]":
         """Grounded remote-checks verification at the done-gate (the 2026-07-06
@@ -293,7 +311,7 @@ class GoalService:
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url="",
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(),
+            summary_caller=self._summary(), merger_resolver=self._merger_resolver(),
             tracer_factory=self._make_tracer,
             trend_detector=self._trend_detector(),
             remote_checker=self._remote_checker(),
@@ -301,13 +319,14 @@ class GoalService:
         return {gid: o.value for gid, o in outcomes.items()}
 
     async def tick_one(self, goal_id: str) -> str:
+        goal = self._goal_store.load_goal(goal_id)
         with _trace.tracer_scope(self._make_tracer(goal_id)):
             outcome = await tick_goal(
                 goal_id, store=self._goal_store, engine=self._engine,
                 planner_caller=self._planner(), evaluator_caller=self._evaluator(),
                 notifier=self._notifier, notify_url="",
                 eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-                summary_caller=self._summary(), merger=self._merger(),
+                summary_caller=self._summary(), merger=self._merger(goal),
                 trend_detector=self._trend_detector(),
                 remote_checker=self._remote_checker(),
             )
@@ -596,12 +615,13 @@ class GoalService:
         handler = handler_for("firming")
         if not isinstance(handler, FirmingHandler):
             raise RuntimeError("firming handler is not registered")
+        goal = self._goal_store.load_goal(goal_id)
         ctx = TickContext(
             store=self._goal_store, engine=self._engine,
             planner_caller=self._planner(), evaluator_caller=self._evaluator(),
             notifier=self._notifier, notify_url=self._cfg.notify_url,
             eval_every=self._cfg.eval_every, verify_done=self._cfg.verify_done,
-            summary_caller=self._summary(), merger=self._merger(),
+            summary_caller=self._summary(), merger=self._merger(goal),
             remote_checker=self._remote_checker(),
         )
         result = await handler.handle_answer(goal_id, answers, ctx=ctx)

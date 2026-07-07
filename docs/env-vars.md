@@ -82,7 +82,7 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 | `DEVCLAW_GOAL_NOTIFY_URL` | — | Notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough). |
 | `DEVCLAW_GOAL_INVESTIGATE` | `1` | Whether a new outcome goal investigates the repo before executing (one-shot discovery brief). |
 | `DEVCLAW_GOAL_AUTODEPLOY` | `1` | When a goal reaches `achieved`, auto-fire `deploy_project`. `0` disables. |
-| `DEVCLAW_GOAL_AUTOMERGE` | `0` | After a delivered PR's verify gate passes, auto-merge it with an owner ping. Off by default — best-effort + gated. |
+| `DEVCLAW_GOAL_AUTOMERGE` | `0` | Devclaw-wide DEFAULT for auto-merging a delivered PR once its verify gate passes (owner-pinged, best-effort). Off by default. A project registered via `register_project`/`update_project` can override this per repo (`automerge: on\|off`) — the project override always wins over this default when set; this env var only applies to projects with no override. There is deliberately no per-goal `automerge` field in `goal.yaml` — automerge is an ops/repo-scope decision, not something a goal's own objective carries. |
 | `DEVCLAW_GOAL_MERGE_STRATEGY` | `squash` | `gh pr merge --<strategy>`. Valid: `squash` / `merge` / `rebase`. |
 | `DEVCLAW_GOAL_PLAIN_SUMMARY` | `1` | One-line plain-prose summary per delivery for `deliveries.md` (one `claude` call per delivery). |
 | `DEVCLAW_NOTIFY_ALTITUDE` | `owner` | Floor for goal-layer notifications: `owner` (only real blockers / direction questions / completions) or `task` (also includes per-task chatter). |

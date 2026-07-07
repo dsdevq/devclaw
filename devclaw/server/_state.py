@@ -75,16 +75,17 @@ elif _engine == "claude_sdk":
 else:
     queue = TaskQueue(store)
 
-# The goal layer (folded-in goalclaw): durable, steerable, evaluated goals driven
-# across heartbeats, dispatching into the SAME queue in-process. Owns goals under
-# DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.
-goals = GoalService(queue, store)
-
 # The project registry (control plane): the single source of truth for "which
 # repos is devclaw working on, and what's the status of each". Thin — it links to
 # goals by id and joins their live status on read (project_rollup), never caching
-# phase. Shares the SQLite file with the state store.
+# phase. Shares the SQLite file with the state store. Constructed before the goal
+# layer because GoalService reads it to resolve per-project automerge overrides.
 registry = ProjectRegistry(DB_PATH)
+
+# The goal layer (folded-in goalclaw): durable, steerable, evaluated goals driven
+# across heartbeats, dispatching into the SAME queue in-process. Owns goals under
+# DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.
+goals = GoalService(queue, store, project_registry=registry)
 
 
 def _goal_get(goal_id: str) -> dict:

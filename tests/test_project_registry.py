@@ -210,6 +210,99 @@ def test_failed_create_does_not_leak_a_write_lock(tmp_path):
     assert b.get("other") is not None
 
 
+# ---- automerge: per-project override -----------------------------------
+#
+# Deliberately NOT a goal.yaml field (see devclaw.goal.merge) — the only place
+# auto-merge is configured is here: a project's own override, or nothing
+# (meaning "inherit the devclaw-wide default").
+
+
+def test_automerge_defaults_to_none_on_create(reg):
+    p = reg.create(id="todo", name="Todo")
+    assert p.automerge is None
+    assert reg.get("todo").automerge is None
+
+
+def test_automerge_set_on_create(reg):
+    on = reg.create(id="on", name="On", automerge=True)
+    off = reg.create(id="off", name="Off", automerge=False)
+    assert reg.get("on").automerge is True
+    assert reg.get("off").automerge is False
+
+
+def test_update_omitting_automerge_leaves_it_untouched(reg):
+    reg.create(id="todo", name="Todo", automerge=True)
+    reg.update("todo", notes="unrelated change")
+    assert reg.get("todo").automerge is True
+
+
+def test_update_can_set_automerge_on_or_off(reg):
+    reg.create(id="todo", name="Todo")
+    reg.update("todo", automerge=True)
+    assert reg.get("todo").automerge is True
+    reg.update("todo", automerge=False)
+    assert reg.get("todo").automerge is False
+
+
+def test_update_explicit_none_clears_automerge_override(reg):
+    """Passing automerge=None explicitly is different from omitting it — it
+    clears a prior pin back to 'inherit the global default'."""
+    reg.create(id="todo", name="Todo", automerge=True)
+    reg.update("todo", automerge=None)
+    assert reg.get("todo").automerge is None
+
+
+def test_automerge_persists_across_reopen(tmp_path):
+    db = str(tmp_path / "devclaw.db")
+    ProjectRegistry(db).create(id="todo", name="Todo", automerge=True)
+    reopened = ProjectRegistry(db)
+    assert reopened.get("todo").automerge is True
+
+
+def test_automerge_column_migrates_onto_a_pre_existing_table(tmp_path):
+    """A projects table created before the automerge column existed must gain
+    it on the next open, not error and not lose existing rows."""
+    import sqlite3
+
+    db = str(tmp_path / "devclaw.db")
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_url TEXT,
+          workspace_dir TEXT, preview_url TEXT, status TEXT NOT NULL DEFAULT 'active',
+          goal_ids TEXT, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        """
+    )
+    con.execute(
+        "INSERT INTO projects (id, name, status, created_at, updated_at) "
+        "VALUES ('legacy', 'Legacy', 'active', 0, 0)"
+    )
+    con.commit()
+    con.close()
+
+    reg = ProjectRegistry(db)  # must not raise
+    p = reg.get("legacy")
+    assert p is not None and p.automerge is None  # pre-existing row reads as "inherit"
+    reg.update("legacy", automerge=True)  # column is genuinely writable now
+    assert reg.get("legacy").automerge is True
+
+
+def test_find_by_workspace_dir(reg):
+    reg.create(id="todo", name="Todo", workspace_dir="/src/todo/", automerge=True)
+    found = reg.find_by_workspace_dir("/src//todo")  # normalized match
+    assert found is not None and found.id == "todo"
+    assert reg.find_by_workspace_dir("/src/nope") is None
+    assert reg.find_by_workspace_dir(None) is None
+    assert reg.find_by_workspace_dir("") is None
+
+
+def test_automerge_in_to_dict(reg):
+    p = reg.create(id="todo", name="Todo", automerge=False)
+    assert p.to_dict()["automerge"] is False
+
+
 def test_contended_writer_waits_instead_of_failing(tmp_path):
     """Two connections to one db file (the CLI/server split). One holds the write
     lock; the other's write must WAIT for it (busy_timeout) and then succeed —

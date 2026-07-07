@@ -85,6 +85,9 @@ def _print_show(p: dict) -> None:
     print(f"  repo:      {p.get('repoUrl') or '—'}")
     print(f"  workspace: {p.get('workspaceDir') or '—'}")
     print(f"  preview:   {p.get('previewUrl') or '—'}")
+    automerge = p.get("automerge")
+    automerge_str = "inherit (devclaw default)" if automerge is None else ("on" if automerge else "off")
+    print(f"  automerge: {automerge_str}")
     if p.get("notes"):
         print(f"  notes:     {p['notes']}")
     goals = p.get("goals", [])
@@ -135,6 +138,7 @@ def _cmd_register(reg: ProjectRegistry, all_goals, args) -> int:
             id=args.id, name=args.name, repo_url=args.repo_url,
             workspace_dir=args.workspace_dir, preview_url=args.preview_url,
             notes=args.notes or "",
+            automerge=(None if args.automerge is None else args.automerge == "on"),
         )
     except ProjectExists:
         print(f"project already exists: {args.id}", file=sys.stderr)
@@ -144,11 +148,15 @@ def _cmd_register(reg: ProjectRegistry, all_goals, args) -> int:
 
 
 def _cmd_update(reg: ProjectRegistry, all_goals, args) -> int:
+    automerge_kwargs = {}
+    if args.automerge is not None:
+        automerge_kwargs["automerge"] = {"on": True, "off": False, "inherit": None}[args.automerge]
     try:
         reg.update(
             args.id, name=args.name, repo_url=args.repo_url,
             workspace_dir=args.workspace_dir, preview_url=args.preview_url,
             status=args.status, notes=args.notes,
+            **automerge_kwargs,
         )
     except KeyError:
         print(f"unknown project: {args.id}", file=sys.stderr)
@@ -344,6 +352,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--workspace-dir")
     p_reg.add_argument("--preview-url")
     p_reg.add_argument("--notes")
+    p_reg.add_argument("--automerge", choices=["on", "off"],
+                        help="pin auto-merge for this project; omit to inherit "
+                             "the devclaw-wide DEVCLAW_GOAL_AUTOMERGE default")
     p_reg.set_defaults(func=_cmd_register)
 
     p_upd = psub.add_parser("update", help="update project fields")
@@ -354,6 +365,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_upd.add_argument("--preview-url")
     p_upd.add_argument("--status", choices=["active", "paused", "archived"])
     p_upd.add_argument("--notes")
+    p_upd.add_argument("--automerge", choices=["on", "off", "inherit"],
+                        help="'on'/'off' pins auto-merge for this project; "
+                             "'inherit' clears a prior override back to the "
+                             "devclaw-wide default; omit to leave unchanged")
     p_upd.set_defaults(func=_cmd_update)
 
     p_link = psub.add_parser("link", help="link/unlink a goal to a project")
