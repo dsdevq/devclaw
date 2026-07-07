@@ -1025,6 +1025,13 @@ async def _dispatch_action(
     # 5-item backlog is normal); take the MAX so a checklist goal doesn't
     # block every backlog-size dispatches. Live-found 2026-06-26 when
     # finance-sentry-mcp-v3 hit a cap=7 with 22 ready items left.
+    #
+    # The counter is progress-aware: a dispatch that settles as a verified
+    # delivery (done + gate passed) is refunded on settle (see
+    # _resolve_polling_action), so the cap measures OUTSTANDING unproductive
+    # dispatches, not lifetime throughput. A healthy auto-merging mission goal
+    # never trips it; a spinning planner still does. Live-found 2026-07-07
+    # when closeloop-mission-v2 blocked at cap 6 despite shipping real work.
     base_cap = len(goal.backlog) + 2
     checklist = store.read_checklist(goal_id)
     cap = max(base_cap, len(checklist.items) + 2) if checklist else base_cap
@@ -1215,9 +1222,16 @@ async def _resolve_polling_action(
     finished_detail = f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}\n{poll.detail}"
 
     delivered = 1 if poll.status == "done" else 0
+    # A verified delivery (done + gate passed) hands back its dispatch-cap
+    # budget: the cap exists to stop a planner that spins without producing,
+    # not to ration verified throughput. Failures, gate-failed work, and
+    # gateless settles (reviews, no-gate tasks) still accumulate — a loop of
+    # those is exactly the runaway the cap must catch.
+    productive = 1 if (poll.status == "done" and poll.gate_passed) else 0
     new_status = replace(
         status, in_flight=None, phase="idle",
         deliveries_since_eval=status.deliveries_since_eval + delivered,
+        actions_dispatched=max(0, status.actions_dispatched - productive),
         # a delivery is forward progress → reset the no-progress watchdog.
         last_progress_at=(ctx.store.now_iso() if delivered else status.last_progress_at),
         no_progress_notified=(False if delivered else status.no_progress_notified),
