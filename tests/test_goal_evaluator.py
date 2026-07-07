@@ -512,6 +512,87 @@ async def test_evaluate_threads_stub_acceptable_through_to_validate():
     assert "cashflow" in r.corrections[0].lower()
 
 
+# ---- execution-evidence enforcement for test clauses (2026-07-06 benchmark) -
+#
+# Backstory: closeloop-bench-2026-07-05's verify.sh asserted the Playwright
+# spec files EXISTED (grep-shaped check()) but never executed them, and the
+# done-gate stamped the test clause green. Presence is not coverage: a
+# test-shaped clause needs run evidence (output, counts, gate log) to satisfy.
+
+
+def _achieved_with(clauses: list[dict]) -> dict:
+    return {"verdict": "achieved", "rationale": "all met", "clauses": clauses}
+
+
+def test_test_clause_with_existence_only_evidence_is_downgraded():
+    r = validate(
+        _achieved_with([
+            {
+                "clause": "the walking skeleton is covered by a Playwright E2E test",
+                "satisfied": True,
+                "evidence": "tests/e2e/walking-skeleton.spec.ts exists; verify.sh asserts the file is present",
+            },
+        ]),
+        at_done_gate=True,
+    )
+    assert r.verdict == "off_track"
+    assert not r.clauses[0].satisfied
+    assert "existence-only" in r.clauses[0].evidence
+    assert len(r.corrections) == 1
+
+
+def test_test_clause_with_run_evidence_stays_achieved():
+    r = validate(
+        _achieved_with([
+            {
+                "clause": "/health is tested",
+                "satisfied": True,
+                "evidence": "HealthTests.cs:8 Health_Returns200 — suite passes in the verify gate (14 tests)",
+            },
+        ]),
+        at_done_gate=True,
+    )
+    assert r.verdict == "achieved"
+    assert r.clauses[0].satisfied
+
+
+def test_non_test_clause_with_exists_evidence_is_untouched():
+    # "exists" is fine evidence for a non-test clause (docs, infra files).
+    r = validate(
+        _achieved_with([
+            {
+                "clause": "a multi-stage production Dockerfile is present at the repo root",
+                "satisfied": True,
+                "evidence": "Dockerfile exists at repo root with two FROM stages and a production CMD",
+            },
+        ]),
+        at_done_gate=True,
+    )
+    assert r.verdict == "achieved"
+    assert r.clauses[0].satisfied
+
+
+def test_existence_only_net_applies_only_at_done_gate():
+    r = validate(
+        {"verdict": "on_track", "rationale": "progress", "clauses": [
+            {
+                "clause": "the flow is tested end to end",
+                "satisfied": True,
+                "evidence": "spec files exist under tests/e2e/",
+            },
+        ]},
+    )
+    # pre-done-gate: recorded as-is; the net only guards the CLOSE.
+    assert r.verdict == "on_track"
+    assert r.clauses[0].satisfied
+
+
+def test_evaluator_prompt_names_the_existence_is_not_execution_rule():
+    prompt = build_prompt(_goal(), GoalStatus(), "log", "deliveries", at_done_gate=True)
+    assert "EXECUTED" in prompt
+    assert "presence, not coverage" in prompt
+
+
 # ---- standing-goal contract (the 2026-07-06 benchmark safety net) ----------
 #
 # Backstory: closeloop-bench-2026-07-05's done_when read "Not applicable as a
