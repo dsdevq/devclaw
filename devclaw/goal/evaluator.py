@@ -31,7 +31,7 @@ import os
 import re
 from typing import Awaitable, Callable, Optional
 
-from .models import ClauseVerdict, EvalResult, Goal, GoalStatus
+from .models import ClauseVerdict, EvalResult, Goal, GoalStatus, is_standing
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -146,6 +146,21 @@ def build_prompt(
             "PRs that each verdicted ``achieved`` on the functional axis) is "
             "exactly what this second axis exists to catch."
         )
+        if is_standing(goal.done_when):
+            parts.append(
+                "\n## STANDING-GOAL CONTRACT\n"
+                "This goal's done_when disclaims boundedness (it declares "
+                "itself a STANDING goal with no terminal completion state). "
+                "You must NOT return ``achieved`` — a standing goal is closed "
+                "by the owner, never by this gate. If any clause or the "
+                "structural axis fails, return ``off_track`` with corrections "
+                "as usual. If everything currently graded passes, return "
+                "``needs_human`` with a question telling the owner the work "
+                "in flight looks complete and asking them to either close the "
+                "goal themselves or steer the next direction. (The mechanical "
+                "validator converts a stray ``achieved`` to ``needs_human`` — "
+                "don't invite it.)"
+            )
     parts += [
         "\n## What has actually shipped (grounded deliveries)",
         deliveries or "(nothing delivered yet)",
@@ -211,6 +226,37 @@ _STUB_MARKERS = ("not_yet_available", "notyetavailable", "legit_stub")
 def _looks_like_stub(text: str) -> bool:
     s = text.lower()
     return any(m in s for m in _STUB_MARKERS)
+
+
+#: The closeloop-bench-2026-07-05 failure mode this net closes: the goal's
+#: verify.sh asserted that the Playwright spec files EXISTED (a grep-shaped
+#: check()), never executed them, and the done-gate stamped the test clause
+#: green. Existence is not execution: a test-shaped clause whose evidence
+#: speaks of file presence with no run marker is flipped to unsatisfied.
+_TEST_CLAUSE_RE = re.compile(
+    r"\btest(?:s|ed|ing)?\b|\bcoverage\b|\be2e\b", re.IGNORECASE,
+)
+_EXISTENCE_EVIDENCE_RE = re.compile(
+    r"\bexists?\b|\bexistence\b|\bpresent\b|\bchecked[- ]in\b",
+    re.IGNORECASE,
+)
+_EXECUTION_EVIDENCE_RE = re.compile(
+    r"\bpass(?:es|ed|ing)?\b|\bran\b|\bruns?\b|\bexecut(?:ed|es|ion)\b"
+    r"|\bexit (?:code )?0\b|\bgreen\b|\b\d+\s+(?:tests?|specs?|cases?)\b",
+    re.IGNORECASE,
+)
+
+
+def _test_clause_existence_only(clause: ClauseVerdict) -> bool:
+    """True when a test-shaped clause is being satisfied by evidence that
+    proves the test files are PRESENT but never says they EXECUTED. Deliberately
+    conservative: both conditions must hold (existence wording present AND no
+    execution wording), so "HealthTests.cs:8 Health_Returns200 passes" and
+    "suite green in verify.sh" are untouched."""
+    if not _TEST_CLAUSE_RE.search(clause.clause):
+        return False
+    ev = clause.evidence
+    return bool(_EXISTENCE_EVIDENCE_RE.search(ev)) and not _EXECUTION_EVIDENCE_RE.search(ev)
 
 
 _VERB_PREFIXES = ("get", "list", "fetch", "read", "describe", "show")
@@ -282,14 +328,26 @@ def _parse_structural(parsed: dict) -> tuple[str, list[str]]:
     return health, concerns
 
 
-def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: list[str] | None = None) -> EvalResult:
+def validate(
+    parsed: object,
+    *,
+    at_done_gate: bool = False,
+    stub_acceptable: list[str] | None = None,
+    standing: bool = False,
+) -> EvalResult:
     """Validate + normalize the model's evaluation. When ``at_done_gate=True``,
     ``achieved`` requires (a) every clause in ``clauses`` to be ``satisfied=True``
     with non-empty ``evidence`` AND (b) ``structural_health`` in {``clean``,
     ``concerns``-with-no-substantive-items}. Otherwise the verdict is downgraded
     to ``off_track`` — the safety net that closes both the 2026-06-25 "stub
     everything" failure mode (axis A) AND the closeloop-D1/D2/D6 monolith
-    creep (axis B, per plan.md §Production-ready C3)."""
+    creep (axis B, per plan.md §Production-ready C3).
+
+    ``standing=True`` (the goal's done_when disclaims boundedness) adds a third
+    mechanical net at the done-gate: a fully-passing ``achieved`` becomes
+    ``needs_human`` — the owner closes standing goals, never the gate. The
+    closeloop-bench-2026-07-05 contract said "standing goal — not a bounded
+    criterion" and still terminally closed ``achieved``; this is the fix."""
     if not isinstance(parsed, dict):
         raise GoalEvalError("Eval must be a JSON object")
     verdict = parsed.get("verdict")
@@ -356,6 +414,21 @@ def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: lis
                         ),
                     ))
                     continue
+            # Execution-evidence enforcement for test clauses: presence of the
+            # spec files is not coverage. The flip message names what WOULD
+            # satisfy the clause so the correction steers the next action.
+            if c.satisfied and c.evidence and _test_clause_existence_only(c):
+                normalized.append(ClauseVerdict(
+                    clause=c.clause, satisfied=False,
+                    evidence=(
+                        f"existence-only test evidence — ({c.evidence!s}) proves "
+                        f"the test files are PRESENT, not that they EXECUTED and "
+                        f"passed. A test clause needs run evidence: the verify "
+                        f"gate's run output, a test count, or the passing suite "
+                        f"log. An existence grep does not satisfy a test clause."
+                    ),
+                ))
+                continue
             normalized.append(c)
         clauses = normalized
         unsatisfied = [c for c in clauses if not c.satisfied or not c.evidence]
@@ -408,6 +481,26 @@ def validate(parsed: object, *, at_done_gate: bool = False, stub_acceptable: lis
                 structural_health=structural_health,
                 structural_concerns=structural_concerns,
             )
+        # Standing-goal contract: both axes pass, but the owner declared this
+        # goal unbounded — the gate hands the close decision over instead of
+        # taking it. needs_human blocks the goal + notifies, which is exactly
+        # the shape "everything you asked for is in flight; close or re-aim"
+        # should have.
+        if standing:
+            return EvalResult(
+                verdict="needs_human",
+                rationale=rationale,
+                question=(
+                    "standing-goal contract: every currently-graded done_when "
+                    "axis passes, but this goal's done_when declares it "
+                    "STANDING — the done-gate does not terminally close it. "
+                    "Close it yourself (cancel_goal) if the mission is "
+                    "complete, or steer the next direction."
+                ),
+                clauses=clauses,
+                structural_health=structural_health,
+                structural_concerns=structural_concerns,
+            )
     return EvalResult(
         verdict=verdict, rationale=rationale, corrections=corrections,
         question=question, clauses=clauses,
@@ -440,7 +533,10 @@ async def evaluate(
         parsed = json.loads(extract_json(raw))
     except json.JSONDecodeError as exc:
         raise GoalEvalError(f"evaluator emitted invalid JSON: {exc}", raw) from exc
-    return validate(parsed, at_done_gate=at_done_gate, stub_acceptable=goal.stub_acceptable)
+    return validate(
+        parsed, at_done_gate=at_done_gate, stub_acceptable=goal.stub_acceptable,
+        standing=is_standing(goal.done_when),
+    )
 
 
 def default_caller() -> ClaudeCaller:

@@ -51,6 +51,12 @@ satisfy a clause:
   backend data").
 - Tests that only assert the stub-like shape (these prove the stub, not
   the requirement).
+- Test FILES that merely exist. A clause about tests / E2E / coverage is
+  satisfied only by evidence the suite EXECUTED and passed — run output,
+  a test count, the verify gate's log. A verify script that greps for the
+  spec file's existence proves presence, not coverage: **UNSATISFIED**.
+  (The mechanical post-check flips existence-only test evidence even if
+  you mark it satisfied — get it right in your own output.)
 - A merged PR or a passing gate on its own — the gate proves *behaviour
   doesn't break*, not *the requirement is met*.
 

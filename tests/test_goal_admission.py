@@ -329,3 +329,33 @@ def test_service_verify_goal_does_not_persist(svc):
     )
     # nothing got created
     assert not svc._goal_store.exists("ship the health endpoint")
+
+
+# ---- standing done_when (warn, not reject) ----------------------------------
+
+
+def test_standing_done_when_warns_but_admits():
+    # Standing goals (closeloop-mission shape) are legitimate — the owner just
+    # needs to know the done-gate will never terminally close one.
+    r = verify_goal(
+        objective="closeloop mirrors best-in-class CRMs",
+        workspace_dir="/ws",
+        done_when=(
+            "Not applicable as a bounded criterion — this is a standing goal. "
+            "Judge each delivery; fail any axis → off_track."
+        ),
+        backlog=["notifications engine"],
+    )
+    assert r.admitted
+    assert "standing_done_when" in _codes(r)
+    assert "standing_done_when" not in _reject_codes(r)
+
+
+def test_bounded_done_when_has_no_standing_warning():
+    r = verify_goal(
+        objective="ship /health", workspace_dir="/ws",
+        done_when="/health returns 200 and is covered by a passing test",
+        backlog=["add /health"],
+    )
+    assert r.admitted
+    assert "standing_done_when" not in _codes(r)
