@@ -66,7 +66,14 @@ async def _serve_http() -> None:
     import uvicorn
     from starlette.middleware import Middleware
 
-    app = mcp.http_app(path="/mcp", middleware=[Middleware(AuthMiddleware)])
+    # stateless_http=True: some MCP clients (e.g. ops-agent's thin httpx client)
+    # do a single one-shot tools/call POST with no initialize handshake, so
+    # they never learn a session id. Stateful mode (FastMCP's default) rejects
+    # those with "400 Missing session ID"; stateless mode treats every POST as
+    # self-contained, which matches how devclaw-mcp is actually called here.
+    app = mcp.http_app(
+        path="/mcp", middleware=[Middleware(AuthMiddleware)], stateless_http=True
+    )
     _start_loops()
     config = uvicorn.Config(app, host=HTTP_HOST, port=HTTP_PORT, log_level="warning")
     await uvicorn.Server(config).serve()
