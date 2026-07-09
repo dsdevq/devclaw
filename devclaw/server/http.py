@@ -18,6 +18,7 @@ from starlette.responses import (
     HTMLResponse,
     JSONResponse,
     PlainTextResponse,
+    RedirectResponse,
     Response,
 )
 
@@ -164,6 +165,14 @@ def _serve_console_file(rel: str) -> Response:
     if not index.is_file():
         return PlainTextResponse("console index.html missing from bundle", status_code=500)
     return FileResponse(str(index), media_type="text/html")
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def root_redirect(_request: Request) -> Response:
+    """The human-facing surface is the console; a bare hostname visit should
+    land there, not on a 404 (live-found 2026-07-09: the operator's bookmark
+    pointed at `/`)."""
+    return RedirectResponse(url="/console", status_code=307)
 
 
 @mcp.custom_route("/console", methods=["GET"])
