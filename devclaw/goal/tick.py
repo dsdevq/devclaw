@@ -1104,12 +1104,13 @@ async def _dispatch_action(
     # block every backlog-size dispatches. Live-found 2026-06-26 when
     # finance-sentry-mcp-v3 hit a cap=7 with 22 ready items left.
     #
-    # The counter is progress-aware: a dispatch that settles as a verified
-    # delivery (done + gate passed) is refunded on settle (see
-    # _resolve_polling_action), so the cap measures OUTSTANDING unproductive
-    # dispatches, not lifetime throughput. A healthy auto-merging mission goal
-    # never trips it; a spinning planner still does. Live-found 2026-07-07
-    # when closeloop-mission-v2 blocked at cap 6 despite shipping real work.
+    # The counter is progress-aware: a dispatch that settles successfully
+    # (done, gate passed or gateless) is refunded on settle (see
+    # _resolve_polling_action), so the cap measures OUTSTANDING failed or
+    # gate-failed dispatches, not lifetime throughput. A healthy auto-merging
+    # mission goal — including its own verification reviews — never trips it;
+    # a planner looping on failures still does. Live-found 2026-07-07 (blocked
+    # on merged work) and again 2026-07-09 (blocked on on_track reviews).
     base_cap = len(goal.backlog) + 2
     checklist = store.read_checklist(goal_id)
     cap = max(base_cap, len(checklist.items) + 2) if checklist else base_cap
@@ -1302,12 +1303,16 @@ async def _resolve_polling_action(
         gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
     )
     delivered = 1 if poll.status == "done" else 0
-    # A verified delivery (done + gate passed) hands back its dispatch-cap
-    # budget: the cap exists to stop a planner that spins without producing,
-    # not to ration verified throughput. Failures, gate-failed work, and
-    # gateless settles (reviews, no-gate tasks) still accumulate — a loop of
-    # those is exactly the runaway the cap must catch.
-    productive = 1 if (poll.status == "done" and poll.gate_passed) else 0
+    # Any SUCCESSFUL settle hands back its dispatch-cap budget: the cap exists
+    # to stop a planner that spins without producing, not to ration healthy
+    # throughput. That includes gateless settles (reviews, programs) — a
+    # mission goal that grounds every delivery in a read-only verification
+    # review was structurally re-tripping the cap every ~6 cycles while every
+    # verdict was on_track (live-found 2026-07-09, closeloop-mission-v2, one
+    # night after the #172 refund shipped). Only failures and gate-FAILED work
+    # accumulate; churn on successful-but-aimless dispatches is the direction
+    # evaluator's and no-progress watchdog's job, not this counter's.
+    productive = 1 if (poll.status == "done" and poll.gate_passed is not False) else 0
     new_status = replace(
         status, in_flight=None, phase="idle",
         deliveries_since_eval=status.deliveries_since_eval + delivered,

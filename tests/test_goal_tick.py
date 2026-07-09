@@ -320,6 +320,30 @@ async def test_verified_delivery_refunds_dispatch_cap(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_gateless_successful_settle_refunds_dispatch_cap(tmp_path):
+    """A gateless settle that succeeds (review, program) also refunds — a
+    mission goal that verifies every delivery with a read-only review was
+    structurally re-tripping the cap on healthy on_track work (live-found
+    2026-07-09, closeloop-mission-v2). Only failures and gate-FAILED work
+    accumulate."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(
+            phase="in_flight", actions_dispatched=4,
+            in_flight=InFlight("devclaw", "review_repository", "t1", "task", "verify the delivery"),
+        ),
+    )
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="repo analysis",
+    ))
+
+    await _tick(store, "g", FakeClaude(SLEEP), FakeClaude(), engine, RecordingNotifier())
+
+    assert store.load_status("g").actions_dispatched == 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "poll",
     [
@@ -328,9 +352,6 @@ async def test_verified_delivery_refunds_dispatch_cap(tmp_path):
         # done but gate FAILED — unverified, no refund
         PollResult(terminal=True, status="done", detail="broke tests",
                    pr_url="https://github.com/o/r/pull/9", gate_passed=False),
-        # done with NO gate (review / gateless task) — a loop of these is the
-        # runaway the cap must still catch, no refund
-        PollResult(terminal=True, status="done", detail="repo analysis"),
     ],
 )
 async def test_unproductive_settle_keeps_dispatch_count(tmp_path, poll):
