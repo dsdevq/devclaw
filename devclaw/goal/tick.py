@@ -32,6 +32,7 @@ from . import decomposer as _decomposer
 from . import evaluator as _evaluator
 from ..delivery import deploy as _deploy
 from . import merge as _merge
+from . import reconcile as _reconcile
 from . import planner as _planner
 from . import remote_checks as _remote_checks
 from . import research as _research
@@ -1362,13 +1363,34 @@ async def _resolve_polling_action(
         else:
             ctx.store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
 
+    # Program settle: a finished program leaves a STACK of PRs the single-PR
+    # auto-merge above can't touch (no single gate verdict). Reconcile the
+    # stack mechanically — close superseded, merge green in order, leave red
+    # with a reason — so the goal stops burning follow-up dispatches
+    # shepherding its own PRs to main and stops leaving zombies behind
+    # (live-found 2026-07-09: five open superseded closeloop PRs). Same
+    # merger gate as auto-merge: no merger resolved → owner reviews by hand.
+    reconcile_summary: list[str] = []
+    if (
+        ctx.merger is not None
+        and ref.ref_kind == "program" and poll.status == "done" and poll.pr_url
+    ):
+        stack = [u.strip() for u in poll.pr_url.split(";") if u.strip()]
+        reconcile_summary = await _reconcile.reconcile_stack(
+            stack, workspace_dir=goal.workspace_dir, merger=ctx.merger,
+        )
+        for line in reconcile_summary:
+            ctx.store.append_log(goal_id, f"reconcile: {line}")
+
     # Built AFTER the auto-merge attempt so the planner is told the PR's real
     # state instead of inferring it. "open (unmerged — owner review pending)"
     # is the closeloop-bench 2026-07-05 fix: the planner's done-proposal prose
     # claimed "PR merged (gate passed)" for a PR nothing had merged, because
     # the detail string never said otherwise.
     pr_state = ""
-    if poll.pr_url:
+    if reconcile_summary:
+        pr_state = " pr_stack reconciled:\n" + "\n".join(f"  - {line}" for line in reconcile_summary)
+    elif poll.pr_url:
         pr_state = (
             " pr_state=merged" if merged_now
             else " pr_state=open (unmerged — owner review pending)"
