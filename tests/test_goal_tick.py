@@ -752,6 +752,70 @@ async def test_merge_fires_on_a_passed_merger_even_with_global_flag_off(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_program_settle_reconciles_pr_stack(tmp_path, monkeypatch):
+    """A finished program leaves a STACK of PRs no single gate verdict covers
+    (gate_passed=None), so the single-PR auto-merge can't touch them — the
+    goal used to burn follow-up dispatches shepherding its own PRs and left
+    zombies behind (2026-07-09: five open superseded closeloop PRs). The
+    settle hook must reconcile the stack in order and feed the REAL per-PR
+    outcome to the planner instead of 'unmerged — owner review pending'."""
+    calls = {}
+
+    async def fake_reconcile(stack, *, workspace_dir, merger):
+        calls["stack"] = stack
+        return [f"{u}: merged" for u in stack]
+
+    monkeypatch.setattr("devclaw.goal.reconcile.reconcile_stack", fake_reconcile)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight("devclaw", "start_program", "p1", "program", "ship CI/CD"),
+    ))
+    planner, evaluator = FakeClaude(SLEEP), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="program done",
+        pr_url="https://github.com/o/r/pull/66; https://github.com/o/r/pull/67",
+        gate_passed=None,
+    ))
+
+    await _tick(store, "g", planner, evaluator, engine, RecordingNotifier(), merger=RecordingMerger())
+
+    assert calls["stack"] == [
+        "https://github.com/o/r/pull/66", "https://github.com/o/r/pull/67",
+    ]
+    assert "pr_stack reconciled" in planner.last_prompt
+    log = (tmp_path / "g" / "log.md").read_text()
+    assert "reconcile: https://github.com/o/r/pull/66: merged" in log
+
+
+@pytest.mark.asyncio
+async def test_program_settle_without_merger_leaves_stack_alone(tmp_path, monkeypatch):
+    """Automerge off (no merger resolved) → the reconcile step must not run:
+    the owner reviews program PRs by hand, same contract as single-task
+    auto-merge."""
+    async def boom(stack, *, workspace_dir, merger):  # pragma: no cover - must not run
+        raise AssertionError("reconcile must not run without a merger")
+
+    monkeypatch.setattr("devclaw.goal.reconcile.reconcile_stack", boom)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight("devclaw", "start_program", "p1", "program", "ship CI/CD"),
+    ))
+    planner = FakeClaude(SLEEP)
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="program done",
+        pr_url="https://github.com/o/r/pull/66", gate_passed=None,
+    ))
+
+    await _tick(store, "g", planner, FakeClaude(), engine, RecordingNotifier(), merger=None)
+
+    assert "pr_state=open (unmerged — owner review pending)" in planner.last_prompt
+
+
+@pytest.mark.asyncio
 async def test_checklist_mode_dispatch_is_not_auto_merged(tmp_path, monkeypatch):
     """Pillar 2 invariant: when the settled action carries checklist
     addresses, its PR is the SHARED goal-branch PR every item keeps pushing
