@@ -712,7 +712,7 @@ async def _resolve_done_gate(
             store.append_log(
                 goal_id, f"done-gate remote checks ({branch}): {rc.state} — {rc.detail[:200]}",
             )
-            if rc.blocks_done:
+            if rc.blocks_done(_remote_checks.CI_GATE_MODE):
                 correction = {
                     "failing": (
                         f"the target repo's REAL CI for {branch} is failing "
@@ -725,6 +725,12 @@ async def _resolve_done_gate(
                         f"runs for {branch}'s head commit ({rc.detail}). Find "
                         f"out why Actions never ran (triggers, permissions, "
                         f"billing) and get a green run before re-proposing done."
+                    ),
+                    "infra_broken": (
+                        f"every CI run for {branch} died at startup "
+                        f"({rc.detail}) — Actions never executed a step "
+                        f"(permissions/billing). Fix the repo's CI "
+                        f"infrastructure, then re-propose done."
                     ),
                     "pending": (
                         f"remote checks for {branch} are still running "
@@ -739,6 +745,17 @@ async def _resolve_done_gate(
                         f"contradicts the close: remote checks are {rc.state}."
                     ),
                     corrections=[f"[remote-checks] {correction}"],
+                )
+            elif rc.state in ("infra_broken", "none"):
+                # Flexible ci-gate: broken CI infrastructure must not wedge a
+                # verified goal, but the close must never masquerade as
+                # CI-green — annotate the verdict the owner will read.
+                ev = replace(
+                    ev, rationale=(
+                        f"{ev.rationale} [ci-gate flexible: remote CI is "
+                        f"{rc.state} ({rc.detail[:120]}) — close honored on the "
+                        f"internal verify gate only]"
+                    ),
                 )
     now = store.now_iso()
     base = replace(

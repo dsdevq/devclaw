@@ -1437,9 +1437,11 @@ async def test_failing_remote_checks_block_the_close(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_never_ran_ci_blocks_the_close(tmp_path):
+async def test_never_ran_ci_blocks_the_close_under_strict_gate(tmp_path, monkeypatch):
+    from devclaw.goal import remote_checks as _rc
     from devclaw.goal.remote_checks import RemoteChecksResult
 
+    monkeypatch.setattr(_rc, "CI_GATE_MODE", "strict")
     store = _store(tmp_path, Clock())
     _verifying_checklist_goal(store, tmp_path)
     checker = FakeRemoteChecker(RemoteChecksResult("none", "workflows exist but zero runs"))
@@ -1453,6 +1455,29 @@ async def test_never_ran_ci_blocks_the_close(tmp_path):
     assert store.load_status("g").phase != "done"
     steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
     assert "ZERO" in steering or "zero" in steering
+
+
+@pytest.mark.asyncio
+async def test_broken_ci_infra_closes_with_annotation_under_flexible_gate(tmp_path):
+    # Default (flexible) ci-gate: startup_failure-only CI is infrastructure
+    # trouble, not code trouble — the verified close is honored, but the
+    # verdict the owner reads says loudly that CI never executed.
+    from devclaw.goal.remote_checks import RemoteChecksResult
+
+    store = _store(tmp_path, Clock())
+    _verifying_checklist_goal(store, tmp_path)
+    checker = FakeRemoteChecker(
+        RemoteChecksResult("infra_broken", "5 of 5 died at startup — CI infrastructure never executed")
+    )
+    planner, evaluator = FakeClaude(ACT), FakeClaude(_ACHIEVED_EVAL)
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="review ok"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, remote_checker=checker)
+
+    assert out is Outcome.DONE
+    assert store.load_status("g").phase == "done"
+    assert "internal verify gate only" in store.load_status("g").last_eval_note
 
 
 @pytest.mark.asyncio

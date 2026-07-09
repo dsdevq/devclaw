@@ -18,15 +18,27 @@ fail-closed on *evidence* of a problem):
 - ``passing``      → close as normal.
 - ``failing``      → block the close; the corrections steer a fix.
 - ``pending``      → block the close; re-propose once the runs settle.
+- ``infra_broken`` → every bad run is a ``startup_failure`` — CI infrastructure
+                     never executed a single step (billing lock on a private
+                     repo, disabled Actions), so the runs say nothing about the
+                     code. Blocks only under ``strict`` ci-gate; under
+                     ``flexible`` (the default) the close is honored on the
+                     internal verify gate alone, loudly annotated.
 - ``none``         → workflows exist but produced zero runs/checks for this
                      commit — the benchmark's "CI never ran and nobody noticed"
-                     case. Blocks the close.
+                     case. Same infra-shaped signature: blocks only under
+                     ``strict``.
 - ``no_workflows`` → the repo has no ``.github/workflows`` — nothing to check;
                      does not block (authoring CI is the checklist's job, per
                      plan.md §Production-ready C5, not the gate's).
 - ``unknown``      → gh/network error or a non-GitHub remote — logged loudly,
                      does not block (an infra flake must not wedge a verified
                      goal; the log line keeps it observable).
+
+``DEVCLAW_GOAL_CI_GATE`` selects the stance: ``flexible`` (default — broken CI
+infrastructure degrades to the internal verify gate instead of wedging the
+goal) or ``strict`` (any non-green remote state blocks, the pre-2026-07-09
+behavior). Test *failures* always block in both modes.
 
 The gh calls live here (not in goal_tick) so the tick stays a pure,
 subprocess-free unit under test; goal_service binds the real checker, tests
@@ -47,10 +59,18 @@ RemoteChecker = Callable[[str, str], Awaitable["RemoteChecksResult"]]
 
 REMOTE_CHECKS_ENABLED = os.environ.get("DEVCLAW_GOAL_REMOTE_CHECKS", "1") not in ("0", "false", "")
 
+#: "strict" → infra-broken CI (startup_failure-only / zero runs) blocks the
+#: done-gate; anything else → "flexible" (the default), where only real test
+#: failures and pending runs block.
+CI_GATE_MODE = "strict" if os.environ.get("DEVCLAW_GOAL_CI_GATE", "").strip().lower() == "strict" else "flexible"
+
 #: conclusions that contradict "this work is done". ``cancelled`` counts: a
 #: run that never finished proved nothing, and we only query THIS commit's
-#: runs so stale cancels don't bleed in.
-_BAD_CONCLUSIONS = {"failure", "startup_failure", "timed_out", "action_required", "cancelled"}
+#: runs so stale cancels don't bleed in. ``startup_failure`` is kept separate:
+#: it means CI infrastructure never executed (billing lock, disabled Actions),
+#: which says nothing about the code — see ``infra_broken`` above.
+_BAD_CONCLUSIONS = {"failure", "timed_out", "action_required", "cancelled"}
+_INFRA_CONCLUSIONS = {"startup_failure"}
 _PENDING_STATUSES = {"queued", "in_progress", "waiting", "pending", "requested"}
 
 _OWNER_REPO_RE = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
@@ -60,12 +80,18 @@ _OWNER_REPO_RE = re.compile(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
 class RemoteChecksResult:
     """The combined state of a branch head's real checks."""
 
-    state: str  # passing | failing | pending | none | no_workflows | unknown
+    state: str  # passing | failing | pending | infra_broken | none | no_workflows | unknown
     detail: str = ""
 
-    @property
-    def blocks_done(self) -> bool:
-        return self.state in ("failing", "pending", "none")
+    def blocks_done(self, mode: str = "flexible") -> bool:
+        """Does this state contradict an ``achieved`` close under ``mode``?
+        Real failures and pending runs always block; the infra-shaped states
+        (``infra_broken``, ``none``) block only under ``strict``."""
+        if self.state in ("failing", "pending"):
+            return True
+        if self.state in ("infra_broken", "none"):
+            return mode == "strict"
+        return False
 
 
 def parse_owner_repo(repo_url: str) -> Optional[str]:
@@ -114,10 +140,17 @@ def combine_states(
         conclusions[conclusion] = conclusions.get(conclusion, 0) + 1
     summary = ", ".join(f"{n}× {c or '(none)'}" for c, n in sorted(conclusions.items())) or "no settled runs"
     bad = sum(n for c, n in conclusions.items() if c in _BAD_CONCLUSIONS)
+    infra = sum(n for c, n in conclusions.items() if c in _INFRA_CONCLUSIONS)
     if bad:
         return RemoteChecksResult("failing", f"{bad} failed of {len(items)} ({summary})")
     if pending:
         return RemoteChecksResult("pending", f"{pending} of {len(items)} still running ({summary})")
+    if infra:
+        return RemoteChecksResult(
+            "infra_broken",
+            f"{infra} of {len(items)} died at startup — CI infrastructure never "
+            f"executed (Actions permissions/billing on the repo) ({summary})",
+        )
     return RemoteChecksResult("passing", f"{len(items)} checks settled ({summary})")
 
 
