@@ -2,7 +2,9 @@
 
 > **DevClaw is the chef. The waiter — an OpenClaw agent — takes orders; devclaw cooks.**
 
-DevClaw owns the **craft of software development as a service**: durable goals, planning, decomposition, sandbox execution (via OpenHands), pre-PR review, gate verification, durable Tailscale deploys, and grounded direction evaluation. It sits behind MCP and is called by an **OpenClaw waiter agent** that translates Denys's chat into structured tool calls — devclaw doesn't talk to the user, it cooks.
+DevClaw is a **software-development agentic loop**: instead of prompting an agent task by task, you hand it a ticket or a durable goal with verifiable completion criteria, and a self-executing loop carries it — plan → sandboxed execution → verification gate → evaluate → iterate — with hard brakes (retry caps, a no-progress watchdog, `stalled`/`needs_human` verdicts) so it never optimizes into the void. The prompt is a component inside the loop, not the point of control.
+
+Concretely, DevClaw owns the **craft of software development as a service**: durable goals, planning, decomposition, sandbox execution (via OpenHands), pre-PR review, gate verification, durable Tailscale deploys, and grounded direction evaluation. It sits behind MCP and is called by an **OpenClaw waiter agent** that translates Denys's chat into structured tool calls — devclaw doesn't talk to the user, it cooks.
 
 Cognition is always `claude` over a Pro/Max OAuth session — **no `ANTHROPIC_API_KEY`, no metered billing** for autonomous runs.
 
