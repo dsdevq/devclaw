@@ -66,11 +66,16 @@ async def _clone_url(slug: str) -> str | None:
 async def create_repo(
     name: str,
     *,
-    private: bool = True,
+    private: bool = False,
     description: str = "",
     owner: str | None = None,
 ) -> dict:
     """Create a GitHub repo and return ``{created, existed, repo, clone_url}``.
+
+    Public by default: on a billing-locked account, Actions on private repos
+    never start (every run is ``startup_failure``), so a devclaw-managed repo
+    is only CI-verifiable when public. Pass ``private=True`` explicitly for
+    anything sensitive and accept that its CI may be dead.
 
     Idempotent: if the repo already exists it is returned (``existed=True``)
     rather than erroring, so re-running a goal setup is safe. Raises
