@@ -40,39 +40,60 @@ def _run(status: str = "completed", conclusion: str = "success") -> dict:
     return {"status": status, "conclusion": conclusion}
 
 
-def test_benchmark_signature_startup_failures_with_empty_checkruns_is_failing():
+def test_benchmark_signature_startup_failures_is_infra_broken():
     # closeloop-bench-2026-07-05: `gh pr checks` said "no checks reported"
     # (empty check-runs) while 32 Actions runs were all startup_failure.
+    # 2026-07-09 refinement: that signature means CI *infrastructure* never
+    # executed (billing lock on a private repo) — it says nothing about the
+    # code, so it only blocks under the strict ci-gate.
     runs = [_run(conclusion="startup_failure") for _ in range(32)]
     r = combine_states(runs, [], workflows_present=True)
-    assert r.state == "failing"
-    assert r.blocks_done
+    assert r.state == "infra_broken"
+    assert r.blocks_done("strict")
+    assert not r.blocks_done("flexible")
     assert "startup_failure" in r.detail
 
 
-def test_zero_runs_with_workflows_present_is_none_and_blocks():
+def test_startup_failure_mixed_with_real_failure_is_failing():
+    # A real test failure alongside startup noise is still a failure — the
+    # infra classification only applies when nothing else contradicts done.
+    runs = [_run(conclusion="startup_failure"), _run(conclusion="failure")]
+    r = combine_states(runs, [], workflows_present=True)
+    assert r.state == "failing"
+    assert r.blocks_done("flexible")
+
+
+def test_startup_failure_with_pending_run_is_pending():
+    runs = [_run(conclusion="startup_failure"), _run(status="in_progress", conclusion="")]
+    r = combine_states(runs, [], workflows_present=True)
+    assert r.state == "pending"
+    assert r.blocks_done("flexible")
+
+
+def test_zero_runs_with_workflows_present_is_none_and_blocks_only_strict():
     r = combine_states([], [], workflows_present=True)
     assert r.state == "none"
-    assert r.blocks_done
+    assert r.blocks_done("strict")
+    assert not r.blocks_done("flexible")
     assert "never ran" in r.detail
 
 
 def test_zero_runs_without_workflows_does_not_block():
     r = combine_states([], [], workflows_present=False)
     assert r.state == "no_workflows"
-    assert not r.blocks_done
+    assert not r.blocks_done("strict")
 
 
 def test_pending_run_blocks_as_pending():
     r = combine_states([_run(), _run(status="in_progress", conclusion="")], [], workflows_present=True)
     assert r.state == "pending"
-    assert r.blocks_done
+    assert r.blocks_done("flexible")
 
 
 def test_all_success_is_passing():
     r = combine_states([_run(), _run()], [_run()], workflows_present=True)
     assert r.state == "passing"
-    assert not r.blocks_done
+    assert not r.blocks_done("strict")
 
 
 def test_skipped_and_neutral_do_not_fail_the_verdict():
@@ -97,7 +118,7 @@ def test_cancelled_counts_as_failing():
 def test_both_queries_failed_is_unknown_and_fails_open():
     r = combine_states(None, None, workflows_present=True)
     assert r.state == "unknown"
-    assert not r.blocks_done
+    assert not r.blocks_done("strict")
 
 
 def test_one_query_failed_other_empty_still_grounded():
@@ -109,4 +130,4 @@ def test_one_query_failed_other_empty_still_grounded():
 
 def test_result_is_plain_dataclass():
     r = RemoteChecksResult("passing", "ok")
-    assert r.state == "passing" and r.detail == "ok" and not r.blocks_done
+    assert r.state == "passing" and r.detail == "ok" and not r.blocks_done("strict")

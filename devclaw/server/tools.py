@@ -773,6 +773,42 @@ async def get_trace(
 
 
 @mcp.tool
+async def update_goal(goal_id: str, patch: dict, reason: str = "") -> str:
+    """Patch mutable fields on a durable goal's ``goal.yaml``. The owner-facing
+    tool for "the mission was mostly right but this field was wrong" — the
+    natural counterpart to ``steer_goal`` (which nudges direction via inbox)
+    and ``cancel_goal`` (which terminates the goal). Use when the planner
+    blocks asking for a mission-contract change.
+
+    Updatable fields (whitelist): ``verify_cmd``, ``cadence``, ``done_when``,
+    ``backlog``, ``stub_acceptable``, ``skills_required``, ``open_pr``.
+
+    Immutable fields (refused): ``id``, ``objective``, ``workspace_dir``,
+    ``repo_url``, ``engine`` — mutating those mid-flight breaks workspace
+    state, mission compass, or dispatch routing. If any of those need to
+    change, cancel the goal and file a new one (that IS the audit trail).
+
+    Each changed field logs one entry to ``log.md`` with ``[denys] update_goal
+    <field>: <old> → <new>`` plus the optional ``reason``. A blocked goal is
+    flipped to ``idle`` and poked so it re-plans immediately with the new
+    contract.
+
+    Returns ``{updated, diff, phase}``. ``updated=false`` on an idempotent
+    no-op (all patch values already match). Raises on unknown/immutable
+    field names or unknown goal_id."""
+    if not goal_id:
+        raise ToolError("update_goal requires goal_id")
+    if not isinstance(patch, dict) or not patch:
+        raise ToolError("patch must be a non-empty dict of field → new value")
+    try:
+        return json.dumps(goals.update_goal(goal_id, patch, reason=reason), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+    except (ValueError, TypeError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool
 async def cancel_goal(goal_id: str) -> str:
     """Permanently stop a durable goal. Sets its phase to 'cancelled' (a terminal
     state — DevClaw will skip it on every future heartbeat) and tears down any
@@ -793,7 +829,7 @@ async def cancel_goal(goal_id: str) -> str:
 @mcp.tool
 async def create_repo(
     name: str,
-    private: bool = True,
+    private: bool = False,
     description: str = "",
 ) -> str:
     """Create a fresh GitHub repo under the configured account so a from-scratch
@@ -801,7 +837,9 @@ async def create_repo(
     repo is seeded with a README (initial commit + a 'main' default branch) so it
     can be cloned and PR'd against immediately. Idempotent: if the name already
     exists it returns that repo instead of failing. Feed the returned clone_url
-    into create_goal(repo_url=...). Auth is gh's own login (repo write access)."""
+    into create_goal(repo_url=...). Auth is gh's own login (repo write access).
+    Public by default — Actions on private repos never start under the
+    account's billing lock; pass private=true only for sensitive content."""
     if not name:
         raise ToolError("create_repo requires a name")
     try:
