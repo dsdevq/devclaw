@@ -237,6 +237,28 @@ async def _default_base_ref(workspace_dir: str) -> str | None:
     return None
 
 
+#: errors that mean "there was nothing to ship" or "shipping stopped by design"
+#: (a local-only repo has no remote to push to — the local branch IS the
+#: deliverable), as opposed to "shipping was attempted and broke".
+_BENIGN_ERRORS = ("no changes to deliver", "no 'origin' remote")
+
+
+def delivery_failed(result: dict) -> str | None:
+    """The failure message when a delivery ATTEMPT broke (branch/commit/push/
+    PR-create), else None. Benign no-op outcomes — nothing to ship, local-only
+    repo — are not failures: a task carrying one still settles ``done``, just
+    without a PR. Everything else means a verified change exists but never
+    became the reviewable artifact the caller asked for, and the task must NOT
+    settle ``done`` (a done-without-PR row reads as shipped to every poller
+    upstream)."""
+    err = result.get("error")
+    if not err:
+        return None
+    if any(err.startswith(b) for b in _BENIGN_ERRORS):
+        return None
+    return err
+
+
 async def deliver_change(
     *,
     workspace_dir: str,

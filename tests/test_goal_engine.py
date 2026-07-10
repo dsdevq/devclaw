@@ -6,6 +6,7 @@ driven by a stub runner."""
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
@@ -17,10 +18,10 @@ from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
 
 
-def _goal():
+def _goal(workspace_dir: str = "/ws"):
     return Goal(
         id="g", objective="obj", cadence="1d", engine="devclaw",
-        workspace_dir="/ws", verify_cmd="pytest -q", backlog=["a"],
+        workspace_dir=workspace_dir, verify_cmd="pytest -q", backlog=["a"],
     )
 
 
@@ -71,10 +72,23 @@ async def test_dispatch_review_is_readonly(wired):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_program_then_poll(wired):
+async def test_dispatch_program_then_poll(wired, tmp_path):
     engine, queue, store = wired
+    # open_pr=True → the program's children inherit deliver=True, so they need a
+    # real git workspace (prepare_workspace guarantees one in production; a
+    # broken delivery now settles the task 'failed' instead of a silent
+    # done-without-PR). The stub runner writes nothing, so delivery is the
+    # benign "no changes to deliver" and the program settles done.
+    repo = tmp_path / "ws"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
     action = Action(engine="devclaw", tool="start_program", goal="build the thing", open_pr=True)
-    ref = await engine.dispatch(action, _goal(), notify_url="")
+    ref = await engine.dispatch(action, _goal(str(repo)), notify_url="")
     assert ref.ref_kind == "program"
     await queue.drain()
     poll = await engine.poll(ref)
