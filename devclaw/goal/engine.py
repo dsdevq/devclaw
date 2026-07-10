@@ -67,6 +67,7 @@ class InProcessEngine:
                 workspace_dir=ws, goal=action.goal, notify_url=nu,
                 open_pr=action.open_pr,
                 verify_cmd=action.verify_cmd or goal.verify_cmd,
+                parent_goal_id=goal.id,
             )
             return InFlight("devclaw", "start_program", program_id, "program", action.goal)
         if action.tool in ("implement_feature", "fix_bug", "review_repository"):
@@ -90,6 +91,15 @@ class InProcessEngine:
         if ref.ref_kind == "program":
             return self._poll_program(ref.id)
         return self._poll_task(ref.id)
+
+    def latest_program_for_goal(self, goal_id: str) -> Optional[tuple[str, str]]:
+        """(program_id, program_goal) of the goal's most recent program, or
+        None. The tick's orphaned-program reconcile uses this to rediscover a
+        program whose in-flight ref was lost from STATUS.md — without it a
+        crash mid-status-write silently divorces a goal from its own running
+        (or already-failed) program and the goal waits forever."""
+        p = self._store.latest_program_for_goal(goal_id)
+        return (p.id, p.goal) if p is not None else None
 
     # ---- shared quota pause (same flag the task queue honours) --------------
     # The OAuth quota is account-wide, so the goal heartbeat and the task queue

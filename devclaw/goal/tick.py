@@ -39,7 +39,7 @@ from . import research as _research
 from . import world_research as _world_research
 from . import summary as _goal_summary
 from .engine import GoalEngine
-from .models import Action, Checklist, EvalResult, Goal, GoalStatus, PollResult
+from .models import Action, Checklist, EvalResult, Goal, GoalStatus, InFlight, PollResult
 from .notify import Notifier
 from .planner import ClaudeCaller
 from .store import GoalStore
@@ -549,6 +549,19 @@ async def _tick_goal_impl(
         return await _resolve_polling_discovery(goal_id, goal, status, ctx)
     if phase is Phase.POLLING_DONE_GATE:
         return await _resolve_polling_done_gate(goal_id, goal, status, ctx)
+
+    # Orphaned-program reconcile: an EXECUTING goal with no in-flight ref may
+    # have LOST that ref rather than never had one — STATUS.md is rewritten
+    # every tick, and a crash mid-write truncates it into a default status
+    # (2026-07-09: closeloop-mission-v2 waited all night on a program that had
+    # already failed). The programs table carries parent_goal_id precisely so
+    # the goal can rediscover its own latest program; if its result was never
+    # recorded in log.md, re-adopt it as in_flight and settle it THIS tick.
+    if phase is Phase.EXECUTING and status.in_flight is None:
+        readopted = _readopt_orphaned_program(goal_id, status, ctx)
+        if readopted is not None:
+            status = readopted
+            phase = _classify(status)  # → POLLING_ACTION
 
     finished_detail = ""
     if phase is Phase.POLLING_ACTION:
@@ -1280,6 +1293,38 @@ async def _resolve_polling_done_gate(
         store=ctx.store, evaluator_caller=ctx.evaluator_caller, notifier=ctx.notifier,
         summarize=ctx.summary_caller, remote_checker=ctx.remote_checker,
     )
+
+
+def _readopt_orphaned_program(
+    goal_id: str, status: GoalStatus, ctx: TickContext,
+) -> "GoalStatus | None":
+    """Rediscover a program this goal dispatched whose in-flight ref was lost.
+
+    Returns the new status (in_flight restored, persisted) when an orphan is
+    found, else None. "Orphan" = the goal's most recent program by
+    parent_goal_id whose settle line (``start_program <id> → <status>``) never
+    reached log.md — running OR already-terminal both qualify; the normal
+    POLLING_ACTION path then polls/settles it exactly as if the ref had never
+    been lost. Engines without the finder (fakes, remote) opt out silently."""
+    finder = getattr(ctx.engine, "latest_program_for_goal", None)
+    if finder is None:
+        return None
+    found = finder(goal_id)
+    if found is None:
+        return None
+    program_id, program_goal = found
+    if ctx.store.log_contains(goal_id, f" {program_id} → "):
+        return None  # settled and recorded — nothing lost
+    ref = InFlight("devclaw", "start_program", program_id, "program", program_goal)
+    new_status = replace(status, in_flight=ref, phase="in_flight")
+    ctx.store.save_status(goal_id, new_status)
+    ctx.store.append_log(
+        goal_id,
+        f"re-adopted orphaned program {program_id} — its in-flight ref was "
+        "missing from STATUS.md (lost state, e.g. a restart mid-write); "
+        "settling it now instead of waiting on a result that would never arrive",
+    )
+    return new_status
 
 
 async def _resolve_polling_action(

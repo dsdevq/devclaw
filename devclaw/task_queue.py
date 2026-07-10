@@ -62,8 +62,11 @@ TICK_SECONDS = float(os.environ.get("DEVCLAW_TICK_SECONDS", "10"))
 #: (the live smoke leaked a container on exactly this — a silent post-init hang).
 #: It's a coarse backstop: a no-progress timer would kill a silent hang faster,
 #: but this also catches busy-loops. <=0 disables. Generous default so a
-#: legitimately long feature build isn't reaped mid-flight.
-TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "1800"))
+#: legitimately long feature build isn't reaped mid-flight — 1800s proved NOT
+#: generous enough for real program work (2026-07-09: a mid-stack closeloop
+#: implement_feature doing honest work was reaped at 30min, failing the whole
+#: program).
+TASK_TIMEOUT_S = float(os.environ.get("DEVCLAW_TASK_TIMEOUT_S", "3600"))
 #: how many times to RE-RUN a task that fails its verify gate (or errors), each
 #: time with the failure fed back into the goal, before escalating. The gate
 #: catches a bad result; retry gives the agent a bounded second chance to
@@ -399,6 +402,7 @@ class TaskQueue:
         notify_url: Optional[str] = None,
         open_pr: bool = False,
         verify_cmd: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> str:
         """Submit a program the decomposer will plan into child tasks.
 
@@ -416,6 +420,7 @@ class TaskQueue:
         self._store.create_program(
             id=program_id, goal=goal, workspace_dir=workspace_dir,
             notify_url=notify_url, open_pr=open_pr, verify_cmd=verify_cmd,
+            parent_goal_id=parent_goal_id,
         )
         self._planning.add(program_id)
         self._spawn(self._plan_and_start(program_id, workspace_dir, goal))
