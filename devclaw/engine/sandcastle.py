@@ -18,7 +18,11 @@ terminating ``result: {...}`` line. This module:
     suspenders the runner enforces).
 
 Container lifecycle: --rm + the per-task --name make destroy-on-exit automatic;
-no persistent on-host state. Tests inject a stub runner (via TaskQueue's
+no persistent on-host state. But --rm dies with its own docker CLI process — if
+the devclaw process is killed mid-task, the container keeps running with nothing
+left to reap it. Every sandbox therefore also carries the ``devclaw.sandbox=1``
+label, and :func:`sweep_orphan_sandboxes` reaps leftovers at the next startup
+(wired into ``TaskQueue.recover``). Tests inject a stub runner (via TaskQueue's
 ``runner`` param) so they don't need docker.
 """
 
@@ -27,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -49,6 +54,22 @@ EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
 # claude); tighten per host via env.
 SANDBOX_MEMORY = os.environ.get("DEVCLAW_SANDBOX_MEMORY", "2g")
 SANDBOX_CPUS = os.environ.get("DEVCLAW_SANDBOX_CPUS", "2.0")
+# The identity label every task sandbox carries, and the ONLY filter the startup
+# orphan sweep matches. Container names (devclaw-<uuid8>) are never persisted, so
+# after a process death the label is the one durable handle on leaked sandboxes.
+# Deploy containers use `devclaw.deploy=1` (delivery/deploy.py) — a deliberately
+# different label, outside the sweep's scope.
+SANDBOX_LABEL = "devclaw.sandbox=1"
+# Upper bound (seconds) on the teardown reaper's `docker rm -f` wait. Teardown
+# exists to enforce the task wall-clock timeout, but asyncio.wait_for waits for
+# the cancelled coroutine's cleanup before raising — so an UNbounded reaper wait
+# against a wedged docker daemon would defeat the very timeout it serves. On
+# expiry we log one line and move on: the container may leak until the next
+# startup sweep, but the orchestrator never hangs.
+TEARDOWN_TIMEOUT_S = float(os.environ.get("DEVCLAW_TEARDOWN_TIMEOUT_S", "30"))
+# Per-call cap for the synchronous docker CLI calls in the startup sweep — the
+# sweep runs before the server serves, so it must be bounded too.
+SWEEP_DOCKER_TIMEOUT_S = 10.0
 # Container-side mount targets. Match the Dockerfile's expectations.
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
@@ -115,13 +136,69 @@ async def _teardown(proc: "asyncio.subprocess.Process", container_name: str) -> 
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await killer.wait()
+        # Bounded — an unbounded wait here would let a wedged docker daemon hang
+        # the reap forever and defeat the task wall-clock timeout that teardown
+        # exists to enforce (asyncio.wait_for waits for the cancelled coroutine's
+        # cleanup — i.e. this function — before raising). See TEARDOWN_TIMEOUT_S.
+        await asyncio.wait_for(killer.wait(), timeout=TEARDOWN_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        sys.stderr.write(
+            f"sandcastle-runner: reap of {container_name} timed out after "
+            f"{TEARDOWN_TIMEOUT_S}s — daemon wedged? Leaving it to the next "
+            f"startup sweep.\n"
+        )
     except asyncio.CancelledError:
         pass
     except Exception as err:  # pragma: no cover - defensive
         sys.stderr.write(
             f"sandcastle-runner: force-remove of {container_name} failed: {err}\n"
         )
+
+
+def _docker_run_sync(args: list[str]) -> "subprocess.CompletedProcess[str]":
+    """One synchronous, bounded docker CLI call — the sweep's subprocess seam
+    (tests patch this, mirroring ``deploy.py``'s ``_run``)."""
+    return subprocess.run(
+        [DOCKER_BIN, *args],
+        capture_output=True,
+        text=True,
+        timeout=SWEEP_DOCKER_TIMEOUT_S,
+    )
+
+
+def sweep_orphan_sandboxes() -> int:
+    """Reap task-sandbox containers leaked by a previous devclaw process.
+
+    ``--rm`` only fires when its own ``docker run`` client exits, so a devclaw
+    process that dies mid-task leaves the container running with nothing to reap
+    it — while crash recovery resets the DB row and re-runs the task in a SECOND
+    container, the original burns quota and memory forever. This sweeps by the
+    ``devclaw.sandbox=1`` label (the name is never persisted); at startup —
+    before this process has launched anything — every labeled container is by
+    definition orphaned, since sandboxes don't legitimately outlive their
+    launching process. Deploy containers (``devclaw.deploy=1``) are out of scope.
+
+    Synchronous (call before serving), best-effort: returns the number of
+    containers removed, 0 when docker is unavailable (host/stub engine
+    environments, CI) — never raises.
+    """
+    try:
+        ps = _docker_run_sync(["ps", "-q", "--filter", f"label={SANDBOX_LABEL}"])
+    except (OSError, subprocess.SubprocessError):
+        return 0  # docker missing/unreachable/slow — nothing to sweep here
+    if ps.returncode != 0:
+        return 0
+    reaped = 0
+    for cid in (line.strip() for line in ps.stdout.splitlines()):
+        if not cid:
+            continue
+        try:
+            rm = _docker_run_sync(["rm", "-f", cid])
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if rm.returncode == 0:
+            reaped += 1
+    return reaped
 
 
 def _translate_workspace_path(workspace_dir: str) -> str:
@@ -221,6 +298,11 @@ def _build_docker_args(
         "--rm",
         "--name",
         container_name,
+        # Durable identity for the startup orphan sweep: the name above is never
+        # persisted and --rm dies with the docker CLI, so this label is the only
+        # handle on a sandbox whose devclaw process crashed mid-task.
+        "--label",
+        SANDBOX_LABEL,
         "--network",
         "host",  # claude OAuth refresh needs egress; tighten later via allowlist.
         # Per-build resource ceiling so N concurrent sandboxes can't OOM the VPS.

@@ -46,7 +46,7 @@ from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .quality import format_feedback, review_diff
-from .engine.sandcastle import run_sandcastle
+from .engine.sandcastle import run_sandcastle, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 
@@ -452,7 +452,20 @@ class TaskQueue:
         it, so reset it to ``pending`` to be re-run; log each reap. Programs left
         non-terminal are picked up by the next pump (re-planned if they never got
         tasks). Returns the number of tasks reaped.
+
+        Also reaps the dead process's leaked sandbox CONTAINERS: the row reset
+        below re-runs the task in a new container, but the original keeps
+        running (``--rm`` only fires when its own docker client exits) with
+        nothing left to stop it. recover() runs before this process launches
+        anything, so every ``devclaw.sandbox``-labeled container is by
+        definition orphaned. No-op when docker is unavailable (stub/host engine
+        environments, CI).
         """
+        swept = sweep_orphan_sandboxes()
+        if swept:
+            sys.stderr.write(
+                f"task-queue: reaped {swept} orphaned sandbox container(s)\n"
+            )
         reaped = self._store.reset_running_to_pending()
         for tid in reaped:
             t = self._store.get_task(tid)

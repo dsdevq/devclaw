@@ -82,9 +82,14 @@ def test_docker_args_posture():
         claude_dir=CLAUDE_DIR,
         payload='{"kind":"implement_feature"}',
     )
-    # ephemeral + named
+    # ephemeral + named + labeled for the startup orphan sweep (--rm dies with
+    # the docker CLI, so a crash mid-task leaves the container with no reaper;
+    # the label is the durable handle sweep_orphan_sandboxes matches on)
     assert args[:2] == ["run", "--rm"]
     assert "--name" in args and args[args.index("--name") + 1] == "devclaw-deadbeef"
+    assert "--label" in args and args[args.index("--label") + 1] == "devclaw.sandbox=1"
+    # never the deploy label — deploy containers are outside the sweep's scope
+    assert "devclaw.deploy=1" not in args
     # workspace bound
     assert f"/host/ws:{sc.CONTAINER_WORKSPACE}" in args
     # the ONLY config mounts are the auth identity pair — no whole-dir leak
