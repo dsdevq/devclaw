@@ -148,6 +148,52 @@ async def _git_diff(host_dir: str) -> str:
     return await asyncio.to_thread(_git_diff_sync, host_dir)
 
 
+def _wip_snapshot_sync(host_dir: str, task_id: str) -> str:
+    """Commit the interrupted attempt's uncommitted work as a WIP snapshot
+    before a usage-limit requeue. The workspace survives the requeue untouched
+    (nothing re-preps between requeue and re-run), but a dirty tree is fragile:
+    anything that later resets/cleans the workspace (prepare_workspace's
+    ``reset --hard`` + ``clean -fdx`` on the goal's next dispatch, should this
+    task ultimately fail) wipes it. A commit makes the partial work durable.
+
+    Blocking subprocess.run with timeouts — same child-watcher rationale as
+    :func:`_git_diff_sync`. Strictly best-effort: returns ``"committed"`` when
+    a snapshot commit was made, else a short reason (not a repo, git missing,
+    timeout, nothing to commit, git error) — the caller logs it and proceeds
+    with the requeue either way; a snapshot hiccup must never block the pause
+    path."""
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", host_dir, *args],
+            capture_output=True, text=True, timeout=30,
+        )
+
+    try:
+        status = run("status", "--porcelain")
+        if status.returncode != 0:
+            return "not a git repo"
+        if not status.stdout.strip():
+            return "clean tree — nothing to snapshot"
+        add = run("add", "-A")
+        if add.returncode != 0:
+            return f"git add failed: {(add.stderr or '').strip()[:120]}"
+        commit = run(
+            "-c", "user.email=devclaw@local", "-c", "user.name=devclaw",
+            "commit", "-m",
+            f"wip(devclaw): interrupted by usage limit (task {task_id[:8]})",
+        )
+        if commit.returncode != 0:
+            return f"git commit failed: {(commit.stderr or '').strip()[:120]}"
+        return "committed"
+    except (OSError, subprocess.SubprocessError) as err:
+        return f"{err.__class__.__name__}: {err}"
+
+
+async def _wip_snapshot(host_dir: str, task_id: str) -> str:
+    """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
+    return await asyncio.to_thread(_wip_snapshot_sync, host_dir, task_id)
+
+
 def _integrity_failure(diff: str) -> Optional[str]:
     """Return a failure summary if the change weakened the tests (deleted/skipped),
     else None. Enforces what the prompt only asks for. Operates on an already-
@@ -823,6 +869,26 @@ class TaskQueue:
         program_id = row.program_id if row else None
         verify_cmd = row.verify_cmd if row else None
 
+        # Resumed-after-interruption brief. ``pause_count > 0`` means a previous
+        # attempt of THIS task was cut off by a usage limit and requeued — the
+        # T0.6 counter is the durable interruption signal, so no schema change
+        # is needed here. The workspace survives the requeue untouched (nothing
+        # re-preps between requeue and re-run), so its partial progress is still
+        # there — possibly as a wip snapshot commit — and a re-run handed the
+        # pristine goal would restart from scratch or duplicate/conflict with
+        # the half-done edits. The brief is prepended to EVERY attempt this run
+        # makes (a resumed task can also retry: brief prefix + goal + retry
+        # suffix compose), and stays distinct from the retry-feedback suffix.
+        pause_count = row.pause_count if row else 0
+        resume_brief = "" if pause_count <= 0 else (
+            f"[Resuming after a usage-limit interruption (pause {pause_count})] "
+            "A previous attempt was cut off mid-work. The workspace already "
+            "contains its partial progress — possibly including a "
+            "'wip(devclaw): interrupted…' commit. Inspect `git status` and "
+            "`git log` first and CONTINUE from where it left off; do not "
+            "restart or redo completed work.\n\n"
+        )
+
         def on_event(event: EngineEvent) -> None:
             try:
                 self._store.append_event(
@@ -844,8 +910,8 @@ class TaskQueue:
         attempts = 1 + max(0, TASK_MAX_RETRIES)
         last_failure = "unknown error"
         for attempt in range(attempts):
-            attempt_goal = goal if attempt == 0 else (
-                f"{goal}\n\n[Automatic retry {attempt}/{attempts - 1}] Your previous "
+            attempt_goal = f"{resume_brief}{goal}" if attempt == 0 else (
+                f"{resume_brief}{goal}\n\n[Automatic retry {attempt}/{attempts - 1}] Your previous "
                 f"attempt did not pass verification. What went wrong:\n{last_failure}\n\n"
                 f"Diagnose the cause and fix it; do not repeat the same mistake."
             )
@@ -949,6 +1015,24 @@ class TaskQueue:
                         f"~{backoff}s\n"
                     )
                     return None
+                # Preserve the interrupted attempt's partial work BEFORE the
+                # requeue: commit the dirty tree as a wip snapshot so it can't
+                # be wiped by a later workspace reset/clean. Best-effort — any
+                # snapshot failure logs and the pause path proceeds regardless.
+                try:
+                    snapshot = await _wip_snapshot(workspace_dir, task_id)
+                except Exception as err:  # noqa: BLE001 — never block the pause
+                    snapshot = f"crashed: {err.__class__.__name__}: {err}"
+                if snapshot == "committed":
+                    sys.stderr.write(
+                        f"task-queue: task {task_id} wip snapshot committed "
+                        f"before pause requeue\n"
+                    )
+                else:
+                    sys.stderr.write(
+                        f"task-queue: task {task_id} wip snapshot skipped "
+                        f"({snapshot})\n"
+                    )
                 self._store.requeue_task(task_id)
                 sys.stderr.write(
                     f"task-queue: task {task_id} hit {cls.kind.value} — pausing dispatch "
