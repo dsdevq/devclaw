@@ -90,3 +90,94 @@ async def test_expired_pause_clears_and_proceeds(tmp_path):
     assert eng.global_pause()[0] == 0          # expired pause was cleared
     assert out["g"] is Outcome.ERROR           # proceeded; the real bug surfaced
     assert planner.calls == 1
+
+
+# ---- owner ping on pause + resume -------------------------------------------
+# A weekly cap can silently halt everything for days — the owner must hear the
+# pause ONCE (not every tick) and the resume ONCE. The pinged-flag rides the
+# same engine getattr seam the pause itself uses, so fakes without it still work.
+
+
+class FlaggedPausableEngine(PausableEngine):
+    """PausableEngine + the pause_notified flag, like the real InProcessEngine."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._notified = False
+
+    def pause_notified(self) -> bool:
+        return self._notified
+
+    def set_pause_notified(self, on: bool) -> None:
+        self._notified = on
+
+
+async def _tick(store, eng, notifier, planner=None):
+    return await tick_all(
+        store=store, engine=eng, planner_caller=planner or FakeClaude(),
+        evaluator_caller=FakeClaude(), notifier=notifier, prepare_ws=fake_prepare,
+        eval_every=99,
+    )
+
+
+async def test_paused_tick_pings_owner_exactly_once(tmp_path):
+    store = GoalStore(tmp_path, now=Clock())  # no goals needed — the gate is fleet-wide
+    eng = FlaggedPausableEngine()
+    eng.set_global_pause(_now_ms() + 60_000, "quota: You're out of extra usage")
+    notifier = RecordingNotifier()
+
+    await _tick(store, eng, notifier)   # first paused tick → the ping
+    await _tick(store, eng, notifier)   # still paused → NO second ping
+
+    pings = [m for m in notifier.sent if "paused on a usage limit" in m]
+    assert len(pings) == 1
+    assert "quota: You're out of extra usage" in pings[0]   # the reason
+    assert "resuming ~" in pings[0] and "UTC" in pings[0]   # the computed reset time
+
+
+async def test_resume_pings_owner_once(tmp_path):
+    store = GoalStore(tmp_path, now=Clock())
+    eng = FlaggedPausableEngine()
+    eng.set_global_pause(_now_ms() + 60_000, "quota: weekly cap")
+    notifier = RecordingNotifier()
+
+    await _tick(store, eng, notifier)                    # pause ping
+    eng.set_global_pause(_now_ms() - 1000, "quota: weekly cap")  # window elapses
+    await _tick(store, eng, notifier)                    # resume ping
+    await _tick(store, eng, notifier)                    # quiet afterwards
+
+    resumes = [m for m in notifier.sent if "usage limit lifted" in m]
+    assert len(resumes) == 1
+    assert len(notifier.sent) == 2                       # exactly pause + resume
+    assert eng.global_pause()[0] == 0                    # pause cleared too
+
+
+async def test_resume_pings_even_if_pause_cleared_elsewhere(tmp_path):
+    """The task queue lazily clears an expired pause too. When tick_all finds
+    no pause but a set flag, the owner still hears the resume — the flag isn't
+    lost with the pause."""
+    store = GoalStore(tmp_path, now=Clock())
+    eng = FlaggedPausableEngine()
+    eng.set_global_pause(_now_ms() + 60_000, "quota")
+    notifier = RecordingNotifier()
+
+    await _tick(store, eng, notifier)                    # pause ping
+    eng.clear_global_pause()                             # the OTHER layer cleared it first
+    await _tick(store, eng, notifier)
+
+    assert sum("usage limit lifted" in m for m in notifier.sent) == 1
+
+
+async def test_fakes_without_flag_accessors_keep_working(tmp_path):
+    """PausableEngine has no pause_notified accessors — the seam must degrade
+    to a no-op (no crash, still RATE_LIMITED, still zero cognition)."""
+    store = GoalStore(tmp_path, now=Clock())
+    seed_goal(tmp_path, "g")
+    eng = PausableEngine()
+    eng.set_global_pause(_now_ms() + 60_000, "manual")
+    planner = RaisingClaude("must not be called")
+
+    out = await _tick(store, eng, RecordingNotifier(), planner=planner)
+
+    assert out["g"] is Outcome.RATE_LIMITED
+    assert planner.calls == 0

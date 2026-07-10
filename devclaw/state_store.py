@@ -73,6 +73,12 @@ class Task:
     #: (``dispatch_task``). Orthogonal to ``program_id`` (ephemeral DAG-run
     #: pointer) — a task can carry both, one, or neither.
     parent_goal_id: Optional[str] = None
+    #: How many times this task was requeued by a usage-limit pause. Bounds the
+    #: pause→requeue→re-run loop: a permanently-failing task whose error text
+    #: happens to match the quota/rate regexes would otherwise loop forever
+    #: (the workspace breaker only counts *failed* rows, and a paused task
+    #: never becomes one).
+    pause_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -96,6 +102,7 @@ class Task:
             "prUrl": self.pr_url,
             "title": self.title,
             "parentGoalId": self.parent_goal_id,
+            "pauseCount": self.pause_count,
         }
 
 
@@ -195,6 +202,9 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         parent_goal_id=(
             r["parent_goal_id"] if "parent_goal_id" in r.keys() else None
         ),
+        pause_count=(
+            r["pause_count"] if "pause_count" in r.keys() and r["pause_count"] is not None else 0
+        ),
     )
 
 
@@ -274,7 +284,8 @@ class StateStore:
                   deliver         INTEGER NOT NULL DEFAULT 0,
                   pr_url          TEXT,
                   title           TEXT,
-                  parent_goal_id  TEXT
+                  parent_goal_id  TEXT,
+                  pause_count     INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS programs (
@@ -351,6 +362,9 @@ class StateStore:
                 # the only recovery path when the goal-side in_flight ref is
                 # lost (STATUS.md truncated by a crash mid-write).
                 "ALTER TABLE programs ADD COLUMN parent_goal_id TEXT",
+                # Usage-limit requeue counter (2026-07-10) — bounds the
+                # pause→requeue→re-run loop (see Task.pause_count).
+                "ALTER TABLE tasks ADD COLUMN pause_count INTEGER NOT NULL DEFAULT 0",
             ):
                 try:
                     self._db.execute(sql)
@@ -883,11 +897,15 @@ class StateStore:
         return ids
 
     def requeue_task(self, task_id: str) -> bool:
-        """Put a single in-flight task back to 'pending' (e.g. when paused for a
-        quota limit rather than failed). Returns True if a running row was reset."""
+        """Put a single in-flight task back to 'pending' (when paused for a
+        quota limit rather than failed). Increments ``pause_count`` in the same
+        statement so the pause→requeue loop is countable (and thus boundable) —
+        read it back via :meth:`get_task`. Returns True if a running row was
+        reset."""
         with self._lock:
             cur = self._db.execute(
-                "UPDATE tasks SET status = 'pending', started_at = NULL "
+                "UPDATE tasks SET status = 'pending', started_at = NULL, "
+                "pause_count = pause_count + 1 "
                 "WHERE id = ? AND status = 'running'",
                 (task_id,),
             )
@@ -947,6 +965,25 @@ class StateStore:
     def clear_global_pause(self) -> None:
         self.delete_meta("pause_until_ms")
         self.delete_meta("pause_reason")
+
+    # The pause-NOTIFIED flag lives beside the pause but is NOT cleared by
+    # clear_global_pause on purpose: either layer (task queue or goal tick) may
+    # lazily clear an expired pause first, and the resume notification must
+    # still fire exactly once afterwards — the goal tick owns the flag's
+    # lifecycle (set on the pause ping, cleared on the resume ping).
+
+    def set_pause_notified(self, on: bool) -> None:
+        """Record (``on=True``) / reset (``on=False``) that the owner was told
+        about the current global pause, so they're pinged once per pause and
+        once on resume — not every tick."""
+        if on:
+            self.set_meta("pause_notified", "1")
+        else:
+            self.delete_meta("pause_notified")
+
+    def pause_notified(self) -> bool:
+        """Whether the owner has already been pinged about the current pause."""
+        return self.get_meta("pause_notified") == "1"
 
     # ---- operator dispatch controls (manual pause + daily run window) ----
     # Human-facing siblings of the quota pause above. Distinct meta keys, so the

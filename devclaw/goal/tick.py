@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Tuple, Union
@@ -1742,10 +1743,36 @@ async def tick_all(
     # or earlier goal cognition) paused dispatch, skip ALL goal cognition until it
     # lifts — zero tokens while paused. Auto-clear + resume once it expires.
     until, reason = _engine_pause(engine)
+    if until and _now_ms() < until:
+        # Tell the owner ONCE per pause (a weekly cap can halt everything for
+        # days — silence here looks like devclaw died). The goal layer owns the
+        # Notifier, so the ping lives here and covers pauses set by EITHER
+        # layer (task queue or goal cognition). The persisted flag is what
+        # keeps this to one ping, not one per tick.
+        if not _engine_pause_notified(engine):
+            resume_hhmm = datetime.fromtimestamp(
+                until / 1000, tz=timezone.utc
+            ).strftime("%H:%M")
+            await _notify(
+                notifier, NotifyLevel.OWNER,
+                f"⏸️ paused on a usage limit — {reason}; resuming ~{resume_hhmm} UTC",
+                summarize=summary_caller,
+            )
+            _engine_set_pause_notified(engine, True)
+        return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
     if until:
-        if _now_ms() < until:
-            return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
         _engine_clear_pause(engine)
+    # Resume ping — the counterpart of the pause ping above, once per pause.
+    # Checked whenever no pause is ACTIVE (not only on the expiry tick that
+    # cleared it): the task queue lazily clears an expired pause too, and the
+    # owner must still hear the resume in that race.
+    if _engine_pause_notified(engine):
+        await _notify(
+            notifier, NotifyLevel.OWNER,
+            "▶️ usage limit lifted — resuming work",
+            summarize=summary_caller,
+        )
+        _engine_set_pause_notified(engine, False)
 
     # Operator controls: a manual pause toggle or a daily run-window can hold ALL
     # goal cognition (0 tokens) the same way the quota pause does. Tasks already
@@ -1832,6 +1859,19 @@ def _engine_clear_pause(engine: GoalEngine) -> None:
         fn()
 
 
+def _engine_pause_notified(engine: GoalEngine) -> bool:
+    """Read the owner-was-pinged-about-this-pause flag via the engine, if it
+    exposes one (the in-process engine does; test doubles may not → False)."""
+    fn = getattr(engine, "pause_notified", None)
+    return bool(fn()) if callable(fn) else False
+
+
+def _engine_set_pause_notified(engine: GoalEngine, on: bool) -> None:
+    fn = getattr(engine, "set_pause_notified", None)
+    if callable(fn):
+        fn(on)
+
+
 def _engine_operator_block(engine: GoalEngine) -> tuple[bool, str]:
     """Read the operator hold + run-window gate via the engine, if it exposes one
     (the in-process engine does; test doubles may not → treated as open)."""
@@ -1851,10 +1891,12 @@ def _maybe_pause(engine: GoalEngine, store: GoalStore, goal_id: str, err: str) -
     """If ``err`` is a usage/rate-limit, set the shared quota pause and return
     Outcome.RATE_LIMITED; otherwise None (the caller handles it as a real error).
     Centralizes the goal-side quota guard so every cognition call can use it."""
-    cls = classify_failure(err)
+    # now_utc lets absolute reset wording ("resets 10pm (UTC)") become a real
+    # hint; a stated hint is trusted past the default cap (pause_seconds).
+    cls = classify_failure(err, now_utc=datetime.now(timezone.utc))
     if not (cls.is_pausing and hasattr(engine, "set_global_pause")):
         return None
-    backoff = pause_seconds(cls.retry_after_s)
+    backoff = pause_seconds(cls.retry_after_s, stated=cls.stated)
     engine.set_global_pause(_now_ms() + backoff * 1000, f"{cls.kind.value} (goal cognition)")
     store.append_log(goal_id, f"paused — {cls.kind.value}; resuming in ~{backoff}s")
     return Outcome.RATE_LIMITED
