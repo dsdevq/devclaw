@@ -35,9 +35,15 @@ class FakeClaude:
 class FakeEngine:
     """In-process engine double — records dispatches, returns canned polls."""
 
-    def __init__(self, poll_result: PollResult | None = None, dispatch_ref: InFlight | None = None) -> None:
+    def __init__(
+        self, poll_result: PollResult | None = None, dispatch_ref: InFlight | None = None,
+        poll_exc: Exception | None = None,
+    ) -> None:
         self.poll_result = poll_result
         self.dispatch_ref = dispatch_ref
+        #: when set, poll raises it — models the engine losing the ref's row
+        #: (e.g. GoalEngineError "unknown task_id" after a DB loss/restore).
+        self.poll_exc = poll_exc
         self.dispatched: list[tuple[Action, Goal, str]] = []
         self.polls = 0
 
@@ -48,6 +54,8 @@ class FakeEngine:
 
     async def poll(self, ref: InFlight) -> PollResult:
         self.polls += 1
+        if self.poll_exc is not None:
+            raise self.poll_exc
         assert self.poll_result is not None, "poll called but no poll_result configured"
         return self.poll_result
 

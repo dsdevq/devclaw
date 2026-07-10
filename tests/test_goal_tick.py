@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from devclaw.goal.engine import GoalEngineError
 from devclaw.goal.models import GoalStatus, InFlight, PollResult
 from devclaw.goal.store import GoalStore
 from devclaw.goal.tick import Outcome, tick_all, tick_goal
@@ -1780,3 +1781,114 @@ async def test_save_status_is_atomic_replace(tmp_path):
     d = tmp_path / "g"
     assert not (d / "STATUS.md.tmp").exists()
     assert store.load_status("g").in_flight.id == "p1"
+
+
+# ---- lost in-flight ref: block legibly, never wedge (audit 2026-07-10) ------
+# The engine row a ref points at can vanish (DB loss, manual cleanup, a
+# cross-environment restore). poll then raises GoalEngineError on EVERY tick,
+# and tick_all's catch-all logs "tick error (isolated)" without clearing
+# in_flight — a silent, permanent error loop. These tests pin the guard: one
+# BLOCKED tick that clears the ref, one owner ping, then zero-token idle.
+
+
+@pytest.mark.asyncio
+async def test_lost_action_ref_blocks_and_notifies_owner(tmp_path):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t_gone", "task", "add /health"),
+    ))
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = FakeEngine(poll_exc=GoalEngineError("unknown task_id: t_gone"))
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    st = store.load_status("g")
+    assert st.phase == "blocked"
+    assert st.in_flight is None                          # the lost ref is cleared
+    assert "task t_gone" in (st.blocked_on or "")
+    assert "unknown task_id" in (st.blocked_on or "")    # the real error, not a paraphrase
+    assert planner.calls == 0 and evaluator.calls == 0   # zero cognition on the failure path
+    assert len(notifier.sent) == 1                       # owner heard it exactly once
+    assert "t_gone" in notifier.sent[0]
+    assert "t_gone" in store.recent_log("g")
+
+
+@pytest.mark.asyncio
+async def test_lost_ref_block_does_not_loop(tmp_path):
+    """The wedge regression proper: the NEXT tick after a lost-ref block must
+    idle at 0 tokens (no re-poll, no re-raise, no second ping) — cadence never
+    re-pokes a blocked goal, only steering does."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t_gone", "task", "add /health"),
+    ))
+    notifier = RecordingNotifier()
+    engine = FakeEngine(poll_exc=GoalEngineError("unknown task_id: t_gone"))
+    await _tick(store, "g", FakeClaude(ACT), FakeClaude(), engine, notifier)
+    sent_after_block = len(notifier.sent)
+
+    planner2, evaluator2 = FakeClaude(ACT), FakeClaude()
+    out = await _tick(store, "g", planner2, evaluator2, engine, notifier)
+
+    assert out is Outcome.IDLE
+    assert planner2.calls == 0 and evaluator2.calls == 0  # blocked goals idle at 0 tokens
+    assert engine.polls == 1                              # nothing left to poll
+    assert len(notifier.sent) == sent_after_block         # no second ping
+
+
+@pytest.mark.asyncio
+async def test_lost_discovery_ref_blocks_and_notifies_owner(tmp_path):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="investigating",
+        in_flight=InFlight("devclaw", "review_repository", "t_disc", "task", "analyze", is_discovery=True),
+    ))
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = FakeEngine(poll_exc=GoalEngineError("unknown task_id: t_disc"))
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    st = store.load_status("g")
+    assert st.phase == "blocked" and st.in_flight is None
+    assert "task t_disc" in (st.blocked_on or "")
+    # lifecycle pinned to executing: were it left "investigating", _classify
+    # would route the NEXT tick back into INVESTIGATING and silently dispatch a
+    # fresh review — contradicting the "paused; steer me" ping just sent.
+    assert st.lifecycle == "executing"
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == 1 and "t_disc" in notifier.sent[0]
+
+    # Next tick: a true block — idles at zero tokens, no re-dispatch, no re-ping.
+    out2 = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out2 is Outcome.IDLE
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == 1
+    assert store.load_status("g").phase == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_lost_done_gate_ref_blocks_and_notifies_owner(tmp_path):
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "t_gate", "task", "verify", is_done_check=True),
+    ))
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = FakeEngine(poll_exc=GoalEngineError("unknown task_id: t_gate"))
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    st = store.load_status("g")
+    assert st.phase == "blocked" and st.in_flight is None
+    assert "task t_gate" in (st.blocked_on or "")
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == 1 and "t_gate" in notifier.sent[0]
