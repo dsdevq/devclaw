@@ -3,6 +3,9 @@ fails-and-retries (which would burn the remaining quota on the same doomed call)
 Driven with stub runners (no docker)."""
 from __future__ import annotations
 
+import os
+import subprocess
+
 import pytest
 
 from devclaw import task_queue
@@ -219,3 +222,120 @@ async def test_crash_recovery_requeue_does_not_count_as_pause(store):
     store.mark_running(tid)
     store.reset_running_to_pending()
     assert store.get_task(tid).pause_count == 0
+
+
+# ---- WIP preserved across a pause (T0.7) -------------------------------------
+# The workspace survives a pause-requeue untouched, but the interrupted attempt's
+# work is (1) invisible to the re-run — the pristine goal never mentions it — and
+# (2) fragile as uncommitted tree state. So the pause path snapshots the dirty
+# tree as a wip commit, and a re-run with pause_count > 0 gets an interruption
+# brief telling the agent to continue, not restart.
+
+
+def _git(repo, *args):
+    subprocess.run(["git", *args], cwd=repo, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _git_repo(tmp_path):
+    """A real tmp git repo with one committed file — the pattern
+    tests/test_integrity_gate.py builds."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "f.py").write_text("x = 1\n")
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "init")
+    return repo
+
+
+def _git_out(repo, *args) -> str:
+    return subprocess.run(["git", *args], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout
+
+
+async def test_pause_snapshots_dirty_tree_as_wip_commit(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    repo = _git_repo(tmp_path)
+
+    async def rl(req: EngineRequest):
+        # the agent got half-way before the limit hit — dirty tree at requeue time
+        with open(os.path.join(req.workspace_dir, "half_done.py"), "w") as fh:
+            fh.write("partial = True\n")
+        return {"status": "error", "error": "API Error: 429 Too Many Requests"}
+
+    q = TaskQueue(store, runner=rl)
+    tid = q.submit(kind="implement_feature", workspace_dir=str(repo), goal="g")
+    await q.drain()
+
+    assert store.get_task(tid).status == "pending"        # requeued as before
+    head = _git_out(repo, "log", "--oneline", "-1")
+    assert "wip(devclaw): interrupted" in head            # snapshot on the current branch
+    assert tid[:8] in head
+    assert _git_out(repo, "status", "--porcelain").strip() == ""  # tree clean — work durable
+
+
+async def test_rerun_after_pause_gets_interruption_brief(store, monkeypatch):
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    goals: list = []
+
+    async def rl_then_ok(req: EngineRequest):
+        goals.append(req.goal)
+        if len(goals) == 1:
+            return {"status": "error", "error": "rate limit exceeded"}
+        return {"status": "ok", "workspaceDir": req.workspace_dir}
+
+    q = TaskQueue(store, runner=rl_then_ok)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="build the thing")
+    await q.drain()
+    assert store.get_task(tid).status == "pending"
+
+    store.set_global_pause(_now_ms() - 1000, "expired")   # window elapses → re-run
+    q._pump()
+    await q.drain()
+
+    assert store.get_task(tid).status == "done"
+    assert goals[0] == "build the thing"                  # pause_count 0 → pristine goal
+    assert "[Resuming after a usage-limit interruption (pause 1)]" in goals[1]
+    assert "CONTINUE from where it left off" in goals[1]
+    assert "build the thing" in goals[1]                  # the original goal still follows
+
+
+async def test_pause_with_non_git_workspace_still_requeues(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    ws = tmp_path / "plain"
+    ws.mkdir()
+    (ws / "notes.txt").write_text("hi\n")
+
+    async def rl(req: EngineRequest):
+        return {"status": "error", "error": "API Error: 429 Too Many Requests"}
+
+    q = TaskQueue(store, runner=rl)
+    tid = q.submit(kind="implement_feature", workspace_dir=str(ws), goal="g")
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "pending" and t.pause_count == 1   # pause path unaffected
+    assert store.global_pause()[0] > _now_ms()
+    assert not (ws / ".git").exists()                     # no stray commit artifacts
+
+
+async def test_snapshot_crash_never_blocks_the_pause(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+
+    def boom(host_dir, task_id):
+        raise RuntimeError("git exploded")
+    monkeypatch.setattr(task_queue, "_wip_snapshot_sync", boom)
+
+    async def rl(req: EngineRequest):
+        return {"status": "error", "error": "API Error: 429 Too Many Requests"}
+
+    q = TaskQueue(store, runner=rl)
+    tid = q.submit(kind="implement_feature", workspace_dir=str(tmp_path), goal="g")
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "pending" and t.pause_count == 1   # pause path completed
+    assert store.global_pause()[0] > _now_ms()            # pause still set
