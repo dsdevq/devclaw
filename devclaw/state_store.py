@@ -16,9 +16,10 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Iterator, Literal, Optional
 
 # cancelled — deliberately aborted by a client (distinct from 'failed', which is
 #   an execution error). Terminal, so crash recovery (which only revives
@@ -256,7 +257,64 @@ class StateStore:
         self._db.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")  # wait, don't fail-fast
         self._db.execute("PRAGMA foreign_keys = ON")
         self._lock = threading.RLock()
+        #: transaction()-nesting depth. 0 == no open transaction, so _commit()
+        #: writes immediately (every existing single-write method behaves exactly
+        #: as before). > 0 == inside a transaction(): _commit() is a no-op and the
+        #: OUTERMOST transaction() issues the single real commit/rollback.
+        self._txn_depth = 0
+        #: set True when any exception passes through an open transaction() level,
+        #: so the outermost level rolls the whole unit back — even if an inner
+        #: exception was caught between nested levels.
+        self._txn_failed = False
         self._bootstrap()
+
+    # ---- transactions ---------------------------------------------------
+    #
+    # Group several writes into ONE atomic unit spanning multiple store methods
+    # (e.g. "create a task row AND stamp the goal's in_flight ref" — the
+    # atomicity a later dispatch/orphan-recovery PR needs). Single writes called
+    # OUTSIDE a transaction() keep committing immediately, unchanged.
+
+    @contextmanager
+    def transaction(self) -> "Iterator[StateStore]":
+        """Open an atomic unit. Acquires the store lock for the WHOLE block (so
+        no other thread can commit or write while it is open), and defers the
+        commit until the OUTERMOST ``transaction()`` exits — nested
+        ``transaction()`` calls join the outer one (a depth counter), yielding a
+        single commit at depth 0. Any exception at any depth rolls the whole
+        unit back.
+
+        Existing single-write methods call :meth:`_commit`, which is a no-op
+        while a transaction is open, so a ``create_task`` (or any other write)
+        run inside ``transaction()`` becomes part of the atomic unit instead of
+        committing on its own.
+        """
+        with self._lock:
+            if self._txn_depth == 0:
+                self._txn_failed = False
+            self._txn_depth += 1
+            try:
+                yield self
+            except BaseException:
+                self._txn_failed = True
+                raise
+            finally:
+                self._txn_depth -= 1
+                if self._txn_depth == 0:
+                    if self._txn_failed:
+                        self._db.rollback()
+                    else:
+                        self._db.commit()
+                    self._txn_failed = False
+
+    def _commit(self) -> None:
+        """Commit now, unless a :meth:`transaction` is open. Inside a
+        transaction (depth > 0) this is a no-op — the write joins the atomic
+        unit and the outermost ``transaction()`` commits once. Outside one
+        (depth 0) it commits immediately, so every single-write method keeps its
+        original commit-per-call behavior."""
+        if self._txn_depth == 0:
+            self._db.commit()
 
     def _bootstrap(self) -> None:
         with self._lock:
@@ -388,7 +446,7 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_traces_kind      ON traces(kind, id);
                 """
             )
-            self._db.commit()
+            self._commit()
 
     # ---- tasks ----------------------------------------------------------
 
@@ -433,7 +491,7 @@ class StateStore:
                     parent_goal_id,
                 ),
             )
-            self._db.commit()
+            self._commit()
 
     def set_pr_url(self, task_id: str, pr_url: Optional[str]) -> None:
         """Record the delivered PR URL (or None for a local-only branch)."""
@@ -441,7 +499,7 @@ class StateStore:
             self._db.execute(
                 "UPDATE tasks SET pr_url = ? WHERE id = ?", (pr_url, task_id)
             )
-            self._db.commit()
+            self._commit()
 
     def mark_running(self, task_id: str) -> None:
         with self._lock:
@@ -450,7 +508,7 @@ class StateStore:
                 "WHERE id = ? AND status = 'pending'",
                 (_now_ms(), task_id),
             )
-            self._db.commit()
+            self._commit()
 
     def claim_pending(self, task_id: str) -> bool:
         """Atomically transition pending -> running. Returns True if THIS call
@@ -463,7 +521,7 @@ class StateStore:
                 "WHERE id = ? AND status = 'pending'",
                 (_now_ms(), task_id),
             )
-            self._db.commit()
+            self._commit()
             return cur.rowcount == 1
 
     def mark_done(self, task_id: str, result_json: str, pr_url: Optional[str] = None) -> None:
@@ -478,7 +536,7 @@ class StateStore:
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (result_json, pr_url, _now_ms(), task_id),
             )
-            self._db.commit()
+            self._commit()
 
     def mark_failed(self, task_id: str, error: str) -> None:
         with self._lock:
@@ -487,7 +545,7 @@ class StateStore:
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (error, _now_ms(), task_id),
             )
-            self._db.commit()
+            self._commit()
 
     def mark_task_cancelled(self, task_id: str) -> bool:
         """Abort a task. Transitions pending/running -> cancelled (terminal).
@@ -501,7 +559,7 @@ class StateStore:
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (_now_ms(), task_id),
             )
-            self._db.commit()
+            self._commit()
             return cur.rowcount == 1
 
     def cancel_program_pending_tasks(self, program_id: str) -> list[str]:
@@ -522,7 +580,7 @@ class StateStore:
                     "WHERE program_id = ? AND status = 'pending'",
                     (_now_ms(), program_id),
                 )
-                self._db.commit()
+                self._commit()
         return ids
 
     def get_task(self, task_id: str) -> Optional[Task]:
@@ -578,6 +636,18 @@ class StateStore:
             ).fetchall()
         return [_row_to_task(r) for r in rows]
 
+    def latest_task_for_goal(self, goal_id: str) -> Optional[Task]:
+        """The most recent task dispatched by ``goal_id`` (any status), or None.
+        Mirrors :meth:`latest_program_for_goal`; a later orphan-recovery pass
+        reads it to re-adopt a task whose goal-side in_flight ref was lost."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM tasks WHERE parent_goal_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (goal_id,),
+            ).fetchone()
+        return _row_to_task(row) if row else None
+
     # ---- programs -------------------------------------------------------
 
     def create_program(
@@ -602,7 +672,7 @@ class StateStore:
                     1 if open_pr else 0, verify_cmd, parent_goal_id,
                 ),
             )
-            self._db.commit()
+            self._commit()
 
     def mark_program_running(self, program_id: str) -> None:
         with self._lock:
@@ -611,7 +681,7 @@ class StateStore:
                 "WHERE id = ? AND status = 'planning'",
                 (program_id,),
             )
-            self._db.commit()
+            self._commit()
 
     def mark_program_done(self, program_id: str) -> None:
         with self._lock:
@@ -620,7 +690,7 @@ class StateStore:
                 "WHERE id = ? AND status IN ('planning', 'running')",
                 (_now_ms(), program_id),
             )
-            self._db.commit()
+            self._commit()
 
     def mark_program_failed(self, program_id: str, error: str) -> None:
         with self._lock:
@@ -629,7 +699,7 @@ class StateStore:
                 "WHERE id = ? AND status IN ('planning', 'running')",
                 (error, _now_ms(), program_id),
             )
-            self._db.commit()
+            self._commit()
 
     def mark_program_cancelled(self, program_id: str, error: Optional[str] = None) -> None:
         """Abort a program. Transitions planning/running -> cancelled (terminal).
@@ -641,7 +711,7 @@ class StateStore:
                 "WHERE id = ? AND status IN ('planning', 'running')",
                 (error, _now_ms(), program_id),
             )
-            self._db.commit()
+            self._commit()
 
     def list_programs(self, *, limit: int = 100) -> list[Program]:
         with self._lock:
@@ -698,7 +768,7 @@ class StateStore:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (task_id, program_id, type, source, payload_json, ts if ts is not None else _now_ms()),
             )
-            self._db.commit()
+            self._commit()
             return int(cur.lastrowid)
 
     # ---- traces (per-tick observability) --------------------------------
@@ -727,7 +797,7 @@ class StateStore:
                     json.dumps(payload, default=str),
                 ),
             )
-            self._db.commit()
+            self._commit()
             return int(cur.lastrowid)
 
     def read_traces(
@@ -921,7 +991,7 @@ class StateStore:
                     "UPDATE tasks SET status = 'pending', started_at = NULL "
                     "WHERE status = 'running'"
                 )
-                self._db.commit()
+                self._commit()
         return ids
 
     def requeue_task(self, task_id: str) -> bool:
@@ -937,7 +1007,7 @@ class StateStore:
                 "WHERE id = ? AND status = 'running'",
                 (task_id,),
             )
-            self._db.commit()
+            self._commit()
             return cur.rowcount > 0
 
     # ---- meta / global flags (the quota pause) ---------------------------
@@ -949,7 +1019,7 @@ class StateStore:
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
             )
-            self._db.commit()
+            self._commit()
 
     def get_meta(self, key: str) -> Optional[str]:
         with self._lock:
@@ -959,7 +1029,7 @@ class StateStore:
     def delete_meta(self, key: str) -> None:
         with self._lock:
             self._db.execute("DELETE FROM meta WHERE key = ?", (key,))
-            self._db.commit()
+            self._commit()
 
     def list_meta_keys(self, prefix: str = "") -> list[str]:
         """Meta keys, optionally filtered to those starting with ``prefix``. Used
@@ -1211,7 +1281,7 @@ class StateStore:
                     "WHERE program_id = ? AND status = 'pending'",
                     (note, program_id),
                 )
-                self._db.commit()
+                self._commit()
         return ids
 
     def close(self) -> None:

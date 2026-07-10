@@ -19,11 +19,15 @@ import re
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import yaml
 
 from .models import Goal, GoalStatus, InFlight
+from .state import GoalState
+
+if TYPE_CHECKING:
+    from ..state_store import StateStore
 
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 _DURATION = re.compile(r"^\s*(\d+)\s*([smhd])\s*$")
@@ -63,9 +67,28 @@ class GoalDocCorrupt(RuntimeError):
 
 
 class GoalStore:
-    def __init__(self, goals_dir: Path, *, now: Callable[[], datetime] = _default_now) -> None:
+    def __init__(
+        self,
+        goals_dir: Path,
+        *,
+        now: Callable[[], datetime] = _default_now,
+        state: "StateStore | None" = None,
+    ) -> None:
         self._root = Path(goals_dir)
         self._now = now
+        # Tranche 1 seam (substrate, UNUSED): the SQLite home goal state is being
+        # consolidated into. When a shared StateStore is handed in (production
+        # will pass the one that owns devclaw.db), we borrow it; otherwise we
+        # self-create a private, isolated DB beside the goals so existing callers
+        # — including ~40 GoalStore(tmp_path) test constructions — keep working
+        # with zero changes. The GoalState bootstraps its tables but nothing
+        # reads or writes them yet.
+        if state is None:
+            from ..state_store import StateStore
+
+            state = StateStore(str(self._root / ".goal-state.db"))
+        self._state = state
+        self._goal_state = GoalState(self._state)
 
     # ---- discovery ---------------------------------------------------------
 
