@@ -27,7 +27,7 @@ Above layer 1: humans + OpenClaw waiter. Below layer 5: Claude (the LLM, via Pro
 - **Public surface:** every `@mcp.tool` decorator in `devclaw/server/tools.py`. HTTP endpoints in `devclaw/server/http.py`.
 - **Allowed to call:** layer 2 (`goals.create_goal(...)`, `goals.get_goal(...)`, etc.) and the project registry.
 - **Forbidden:** reaching into layer 4 directly (e.g. dispatching tasks bypassing `GoalService`), touching the file-system mind directly (must go through `GoalStore`).
-- **Tested by:** `tests/test_mcp_tools*.py`, `tests/test_dashboard.py` — full HTTP requests against the FastMCP app with the layers below stubbed.
+- **Tested by:** `tests/test_dashboard.py`, `tests/test_console_prs_endpoint.py` — full HTTP/tool requests against the FastMCP app (via the in-process client in `conftest.py`) with the layers below stubbed.
 
 ### Layer 2 — Orchestrator
 
@@ -35,7 +35,7 @@ Above layer 1: humans + OpenClaw waiter. Below layer 5: Claude (the LLM, via Pro
 - **Internal state:** `GoalStore` (yaml/markdown on disk) + `StateStore` (SQLite for the task queue's events).
 - **Allowed to call:** layer 3 (cognition callers) and layer 4 (via the in-process engine).
 - **Forbidden:** spawning sandbox containers directly (must go through `TaskQueue` + `Engine`); calling `claude` directly (must go through a cognition caller).
-- **Tested by:** `tests/test_goal_*.py`, `tests/test_firming_handler.py`, `tests/test_phase_*.py` — drives single ticks with stubbed cognition + stubbed engine.
+- **Tested by:** `tests/test_goal_*.py` (e.g. `test_goal_tick.py`, `test_goal_engine.py`, `test_goal_reconcile.py`), `tests/test_firming_handler.py`, `tests/test_goal_tick_firming.py` — drive single ticks with stubbed cognition + stubbed engine.
 
 ### Layer 3 — Cognition callers
 
@@ -51,7 +51,7 @@ Above layer 1: humans + OpenClaw waiter. Below layer 5: Claude (the LLM, via Pro
 - **Engine implementations:** `sandcastle.py` (production, docker per task), `claude_sdk.py` (in-sandbox claude --print spike), `host.py` (host-side, no sandbox — testing only), `stub.py` (deterministic, no LLM).
 - **Allowed to call:** docker socket (sandcastle only), the workspace filesystem.
 - **Forbidden:** reading the goal store (the orchestrator passes everything the engine needs in `EngineRequest`); writing event lines that aren't valid protocol.
-- **Tested by:** `tests/test_sandcastle.py`, `tests/test_task_queue.py`, plus the stub engine drives all higher-layer tests so they need no docker / no claude.
+- **Tested by:** queue lifecycle in `tests/test_queue_dag.py`, `tests/test_durability.py`, `tests/test_task_retry.py`, `tests/test_task_timeout.py`, `tests/test_rate_limit_pause.py`; engine/sandbox behavior in `tests/test_workspace_breaker.py`, `tests/test_sandbox_isolation.py`, `tests/test_container_hygiene.py`, `tests/test_stub_engine.py`, `tests/test_claude_sdk_engine.py`. The stub engine also drives all higher-layer tests so they need no docker / no claude.
 
 ### Layer 5 — Worker harness
 

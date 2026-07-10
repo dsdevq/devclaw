@@ -101,7 +101,7 @@ Each driver wires the engine exactly like the server does (`StateStore` + `TaskQ
 
 | # | Gate | What it proves | Cost | Run when |
 |---|---|---|---|---|
-| L1 | `pytest -q` (390 unit) | The static contract: types, pure functions, prompt loading, store invariants. | seconds, free | every change |
+| L1 | `pytest -q` (~1037 unit) | The static contract: types, pure functions, prompt loading, store invariants. | seconds, free | every change |
 | L2 | `run_all.py` (stub e2e, 11 scenarios) | Orchestration regression: every runtime path (single-task, full lifecycle, grill, blocked planner, steered goal, failing verify, watchdog, quota pause, off-track done-gate). Stub cognition + stub engine. | ~30s, free | every change touching runtime path |
 | L3 | `run_all.py --cognition claude` | Real cognition makes sensible decisions on the same 11 scenarios. Catches prompt drift and decision-quality regressions. | ~2-3 min, OAuth quota | before merging anything that touches a prompt or cognition seam |
 | L4 | `measure_passrate.py` (5 lifekit-dashboard tasks) | The full pipeline (run_sandcastle → docker → OpenHands → claude → open_pr) actually ships verified PRs. The end-to-end smoke. | ~30-60 min, OAuth quota, 5 real PRs | pre-release, after any engine/delivery change |
