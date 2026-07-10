@@ -1608,3 +1608,101 @@ async def test_standing_goal_done_gate_blocks_instead_of_closing(tmp_path):
     assert "STANDING-GOAL CONTRACT" in evaluator.last_prompt
     # owner was told, not bypassed
     assert any("standing" in m.lower() for m in notifier.sent)
+
+
+# ---- orphaned-program reconcile (2026-07-09 lost-in-flight-ref incident) ----
+
+
+class OrphanAwareEngine(FakeEngine):
+    """FakeEngine + the latest_program_for_goal finder the reconcile probes."""
+
+    def __init__(self, *, program: "tuple[str, str] | None" = None, **kw):
+        super().__init__(**kw)
+        self.program = program
+
+    def latest_program_for_goal(self, goal_id: str):
+        return self.program
+
+
+@pytest.mark.asyncio
+async def test_orphaned_failed_program_readopted_and_settled(tmp_path):
+    """An EXECUTING goal whose in_flight ref was lost (STATUS.md truncated by
+    a crash mid-write) must rediscover its own already-failed program via
+    parent_goal_id, settle it, and replan WITH the failure as input — instead
+    of idling forever on a result that will never arrive."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", cadence="1d")
+    # cadence not due + no steering → without the reconcile this tick is IDLE
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+    store.append_log("g", "dispatched start_program: Program: reporting & dashboards")
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = OrphanAwareEngine(
+        program=("p_lost", "Program: reporting & dashboards"),
+        poll_result=PollResult(
+            terminal=True, status="failed",
+            detail="program failed — task exceeded the 1800s wall-clock timeout",
+        ),
+    )
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED
+    assert planner.calls == 1
+    assert "wall-clock timeout" in planner.last_prompt  # failure fed to the planner
+    log = store.recent_log("g")
+    assert "re-adopted orphaned program p_lost" in log
+    assert "start_program p_lost → failed" in log
+
+
+@pytest.mark.asyncio
+async def test_settled_program_is_not_readopted(tmp_path):
+    """A program whose result already reached log.md must NOT be re-adopted —
+    the reconcile only rescues lost refs, it never replays settled work."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", cadence="1d")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+    store.append_log("g", "start_program p_seen → failed")
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = OrphanAwareEngine(program=("p_seen", "Program: reporting"))
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.IDLE
+    assert planner.calls == 0
+    assert engine.polls == 0
+
+
+@pytest.mark.asyncio
+async def test_orphaned_running_program_readopted_as_in_flight(tmp_path):
+    """A lost ref to a STILL-RUNNING program is restored and the tick reports
+    IN_FLIGHT — zero cognition spent, and the next settle works normally."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", cadence="1d")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = OrphanAwareEngine(
+        program=("p_run", "Program: reporting"),
+        poll_result=PollResult(terminal=False, status="running"),
+    )
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.IN_FLIGHT
+    assert planner.calls == 0
+    s = store.load_status("g")
+    assert s.in_flight is not None and s.in_flight.id == "p_run"
+    assert s.in_flight.ref_kind == "program"
+
+
+@pytest.mark.asyncio
+async def test_save_status_is_atomic_replace(tmp_path):
+    """save_status must never leave a partial STATUS.md or a stray tmp file —
+    the file is the only link to in-flight work."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(phase="in_flight", in_flight=InFlight("devclaw", "start_program", "p1", "program")),
+    )
+    d = tmp_path / "g"
+    assert not (d / "STATUS.md.tmp").exists()
+    assert store.load_status("g").in_flight.id == "p1"

@@ -14,6 +14,7 @@ A clock is injected (``now``) so ticks are deterministic under test.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -225,7 +226,13 @@ class GoalStore:
         text = "---\n" + yaml.safe_dump(fm, sort_keys=False).rstrip() + "\n---\n\n" + body
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
-        (d / "STATUS.md").write_text(text)
+        # Atomic replace: STATUS.md is rewritten on every tick and holds the
+        # ONLY link to in-flight work — a crash mid-write (container restart,
+        # 2026-07-09) left a truncated file that silently loaded as a default
+        # status, orphaning a running program the goal then waited on forever.
+        tmp = d / "STATUS.md.tmp"
+        tmp.write_text(text)
+        os.replace(tmp, d / "STATUS.md")
 
     # ---- log (events) ------------------------------------------------------
 
@@ -237,6 +244,13 @@ class GoalStore:
             path.write_text(f"# {goal_id} — log\n\n")
         with path.open("a") as fh:
             fh.write(f"- [{self._now().isoformat(timespec='seconds')}] {message}\n")
+
+    def log_contains(self, goal_id: str, needle: str) -> bool:
+        """Whether the goal's full log mentions ``needle``. Used by the
+        orphaned-program reconcile to tell "settled and recorded" apart from
+        "the in-flight ref was lost before the result was ever seen"."""
+        path = self._dir(goal_id) / "log.md"
+        return path.exists() and needle in path.read_text()
 
     def recent_log(self, goal_id: str, n: int = 20) -> str:
         path = self._dir(goal_id) / "log.md"

@@ -118,6 +118,11 @@ class Program:
     #: legacy behavior); when set, child tasks run this after the agent
     #: finishes and only succeed on exit 0.
     verify_cmd: Optional[str] = None
+    #: Durable goal-owner pointer (2026-07-10), mirroring tasks.parent_goal_id.
+    #: Without it a goal whose STATUS.md in_flight ref is lost (crash mid-write)
+    #: has NO way to rediscover its own running/failed program — the 2026-07-09
+    #: closeloop-mission-v2 dead night. Null for standalone start_program calls.
+    parent_goal_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -131,6 +136,7 @@ class Program:
             "completedAt": self.completed_at,
             "openPr": self.open_pr,
             "verifyCmd": self.verify_cmd,
+            "parentGoalId": self.parent_goal_id,
         }
 
 
@@ -204,6 +210,9 @@ def _row_to_program(r: sqlite3.Row) -> Program:
         completed_at=r["completed_at"],
         open_pr=bool(r["open_pr"]) if "open_pr" in r.keys() else False,
         verify_cmd=r["verify_cmd"] if "verify_cmd" in r.keys() else None,
+        parent_goal_id=(
+            r["parent_goal_id"] if "parent_goal_id" in r.keys() else None
+        ),
     )
 
 
@@ -278,7 +287,8 @@ class StateStore:
                   created_at      INTEGER NOT NULL,
                   completed_at    INTEGER,
                   open_pr         INTEGER NOT NULL DEFAULT 0,
-                  verify_cmd      TEXT
+                  verify_cmd      TEXT,
+                  parent_goal_id  TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
@@ -337,6 +347,10 @@ class StateStore:
                 # heartbeat when it dispatches a task; null for standalone
                 # dispatch_task calls. Orthogonal to program_id.
                 "ALTER TABLE tasks ADD COLUMN parent_goal_id TEXT",
+                # Durable goal-owner pointer on PROGRAMS too (2026-07-10) —
+                # the only recovery path when the goal-side in_flight ref is
+                # lost (STATUS.md truncated by a crash mid-write).
+                "ALTER TABLE programs ADD COLUMN parent_goal_id TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -352,6 +366,7 @@ class StateStore:
                 CREATE INDEX IF NOT EXISTS idx_tasks_program    ON tasks(program_id);
                 CREATE INDEX IF NOT EXISTS idx_tasks_parent_goal ON tasks(parent_goal_id);
                 CREATE INDEX IF NOT EXISTS idx_programs_status  ON programs(status);
+                CREATE INDEX IF NOT EXISTS idx_programs_parent_goal ON programs(parent_goal_id);
                 CREATE INDEX IF NOT EXISTS idx_events_program   ON events(program_id, id);
                 CREATE INDEX IF NOT EXISTS idx_events_task      ON events(task_id, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_goal      ON traces(goal_id, id);
@@ -560,15 +575,17 @@ class StateStore:
         notify_url: Optional[str] = None,
         open_pr: bool = False,
         verify_cmd: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT INTO programs "
-                "(id, goal, workspace_dir, notify_url, status, created_at, open_pr, verify_cmd) "
-                "VALUES (?, ?, ?, ?, 'planning', ?, ?, ?)",
+                "(id, goal, workspace_dir, notify_url, status, created_at, open_pr, "
+                " verify_cmd, parent_goal_id) "
+                "VALUES (?, ?, ?, ?, 'planning', ?, ?, ?, ?)",
                 (
                     id, goal, workspace_dir, notify_url, _now_ms(),
-                    1 if open_pr else 0, verify_cmd,
+                    1 if open_pr else 0, verify_cmd, parent_goal_id,
                 ),
             )
             self._db.commit()
@@ -618,6 +635,18 @@ class StateStore:
                 "SELECT * FROM programs ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [_row_to_program(r) for r in rows]
+
+    def latest_program_for_goal(self, goal_id: str) -> Optional[Program]:
+        """The most recent program dispatched by ``goal_id`` (any status).
+        Read by the goal tick's orphaned-program reconcile: if this program's
+        result never made it into the goal's log, the goal re-adopts it."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM programs WHERE parent_goal_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (goal_id,),
+            ).fetchone()
+        return _row_to_program(row) if row else None
 
     def get_program(self, program_id: str) -> Optional[Program]:
         with self._lock:
