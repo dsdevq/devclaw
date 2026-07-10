@@ -40,7 +40,7 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
-from .delivery import deliver_change
+from .delivery import deliver_change, delivery_failed
 from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
@@ -659,6 +659,8 @@ class TaskQueue:
             # verdict (→ PR body) so the delivered PR describes itself.
             verify = success.get("verify") if isinstance(success, dict) else None
             pr_url = None
+            failure: Optional[str] = None
+            delivery: dict = {}
             try:
                 delivery = await deliver_change(
                     workspace_dir=workspace_dir, task_id=task_id, goal=goal,
@@ -666,11 +668,30 @@ class TaskQueue:
                     title=(row.title if row else None),
                 )
                 pr_url = delivery.get("pr_url")
+                failure = delivery_failed(delivery)
                 sys.stderr.write(f"task-queue: delivery task={task_id}: {delivery}\n")
-            except Exception as err:  # delivery must never strand a verified task
+            except Exception as err:  # deliver_change promises not to raise; belt+suspenders
+                failure = f"{err.__class__.__name__}: {err}"
                 sys.stderr.write(f"task-queue: delivery failed task={task_id}: {err}\n")
-            # 'done' becomes observable only now, atomically with pr_url.
-            self._store.mark_done(task_id, json.dumps(success), pr_url=pr_url)
+            if isinstance(success, dict):
+                # The delivery verdict is grounded evidence — persist it with the
+                # result so the goal poller reads the PR/branch/push state, not
+                # just a bare pr_url column.
+                success["delivery"] = delivery
+            if failure is not None and not pr_url:
+                # A requested delivery that BROKE must not settle 'done': a
+                # done-without-PR row reads as shipped to every poller upstream
+                # (the goal layer plans its next action off it — the exact
+                # false-green the defer_done mechanism exists to prevent).
+                # Benign no-PR outcomes (nothing to ship, local-only repo) are
+                # not failures — delivery_failed() filters those out above.
+                self._store.mark_failed(
+                    task_id, f"gate passed but delivery failed: {failure}"
+                )
+                self._check_and_trip_breaker(workspace_dir, task_id)
+            else:
+                # 'done' becomes observable only now, atomically with pr_url.
+                self._store.mark_done(task_id, json.dumps(success), pr_url=pr_url)
         if program_id is None:
             final = self._store.get_task(task_id)
             if final and final.notify_url:

@@ -401,3 +401,93 @@ async def test_plain_task_does_not_deliver(store, tmp_path):
     await q.drain()
     assert store.get_task(tid).status == "done"
     assert _branch(repo) == start_branch                 # no delivery branch created
+
+
+# ---- broken delivery must not settle done (T0.1) ----------------------------
+
+
+def test_delivery_failed_classifies_benign_vs_broken():
+    from devclaw.delivery import delivery_failed
+
+    # benign: nothing to ship / local-only repo → not a failure
+    assert delivery_failed({"error": None, "pr_url": "x"}) is None
+    assert delivery_failed({"error": "no changes to deliver"}) is None
+    assert delivery_failed({"error": "no 'origin' remote — left change on a local branch"}) is None
+    # broken: the attempt itself failed at a step it tried
+    assert delivery_failed({"error": "workspace is not a git repository"})
+    assert delivery_failed({"error": "branch failed: fatal: ..."})
+    assert delivery_failed({"error": "commit failed: ..."})
+    assert delivery_failed({"error": "push failed (check repo push auth): remote rejected"})
+    assert delivery_failed({"error": "pushed, but gh pr create failed: auth"})
+
+
+async def test_broken_delivery_settles_failed_not_done(store, tmp_path, monkeypatch):
+    """The false-green closure: a verified change whose push/PR BROKE must
+    settle 'failed' with the delivery error — never 'done' with pr_url=None,
+    which every poller upstream (the goal layer) reads as shipped."""
+    repo = str(tmp_path / "ws4")
+    os.makedirs(repo)
+    _init_repo(repo)
+
+    async def broken_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None):
+        return {"delivered": True, "branch": "devclaw/x", "committed": True,
+                "pushed": False, "pr_url": None,
+                "error": "push failed (check repo push auth): remote rejected"}
+
+    monkeypatch.setattr("devclaw.task_queue.deliver_change", broken_deliver)
+
+    q = TaskQueue(store, runner=_writing_runner("feature.txt"))
+    tid = q.submit(kind="implement_feature", workspace_dir=repo, goal="add feature", deliver=True)
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "delivery failed" in (t.error or "") and "push failed" in (t.error or "")
+    assert t.pr_url is None
+
+
+async def test_delivery_exception_settles_failed_not_done(store, tmp_path, monkeypatch):
+    """deliver_change promises never to raise; if it does anyway, the task must
+    fail loudly — not settle 'done' with the error swallowed to stderr."""
+    repo = str(tmp_path / "ws5")
+    os.makedirs(repo)
+    _init_repo(repo)
+
+    async def raising_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None):
+        raise RuntimeError("gh exploded")
+
+    monkeypatch.setattr("devclaw.task_queue.deliver_change", raising_deliver)
+
+    q = TaskQueue(store, runner=_writing_runner("feature.txt"))
+    tid = q.submit(kind="implement_feature", workspace_dir=repo, goal="add feature", deliver=True)
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "gh exploded" in (t.error or "")
+
+
+async def test_no_changes_delivery_still_settles_done(store, tmp_path):
+    """Benign no-PR outcome: the gate passed but the workspace has no changes
+    (e.g. the requirement already held). Nothing was shipped because nothing
+    existed to ship — that is a 'done' without a PR, not a failure. (The
+    no-remote sibling case is covered by test_open_pr_task_triggers_delivery.)"""
+    repo = str(tmp_path / "ws6")
+    os.makedirs(repo)
+    _init_repo(repo)
+
+    async def clean_runner(req: EngineRequest):
+        # writes nothing — clean tree at delivery time
+        return {"status": "ok", "workspaceDir": req.workspace_dir,
+                "verify": {"ran": True, "cmd": "x", "passed": True,
+                           "exit_code": 0, "timed_out": False, "output": ""}}
+
+    q = TaskQueue(store, runner=clean_runner)
+    tid = q.submit(kind="implement_feature", workspace_dir=repo, goal="g", deliver=True)
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "done" and t.pr_url is None
+    # the delivery verdict rides along in the persisted result as evidence
+    import json as _json
+    assert "no changes to deliver" in _json.loads(t.result_json)["delivery"]["error"]
