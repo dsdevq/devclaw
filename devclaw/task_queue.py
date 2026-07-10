@@ -143,11 +143,18 @@ async def _git_diff(host_dir: str) -> str:
 def _integrity_failure(diff: str) -> Optional[str]:
     """Return a failure summary if the change weakened the tests (deleted/skipped),
     else None. Enforces what the prompt only asks for. Operates on an already-
-    computed diff (shared with the review gate). Best-effort — never raises."""
+    computed diff (shared with the review gate). A CRASH in the scanner fails
+    CLOSED: a quality gate that silently no-ops on its own error is exactly how
+    a gutted test suite ships unnoticed — the crash feeds the same retry loop
+    as a real integrity failure, then escalates."""
     try:
         report = scan_diff(diff)
-    except Exception:  # noqa: BLE001 — a guard must never break a real task
-        return None
+    except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
+        return (
+            f"test-integrity gate crashed (failing closed): "
+            f"{err.__class__.__name__}: {err}. The change was not scanned for "
+            "weakened tests, so it must not ship on the gate's silence."
+        )
     if report.ok:
         return None
     return (
@@ -932,18 +939,26 @@ class TaskQueue:
     ) -> Optional[str]:
         """Run the pre-PR adversarial review gate on the change's diff. Returns the
         request-changes feedback (→ fed back into the retry loop like a gate fail),
-        or None to let the task ship. Fails OPEN — a disabled gate, a non-code kind,
-        an empty diff, or any reviewer error returns None: a review hiccup must
-        never block a change that already passed the behavioural gate."""
+        or None to let the task ship. Fails open ONLY for the by-design cases —
+        a disabled gate, a non-code kind, an empty diff. A reviewer CRASH fails
+        CLOSED: a crash is not an approval, and the old failing-open path meant
+        any internal reviewer error shipped the change unreviewed with a line on
+        stderr nobody reads. A quota/rate-limit crash text is classified by the
+        caller's quota guard and PAUSES (requeue + resume) instead of failing —
+        the correct semantics for "the reviewer couldn't run right now"."""
         if not self._review_gate_enabled(workspace_dir) or kind not in _REVIEWABLE_KINDS:
             return None
         if not diff.strip():
             return None
         try:
             review = await self._reviewer(goal=goal, kind=kind, diff=diff)
-        except Exception as err:  # noqa: BLE001 — never block a verified task on a review crash
-            sys.stderr.write(f"task-queue: review gate errored (failing open): {err}\n")
-            return None
+        except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
+            sys.stderr.write(f"task-queue: review gate crashed (failing closed): {err}\n")
+            return (
+                f"review gate crashed (failing closed): "
+                f"{err.__class__.__name__}: {err}. The diff was never reviewed, "
+                "so it must not ship on the gate's silence."
+            )
         if review.get("verdict") == "request_changes":
             sys.stderr.write(
                 f"task-queue: review gate requested changes "

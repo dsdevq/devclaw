@@ -203,19 +203,43 @@ async def test_approve_ships_first_try(store, monkeypatch):
     assert len(calls) == 1  # a clean review doesn't trigger a needless retry
 
 
-async def test_review_fails_open_on_reviewer_error(store, monkeypatch):
+async def test_review_crash_fails_closed(store, monkeypatch):
+    """A reviewer CRASH is not an approval (T0.2): the crash text feeds the
+    retry loop like a request_changes, and with retries exhausted the task
+    FAILS — it must never ship unreviewed on the gate's silence. (The old
+    behavior shipped it with one stderr line nobody reads.)"""
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     calls: list = []
 
     async def boom(*, goal, kind, diff):
-        raise RuntimeError("claude unreachable")
+        raise RuntimeError("reviewer exploded")
 
     q = TaskQueue(store, runner=_ok_gate_runner(calls), reviewer=boom)
     tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
     await q.drain()
-    # a review crash must NOT block a gate-verified task — it ships.
-    assert store.get_task(tid).status == "done"
-    assert len(calls) == 1
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "review gate crashed" in (t.error or "") and "reviewer exploded" in (t.error or "")
+    assert len(calls) == 2  # crash fed back like request_changes → one retry, then escalate
+
+
+async def test_review_quota_crash_pauses_instead_of_failing(store, monkeypatch):
+    """A reviewer crash whose text is a usage-limit means the reviewer is
+    UNAVAILABLE, not that the change is bad: failing closed feeds the text to
+    the caller's quota guard, which classifies it, requeues the task, and
+    pauses dispatch — resume re-runs the task INCLUDING its review. The old
+    fail-open shipped the change unreviewed precisely when quota ran out."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+
+    async def quota_boom(*, goal, kind, diff):
+        raise RuntimeError("Internal error: You're out of extra usage · resets 10pm (UTC)")
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=quota_boom)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    assert store.get_task(tid).status == "pending"   # requeued, NOT failed
+    until, reason = store.global_pause()
+    assert until > 0 and "quota" in reason
 
 
 async def test_review_skipped_when_disabled(store, monkeypatch):
