@@ -51,13 +51,10 @@ The image bakes a pinned `claude` CLI + `claude-agent-acp`; the host mounts your
 export DEVCLAW_DB=$PWD/.shakedown/devclaw.db        # keep state out of the repo
 export DEVCLAW_STATE=$PWD/.shakedown/state
 export DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000
-export DEVCLAW_HOST=127.0.0.1                       # tokenless http is loopback-only
 devclaw-mcp          # logs to stderr; leave running in this terminal
 ```
 
-You should see: `devclaw v… ready (http://127.0.0.1:8000/mcp, db=…, recovered=0)`.
-(Without `DEVCLAW_HOST=127.0.0.1` the server refuses to start: the default bind
-is `0.0.0.0`, and a non-loopback bind with no `DEVCLAW_TOKEN` fails closed.)
+You should see: `devclaw v… ready (http://0.0.0.0:8000/mcp, db=…, recovered=0)`.
 
 In a second terminal:
 
@@ -69,7 +66,7 @@ open http://localhost:8000/dashboard   # (or just browse it) — empty for now
 ### A tiny MCP driver
 
 Tools are MCP, not REST. Save this helper and reuse it for every step below
-(no `DEVCLAW_TOKEN` set → no auth needed on the loopback bind):
+(no `DEVCLAW_TOKEN` set → no auth needed):
 
 ```python
 # drive.py
