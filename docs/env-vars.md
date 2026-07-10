@@ -18,8 +18,8 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 |---|---|---|
 | `DEVCLAW_TRANSPORT` | `stdio` | `stdio` (local dev / tests) or `http` (long-running service) |
 | `DEVCLAW_PORT` | `8000` | HTTP port when `DEVCLAW_TRANSPORT=http` |
-| `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address. Set `127.0.0.1` to restrict to loopback. A non-loopback bind requires `DEVCLAW_TOKEN` (see below). |
-| `DEVCLAW_TOKEN` | — | Bearer-token gate for every HTTP route except `/health`. Sent as `Authorization: Bearer <token>` (MCP clients) or `?token=` (dashboard/SSE). Unset = no auth, allowed **only on a loopback bind** (`127.0.0.1` / `::1` / `localhost`): with `DEVCLAW_TRANSPORT=http` and a non-loopback `DEVCLAW_HOST` (including the default `0.0.0.0`), the server **refuses to start** until you either set a token or bind loopback — fail-closed, so mutating routes are never exposed on the network unauthenticated. |
+| `DEVCLAW_HOST` | `0.0.0.0` | HTTP bind address. Set `127.0.0.1` to restrict to loopback. |
+| `DEVCLAW_TOKEN` | — | Bearer-token gate for every HTTP route except `/health`. Sent as `Authorization: Bearer <token>` (MCP clients) or `?token=` (dashboard/SSE). Unset = no auth (local dev). |
 
 ## State + concurrency
 
