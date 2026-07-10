@@ -20,7 +20,7 @@ The core problem: **DevClaw was trying to be both an orchestrator and an executi
 | Execution engine (agent loop, sandbox, coding, git) | **OpenHands** |
 | Goal decomposition (Goal → Tasks) | **DevClaw planner** |
 | Task state (what's running, done, blocked) | **DevClaw state store** |
-| Progress polling + user notification | **DevClaw poller** |
+| Settle detection + user notification | **DevClaw TaskQueue** (in-process on-settle hook, not a poller) |
 | Interface to OpenClaw | **DevClaw MCP server** |
 
 DevClaw stops being an execution engine. OpenHands owns the hard part.
@@ -30,24 +30,36 @@ DevClaw stops being an execution engine. OpenHands owns the hard part.
 ## Architecture
 
 ```
-You (Telegram / Claude Code)
+You (Telegram / voice / chat)
   │
   ▼
-OpenClaw
-  └── MCP call → DevClaw MCP server
+OpenClaw waiter agent
+  └── MCP call → DevClaw MCP server (devclaw-mcp — long-lived Python process)
                     │
              DevClaw Runtime
-             ├── planner       Goal → Milestones → Tasks
-             ├── state store   SQLite — task status, history, results
-             ├── poller        polls OpenHands, fires notifications
-             └── REST client   submits tasks to OpenHands API
-                    │
-             OpenHands (Docker, self-hosted on VPS)
-             ├── agent loop    autonomous reasoning + action
-             ├── sandbox       isolated Docker container per task
-             ├── tools         git, gh, bash, file edit, browser
-             └── LLM backend   Claude Max via ACP (no API key needed)
+             ├── GoalService + heartbeat   durable goals → plan → dispatch → evaluate
+             ├── planner / evaluator        one-shot `claude --print` cognition
+             ├── state store   SQLite — programs, tasks, append-only events
+             ├── TaskQueue     in-process dispatch; on-settle hook wakes the heartbeat
+             └── engine/sandcastle.py       `docker run --rm` — one ephemeral container per task
+                    │  (devclaw spawns it itself; there is no OpenHands service to poll)
+                    ▼
+             ephemeral sandbox container (per task, self-destructs on exit)
+             ├── ENTRYPOINT     openhands-runner/runner.py
+             ├── OpenHands SDK  thin ACP turn-loop (Conversation + ACPAgent)
+             ├── claude-agent-acp → claude-code CLI   the actual agent loop
+             └── LLM            Claude via ACP over Pro/Max OAuth (no API key)
 ```
+
+**How the engine actually works (not a service, not a wire).** DevClaw does **not**
+run OpenHands as a long-lived REST server and does **not** poll it. The engine
+(`devclaw/engine/sandcastle.py`) issues a `docker run --rm` per task; the container's
+ENTRYPOINT runs `openhands-runner/runner.py`, which embeds the OpenHands SDK as a thin
+ACP turn-loop around `claude`. Events stream back as line-delimited JSON on the
+container's **stdout** (`event:` lines + one terminating `result:` line) — a process
+boundary, not a network one. A task "settling" is an in-process SQLite write plus an
+on-settle hook (`TaskQueue.set_on_settle`) that wakes the goal heartbeat immediately.
+There is no poller, no `OPENHANDS_URL`, no callback URL between devclaw and its engine.
 
 ---
 
@@ -60,20 +72,37 @@ OpenHands (formerly OpenDevin) is an autonomous coding agent runtime. It takes a
 
 ### Why OpenHands fits
 
-- **REST API** — programmatic task submission, status polling, result retrieval
-- **Docker sandbox** — isolated execution per task, no contamination between runs
-- **Async execution** — submit a task, poll for completion, no blocking
-- **Pause & resume** — durable state across container restarts
-- **ACP integration** — can delegate to Claude Code as the LLM backend, which means Claude Max OAuth, no API keys needed. See: https://docs.openhands.dev/usage/acp
-- **Headless mode** — no UI required, runs as a pure backend service
-- **Sub-agent delegation** — internally handles multi-step, multi-agent work
+DevClaw embeds the **OpenHands Python SDK** *inside the per-task sandbox*
+(`openhands-runner/runner.py`) — not as an external service it talks to over HTTP.
+What the SDK buys us:
 
-### LLM backend: Claude Max via ACP
+- **A ready agent loop** — `Conversation` + `ACPAgent` drive the reason → act →
+  observe cycle so devclaw doesn't hand-roll one.
+- **ACP delegation to `claude`** — the agent's cognition is `claude-agent-acp` →
+  `claude-code`, i.e. Claude over Pro/Max OAuth, **no `ANTHROPIC_API_KEY`**. Same
+  auth model as the rest of the stack. See: https://docs.openhands.dev/usage/acp
+- **A clean event stream** — the runner emits line-delimited JSON on stdout
+  (`event:` lines + one terminating `result:` line), which `sandcastle.py` parses.
+  That is the entire devclaw↔runner protocol.
 
-OpenHands supports ACP (Agent Communication Protocol), which lets it delegate LLM calls to Claude Code instead of calling the Anthropic API directly. This means:
+### Why OpenHands and sandbox isolation are orthogonal
 
-- Uses the existing Claude Max subscription — zero marginal inference cost for autonomous overnight runs
-- No `ANTHROPIC_API_KEY` needed
+The agent (what reasons and edits code) and the box it runs in (the isolation
+boundary) are **different layers**. OpenHands is the agent loop; the sandbox is the
+container. DevClaw owns the box and *hosts* the agent inside it, rather than letting
+the agent framework own isolation. That is why devclaw calls `docker run --rm` itself
+(in `engine/sandcastle.py`) instead of depending on a sandbox-provider library
+(`@ai-hero/sandcastle`) or on OpenHands' own remote runtime: the container lifecycle,
+the mounts, the read-only `~/.claude` allowlist, and teardown are devclaw's contract
+to keep. The day the agent inside is swapped (codex, gemini-cli, an open-source loop),
+the box is unchanged.
+
+### LLM backend: Claude via ACP
+
+OpenHands supports ACP (Agent Communication Protocol), which lets it delegate LLM calls to `claude-code` instead of calling the Anthropic API directly. This means:
+
+- Uses the existing Claude Pro/Max subscription — zero marginal inference cost for autonomous overnight runs
+- No `ANTHROPIC_API_KEY` needed (and it is actively stripped — see the auth section of the README)
 - Same auth model as the rest of the stack
 
 ### What OpenHands owns
@@ -94,104 +123,107 @@ OpenHands supports ACP (Agent Communication Protocol), which lets it delegate LL
 
 ## DevClaw internals
 
+The layer contracts live in [`architecture-layers.md`](./architecture-layers.md); this
+is the decision-record summary of what devclaw owns around the OpenHands worker.
+
 ### 1. MCP server — the interface
 
-Exposes capabilities to OpenClaw (and any other MCP client):
+Exposes tools to the OpenClaw waiter (and any other MCP client). Async by default:
+a task call returns a `task_id` immediately; pass a `notify_url` to get a callback
+instead of polling. The real surface (see `devclaw/server/tools.py`):
 
 ```
-create_project(name, description)         → project_id
-implement_feature(project_id, goal)       → task_id
-fix_bug(project_id, description)          → task_id
-review_repository(repo)                   → task_id
-run_tests(project_id)                     → task_id
-get_status(task_id)                       → status, progress, result
-list_tasks(project_id?)                   → [task]
+dispatch_task(kind, workspace_dir, goal, …)   → task_id   (kind ∈ implement_feature / fix_bug / review_repository)
+create_goal(goal_id, objective, workspace_dir, done_when, …)   register a durable goal
+get_goal / list_goals / steer_goal / answer_unknowns / cancel_goal   drive a goal
+start_program(workspace_dir, goal, …)         → program_id   (decompose into a task DAG)
+get_status(task_id) / list_tasks(…) / get_events(…)           task history + live SSE
+register_project / list_projects / link_goal / …             the control-plane registry
+deploy_project / deploy_status / stop_deploy                  durable Tailscale hosting
 ```
 
-OpenClaw calls these. The implementation is hidden. OpenClaw never knows OpenHands exists.
-
-**Source:** https://docs.openhands.dev/usage/rest-api (OpenHands API reference)
+The waiter calls these; OpenHands is invisible to it.
 
 ### 2. Planner — Goal → Tasks
 
-For goals that are too large for a single OpenHands run (e.g. "build a YouTube clone"), the planner decomposes them:
+For goals too large for a single sandbox run (e.g. "build a YouTube clone"), the
+planner decomposes them into a task DAG:
 
 ```
 Goal: "Build a YouTube clone"
   └── Program: youtube-clone
-        ├── Task 1: scaffold project + CI (→ OpenHands)
-        ├── Task 2: implement auth (→ OpenHands)
-        ├── Task 3: video upload + processing (→ OpenHands)
-        ├── Task 4: frontend player (→ OpenHands)
-        └── Task 5: deploy pipeline (→ OpenHands)
+        ├── Task 1: scaffold project + CI  (→ sandbox)
+        ├── Task 2: implement auth         (→ sandbox)
+        ├── Task 3: video upload + processing (→ sandbox)
+        ├── Task 4: frontend player        (→ sandbox)
+        └── Task 5: deploy pipeline        (→ sandbox)
 ```
 
-Each task is a single OpenHands run with explicit acceptance criteria. The planner generates the DAG; the poller walks it as tasks complete.
-
-For small, bounded goals ("fix typo in README"), the planner passes directly to OpenHands as a single task — no decomposition needed.
+Each task is a single sandbox dispatch with explicit acceptance criteria. The
+`TaskQueue` walks the DAG as tasks settle. For small, bounded goals the planner
+dispatches a single task — no decomposition needed.
 
 ### 3. State store — SQLite
 
-Tracks everything DevClaw owns:
+Tracks everything DevClaw owns (`devclaw/state_store.py`):
 
 ```
-projects      id, name, description, status, created_at
-tasks         id, project_id, goal, kind, status, openhands_run_id,
-              result, pr_url, created_at, completed_at
+programs      id, goal, status, created_at, …
+tasks         id, program_id, parent_goal_id, kind, goal, status,
+              result_json, pr_url, created_at, settled_at, …
 events        task_id, event, payload, ts   (append-only audit log)
 ```
 
-Single-writer. All state transitions go through one path.
+**Single-writer:** only the `TaskQueue` mutates task rows; `events` is append-only and
+the status views are projections. There is **no** `openhands_run_id` — devclaw doesn't
+track a remote run, because there is no remote run; the sandbox is ephemeral and its
+whole output is the stdout stream.
 
-### 4. Poller — completion detection + notification
+### 4. Settle — completion detection + notification (in-process, no poller)
 
-DevClaw polls OpenHands for task status (OpenHands self-hosted has no push callbacks). On completion:
+When a sandbox container exits, `sandcastle.py` has already consumed its stdout and
+holds the terminal `result:` line. Settling is entirely in-process:
 
-1. Writes result to state store
-2. Advances the DAG (unblocks dependent tasks if any)
-3. Notifies OpenClaw → Telegram via the callback URL passed at task creation
+1. The `EngineResult` is written to the task row (single writer).
+2. The DAG advances (dependent tasks unblock).
+3. The on-settle hook (`TaskQueue.set_on_settle`) wakes the goal heartbeat **in the
+   same process** — the goal reads the full `result_json` (agent output + gate verdict)
+   via a SQLite read and appends grounded evidence to `deliveries.md`.
+4. If a `notify_url` was supplied, devclaw POSTs it (owner-facing blockers / direction
+   questions / completions) → notify-relay → Telegram.
 
-The callback is passed by OpenClaw when it calls `implement_feature()`:
-
-```python
-implement_feature(
-    project_id="youtube-clone",
-    goal="implement auth",
-    notify_url="https://openclaw.internal/notify/abc123"
-)
-```
-
-DevClaw calls `notify_url` when done or blocked. OpenClaw forwards to Telegram.
+There is no polling loop against an OpenHands service — the "poll" is a local SQLite
+read, and the wake is a function call.
 
 ---
 
 ## Deployment
 
-OpenHands runs as a sibling container in the Docker Compose stack:
+There is **no** OpenHands sibling container. The only long-lived service is
+`devclaw-mcp`; it mounts the docker socket and spawns per-task sandbox containers
+itself. OpenHands ships *inside* the sandbox image (`.sandcastle/Dockerfile`), not as
+a service:
 
 ```yaml
 services:
-  openhands:
-    image: ghcr.io/all-hands-ai/openhands:latest
+  devclaw-mcp:
+    build: .
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # sandbox spawning
-      - openhands-data:/root/.openhands
-    environment:
-      - LLM_BACKEND=acp            # use Claude Code, not API key
-    expose:
-      - "3000"                     # internal only, no public port
-
-  devclaw:
-    build: ./devclaw
-    environment:
-      - OPENHANDS_URL=http://openhands:3000
-    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # to spawn per-task sandboxes
       - devclaw-data:/data
+      - ~/.claude:/root/.claude:ro                  # OAuth identity, read-only
+    environment:
+      - DEVCLAW_TRANSPORT=http
+      - DEVCLAW_SANDBOX_IMAGE=devclaw-sandbox:latest
     expose:
-      - "8000"                     # MCP server, internal only
+      - "8000"                     # MCP server + dashboards
 ```
 
-Both are loopback-only. OpenClaw reaches DevClaw via `http://devclaw:8000/mcp/`. DevClaw reaches OpenHands via `http://openhands:3000`.
+The OpenClaw waiter reaches DevClaw at `http://devclaw-mcp:8000/mcp`. Each task is a
+transient `docker run --rm devclaw-sandbox:latest '<payload>'` spawned by
+`sandcastle.py` — it appears in `docker ps` only while the task runs, then vaporizes.
+Access to the docker socket (and its GID) is what lets devclaw-mcp spawn siblings; see
+[`task-execution-flow.md`](./task-execution-flow.md) for the node-by-node detail.
 
 ---
 
@@ -200,21 +232,21 @@ Both are loopback-only. OpenClaw reaches DevClaw via `http://devclaw:8000/mcp/`.
 The key behavior: you kick off a goal and DevClaw keeps working until done.
 
 ```
-implement_feature("build YouTube clone")
+start_program("build YouTube clone")
   │
   ▼
 DevClaw planner decomposes → 5 tasks, DAG stored
   │
   ▼
-Task 1 submitted to OpenHands → running
+Task 1 dispatched to a fresh sandbox → running
   │
-  ▼  (OpenHands executes autonomously — no babysitting)
-  │
-  ▼
-Task 1 done → PR opened → DevClaw notifies you
+  ▼  (the sandbox agent executes autonomously — no babysitting)
   │
   ▼
-Task 2 unblocked → submitted to OpenHands → running
+Task 1 settles → gate + review pass → PR opened → DevClaw notifies you
+  │
+  ▼
+Task 2 unblocked (on-settle hook) → dispatched to a sandbox → running
   │
   ▼
   ... continues until all tasks done or one blocks ...
@@ -306,14 +338,16 @@ a piece of software: *"DevClaw, take care of this project."*
 
 ## Migration from v1 (complete)
 
-The cutover from the v1 skill-based + cron-driven approach to this design is done. The original path — deploy OpenHands, wire the ACP backend, build the MCP server / planner / poller, cut `implement_feature` over from the skills, then retire the skills — has run to completion. The v1 orchestrator and skills have been removed from the repo; they remain in git history as prior art.
+The cutover from the v1 skill-based + cron-driven approach to this design is done. The original path — embed the OpenHands SDK in the sandbox, wire the ACP backend to `claude`, build the MCP server / planner / task queue, cut `implement_feature` over from the skills, then retire the skills — has run to completion. (An early sketch imagined a standalone OpenHands *service* devclaw would poll; it was never built — the in-process `docker run` + on-settle model above is what shipped.) The v1 orchestrator and skills have been removed from the repo; they remain in git history as prior art.
 
 ---
 
 ## Further reading
 
 - [OpenHands introduction](https://docs.openhands.dev/overview/introduction)
-- [OpenHands ACP integration](https://docs.openhands.dev/usage/acp)
-- [OpenHands REST API](https://docs.openhands.dev/usage/rest-api)
-- [OpenHands SDK](https://docs.openhands.dev/usage/sdk)
-- [OpenHands Docker deployment](https://docs.openhands.dev/usage/docker)
+- [OpenHands ACP integration](https://docs.openhands.dev/usage/acp) — the path devclaw uses (agent delegated to `claude`)
+- [OpenHands SDK](https://docs.openhands.dev/usage/sdk) — embedded in `openhands-runner/runner.py`
+
+> DevClaw does **not** use OpenHands' REST API or its own docker/remote-runtime
+> deployment — the SDK runs in-process inside a devclaw-spawned sandbox. Those docs
+> describe a service topology this project deliberately does not run.
