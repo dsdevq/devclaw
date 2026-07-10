@@ -11,6 +11,7 @@ test_goal_telemetry_integration to keep the units isolated.
 
 from __future__ import annotations
 
+import json
 import tempfile
 
 import pytest
@@ -180,3 +181,179 @@ def test_cognition_event_estimates_tokens_from_text_length():
     e = tracer.events[0]
     assert e["tokens_in_est"] == 250   # 1000//4
     assert e["tokens_out_est"] == 50   # 200//4
+    # T0.5: no envelope passed → real-usage fields explicitly absent (None)
+    assert e["tokens_in"] is None and e["tokens_out"] is None
+    assert e["cost_usd"] is None
+
+
+# ---- T0.5: real usage + full response text -----------------------------------
+
+
+def test_record_cognition_carries_real_usage_and_full_response(store):
+    tracer = _trace.PersistentTracer(store=store, trace_id="t", goal_id="g", label="x")
+    long_response = json.dumps({"filler": "z" * 400, "verdict": "achieved"})
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(
+            role="evaluator", model="sonnet",
+            prompt="p" * 500, response=long_response, latency_ms=7,
+            tokens_in=1234, tokens_out=56, cache_read=999, cache_creation=111,
+            cost_usd=0.0123,
+        )
+    (row,) = store.read_traces(goal_id="g")
+    p = row["payload"]
+    # full response persisted (past the 240-char preview horizon)
+    assert p["response_text"] == long_response
+    assert len(p["response_preview"]) <= 240
+    # real usage fields
+    assert p["tokens_in"] == 1234
+    assert p["tokens_out"] == 56
+    assert p["cache_read"] == 999
+    assert p["cache_creation"] == 111
+    assert p["cost_usd"] == pytest.approx(0.0123)
+    # est fields still present alongside
+    assert p["tokens_in_est"] == 125  # 500//4
+    # the full PROMPT must NOT be in the row (can exceed 128KB)
+    assert "p" * 500 not in json.dumps(p)
+
+
+# ---- T0.5: goal-scoped transcripts -------------------------------------------
+
+
+def test_goal_scoped_cognition_writes_transcript_file(store, tmp_path):
+    goals_dir = tmp_path / "goals"
+    tracer = _trace.PersistentTracer(
+        store=store, trace_id="t1", goal_id="goal-x", label="tick",
+        goals_dir=goals_dir,
+    )
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(
+            role="planner", model="opus",
+            prompt="THE FULL PROMPT " * 100, response='{"tasks": []}',
+            latency_ms=5, tokens_in=42, tokens_out=7, cost_usd=0.005,
+        )
+    (row,) = store.read_traces(goal_id="goal-x", kind="cognition")
+    fname = row["payload"]["transcript_file"]
+    assert fname and fname.endswith("-planner.md")
+    tfile = goals_dir / "goal-x" / "transcripts" / fname
+    assert tfile.is_file()
+    text = tfile.read_text()
+    # header: role, model, tokens, cost — then full prompt, then full response
+    assert "- role: planner" in text
+    assert "- model: opus" in text
+    assert "- tokens_in: 42" in text
+    assert "- tokens_out: 7" in text
+    assert "- cost_usd: 0.005000" in text
+    assert "## prompt" in text and ("THE FULL PROMPT " * 100) in text
+    assert "## response" in text and '{"tasks": []}' in text
+    # ...while the sqlite row does NOT carry the full prompt — only the
+    # 240-char preview (the full text lives in the transcript file above)
+    assert ("THE FULL PROMPT " * 100) not in json.dumps(row["payload"])
+    assert len(row["payload"]["prompt_preview"]) <= 240
+
+
+def test_transcript_estimated_tokens_labeled_when_no_envelope(store, tmp_path):
+    goals_dir = tmp_path / "goals"
+    tracer = _trace.PersistentTracer(
+        store=store, trace_id="t", goal_id="g", goals_dir=goals_dir,
+    )
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(role="evaluator", model="sonnet", prompt="x" * 40, response="y" * 8)
+    fname = tracer.events[0]["transcript_file"]
+    text = (goals_dir / "g" / "transcripts" / fname).read_text()
+    assert "- tokens_in: ~10 (est)" in text
+    assert "- tokens_out: ~2 (est)" in text
+    assert "- cost_usd: n/a" in text
+
+
+def test_transcript_filenames_unique_within_same_millisecond(store, tmp_path):
+    goals_dir = tmp_path / "goals"
+    tracer = _trace.PersistentTracer(
+        store=store, trace_id="t", goal_id="g", goals_dir=goals_dir,
+    )
+    with _trace.tracer_scope(tracer):
+        for _ in range(3):
+            _trace.record_cognition(role="planner", model="m", prompt="p", response="r")
+    names = [e["transcript_file"] for e in tracer.events]
+    assert len(set(names)) == 3
+    for n in names:
+        assert (goals_dir / "g" / "transcripts" / n).is_file()
+
+
+def test_no_goals_dir_means_no_transcript(store, tmp_path):
+    # A PersistentTracer WITHOUT goals_dir (pre-T0.5 construction) records the
+    # event but writes no file — non-goal-scoped cognition is unchanged.
+    tracer = _trace.PersistentTracer(store=store, trace_id="t", goal_id="g")
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(role="planner", model="m", prompt="p", response="r")
+    assert tracer.events[0]["transcript_file"] == ""
+    assert not list(tmp_path.rglob("transcripts"))
+
+
+def test_plain_tracer_never_writes_transcripts(tmp_path):
+    tracer = _trace.Tracer(label="in-memory")
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(role="planner", model="m", prompt="p", response="r")
+    assert tracer.events[0]["transcript_file"] == ""
+
+
+def test_transcript_write_failure_is_swallowed(store, tmp_path):
+    # goals_dir path occupied by a FILE → mkdir raises → transcript silently
+    # skipped, event still recorded (telemetry must never break the cascade).
+    not_a_dir = tmp_path / "goals"
+    not_a_dir.write_text("i am a file")
+    tracer = _trace.PersistentTracer(
+        store=store, trace_id="t", goal_id="g", goals_dir=not_a_dir,
+    )
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(role="planner", model="m", prompt="p", response="r")
+    assert len(tracer.events) == 1
+    assert tracer.events[0]["transcript_file"] == ""
+
+
+def test_goal_service_make_tracer_binds_goals_dir(store, tmp_path, monkeypatch):
+    """GoalService plumbs its configured goals_dir into the per-tick tracer, so
+    goal-scoped cognition transcripts land under <goals_dir>/<goal_id>/transcripts/."""
+    from devclaw.goal import service as service_mod
+    from devclaw.goal.service import GoalConfig, GoalService
+    from devclaw.task_queue import TaskQueue
+
+    monkeypatch.setattr(service_mod, "_TRACE_PERSIST_ENABLED", True)
+    goals_dir = tmp_path / "goals"
+    cfg = GoalConfig(
+        goals_dir=goals_dir, notify_url="", tick_seconds=900,
+        eval_every=3, verify_done=False,
+    )
+    svc = GoalService(TaskQueue(store), store, config=cfg)
+    tracer = svc._make_tracer("g1")
+    assert isinstance(tracer, _trace.PersistentTracer)
+    with _trace.tracer_scope(tracer):
+        _trace.record_cognition(role="planner", model="m", prompt="p", response="r")
+    fname = tracer.events[0]["transcript_file"]
+    assert fname
+    assert (goals_dir / "g1" / "transcripts" / fname).is_file()
+
+
+# ---- T0.5: trace_totals prefers real usage -----------------------------------
+
+
+def test_trace_totals_prefers_real_tokens_and_sums_cost(store):
+    # one row with real usage (post-T0.5), one legacy row with only estimates
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="cognition",
+        payload={"latency_ms": 100, "tokens_in_est": 999, "tokens_out_est": 999,
+                 "tokens_in": 10, "tokens_out": 38, "cost_usd": 0.0188989},
+    )
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="cognition",
+        payload={"latency_ms": 50, "tokens_in_est": 200, "tokens_out_est": 30},
+    )
+    totals = store.trace_totals(goal_id="g")
+    # real row contributes its real numbers; legacy row falls back to its est
+    assert totals["cognition_tokens_in"] == 10 + 200
+    assert totals["cognition_tokens_out"] == 38 + 30
+    assert totals["cognition_rows_with_real_usage"] == 1
+    assert totals["cognition_rows_estimated"] == 1
+    assert totals["cognition_cost_usd"] == pytest.approx(0.018899, abs=1e-6)
+    # legacy pure-estimate sums kept for back-compat
+    assert totals["cognition_tokens_in_est"] == 999 + 200
+    assert totals["cognition_tokens_out_est"] == 999 + 30

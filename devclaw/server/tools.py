@@ -754,14 +754,20 @@ async def get_trace(
     emission order. Grouped by ``trace_id`` (one per goal-tick).
 
     Use this to inspect what actually happened during a cascade: which prompts
-    fired with what role, how long each cognition call took, estimated input/
-    output tokens (rough proxy — len/4), and the chain of dispatches that
-    followed. Pair with ``get_goal`` for the high-level state + this for the
-    causal detail.
+    fired with what role, how long each cognition call took, real input/output
+    tokens + cost from the CLI's usage envelope (``tokens_in``/``tokens_out``/
+    ``cost_usd``; legacy rows and fallback calls carry only the ``_est`` len/4
+    estimates — labeled as estimates), the FULL response text, and the chain of
+    dispatches that followed. Goal-scoped cognition rows also carry
+    ``transcript_file`` — the full prompt+response transcript under the goal
+    dir's ``transcripts/``. Pair with ``get_goal`` for the high-level state +
+    this for the causal detail.
 
-    Returns ``{"events": [...], "totals": {...}}``. Pass ``since_id`` (the
-    monotonic id of the last event you've seen) to incrementally tail; pass
-    ``kind`` to filter (e.g. ``cognition`` for prompts only).
+    Returns ``{"events": [...], "totals": {...}}``. Totals prefer real tokens
+    per row and report ``cognition_rows_estimated`` for how many rows fell back
+    to estimates. Pass ``since_id`` (the monotonic id of the last event you've
+    seen) to incrementally tail; pass ``kind`` to filter (e.g. ``cognition``
+    for prompts only).
     """
     if not goal_id:
         raise ToolError("get_trace requires goal_id")
