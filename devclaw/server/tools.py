@@ -875,23 +875,36 @@ async def register_project(
     preview_url: Optional[str] = None,
     notes: str = "",
     automerge: Optional[Literal["on", "off"]] = None,
+    merge_strategy: Optional[Literal["squash", "merge", "rebase"]] = None,
+    autodeploy: Optional[Literal["on", "off"]] = None,
+    review_gate: Optional[Literal["on", "off"]] = None,
+    verify_done: Optional[Literal["on", "off"]] = None,
 ) -> str:
     """Register a repo in the project registry — the control plane's source of
     truth for 'what is devclaw working on'. ``project_id`` is a stable slug (e.g.
     'todo-fullstack-demo'). Link the goal(s) driving it with link_goal. Idempotent
     failure: a taken id is an error (use update_project to change it).
 
-    ``automerge`` pins whether goals working in this project's workspace
-    auto-merge their gate-passed PRs, overriding the devclaw-wide default.
-    Omit it to inherit that default (the usual choice) — this is the ONLY
-    place auto-merge is configured; a goal itself has no automerge setting."""
+    Per-project override knobs (each overrides its devclaw-wide env default;
+    omit to inherit — the usual choice). This is the ONLY place these are
+    configured per repo; a goal itself carries none of them:
+      - ``automerge`` — auto-merge gate-passed PRs (DEVCLAW_GOAL_AUTOMERGE).
+      - ``merge_strategy`` — squash|merge|rebase for the merge (DEVCLAW_GOAL_MERGE_STRATEGY).
+      - ``autodeploy`` — deploy on goal completion (DEVCLAW_GOAL_AUTODEPLOY).
+      - ``review_gate`` — run the pre-PR review gate (DEVCLAW_REVIEW_GATE).
+      - ``verify_done`` — grounded done-gate re-check before closing (DEVCLAW_GOAL_VERIFY_DONE)."""
     if not project_id or not name:
         raise ToolError("register_project requires project_id and name")
+    _onoff = {"on": True, "off": False}
     try:
         p = registry.create(
             id=project_id, name=name, repo_url=repo_url,
             workspace_dir=workspace_dir, preview_url=preview_url, notes=notes,
             automerge=(None if automerge is None else automerge == "on"),
+            merge_strategy=merge_strategy,
+            autodeploy=(None if autodeploy is None else _onoff[autodeploy]),
+            review_gate=(None if review_gate is None else _onoff[review_gate]),
+            verify_done=(None if verify_done is None else _onoff[verify_done]),
         )
     except ProjectExists:
         raise ToolError(f"project already exists: {project_id}")
@@ -932,22 +945,33 @@ async def update_project(
     status: Optional[Literal["active", "paused", "archived"]] = None,
     notes: Optional[str] = None,
     automerge: Optional[Literal["on", "off", "inherit"]] = None,
+    merge_strategy: Optional[Literal["squash", "merge", "rebase", "inherit"]] = None,
+    autodeploy: Optional[Literal["on", "off", "inherit"]] = None,
+    review_gate: Optional[Literal["on", "off", "inherit"]] = None,
+    verify_done: Optional[Literal["on", "off", "inherit"]] = None,
 ) -> str:
     """Update a registered project's facts — only the fields you pass change. Use to
     record a preview URL, pause/archive it, or correct the repo/workspace.
 
-    ``automerge``: 'on'/'off' pins whether this project's goals auto-merge
-    gate-passed PRs, overriding the devclaw-wide DEVCLAW_GOAL_AUTOMERGE
-    default; 'inherit' explicitly clears a prior override back to that
-    default. Omit entirely to leave whatever is currently set untouched."""
-    automerge_kwargs = {}
-    if automerge is not None:
-        automerge_kwargs["automerge"] = {"on": True, "off": False, "inherit": None}[automerge]
+    Per-project override knobs — ``automerge`` / ``merge_strategy`` /
+    ``autodeploy`` / ``review_gate`` / ``verify_done`` — each take a concrete
+    value to PIN this project (overriding its devclaw-wide env default),
+    'inherit' to CLEAR a prior override back to that default, or omit to leave
+    whatever is currently set untouched. (bool knobs take 'on'/'off';
+    merge_strategy takes 'squash'/'merge'/'rebase'.)"""
+    override_kwargs: dict = {}
+    _onoff = {"on": True, "off": False, "inherit": None}
+    for field, val in (("automerge", automerge), ("autodeploy", autodeploy),
+                       ("review_gate", review_gate), ("verify_done", verify_done)):
+        if val is not None:
+            override_kwargs[field] = _onoff[val]
+    if merge_strategy is not None:
+        override_kwargs["merge_strategy"] = None if merge_strategy == "inherit" else merge_strategy
     try:
         p = registry.update(
             project_id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
             preview_url=preview_url, status=status, notes=notes,
-            **automerge_kwargs,
+            **override_kwargs,
         )
     except KeyError:
         raise ToolError(f"unknown project_id: {project_id}")

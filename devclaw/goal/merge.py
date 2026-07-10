@@ -35,8 +35,9 @@ Merger = Callable[[str], Awaitable[bool]]
 
 #: the devclaw-wide default when a project has no override of its own.
 AUTOMERGE_ENABLED = os.environ.get("DEVCLAW_GOAL_AUTOMERGE", "0") not in ("0", "false", "")
-#: merge strategy flag for `gh pr merge`
-_STRATEGY = "--" + (os.environ.get("DEVCLAW_GOAL_MERGE_STRATEGY", "squash") or "squash")
+#: the devclaw-wide default merge strategy — a project may override it.
+_VALID_STRATEGIES = ("squash", "merge", "rebase")
+DEFAULT_MERGE_STRATEGY = os.environ.get("DEVCLAW_GOAL_MERGE_STRATEGY", "squash") or "squash"
 
 
 def resolve_automerge(
@@ -54,14 +55,30 @@ def resolve_automerge(
     return AUTOMERGE_ENABLED
 
 
-async def merge_pr(pr_url: str) -> bool:
-    """Squash-merge a PR via gh. Best-effort: returns False on any failure (the
-    caller leaves the PR open for manual review). Deletes the merged branch."""
+def resolve_merge_strategy(
+    registry: "Optional[ProjectRegistry]", workspace_dir: Optional[str]
+) -> str:
+    """Which `gh pr merge` strategy for a goal working in ``workspace_dir``: the
+    owning project's ``merge_strategy`` override if set, else the devclaw-wide
+    ``DEFAULT_MERGE_STRATEGY``. A pinned-but-invalid value falls back to the
+    default rather than handing `gh` a bad flag."""
+    strategy = DEFAULT_MERGE_STRATEGY
+    if registry is not None:
+        strategy = registry.resolve_override(workspace_dir, "merge_strategy", DEFAULT_MERGE_STRATEGY)
+    return strategy if strategy in _VALID_STRATEGIES else DEFAULT_MERGE_STRATEGY
+
+
+async def merge_pr(pr_url: str, strategy: str = DEFAULT_MERGE_STRATEGY) -> bool:
+    """Merge a PR via gh with the given strategy (default from
+    ``DEVCLAW_GOAL_MERGE_STRATEGY``). Best-effort: returns False on any failure
+    (the caller leaves the PR open for manual review). Deletes the merged
+    branch."""
     if not pr_url:
         return False
+    flag = "--" + (strategy if strategy in _VALID_STRATEGIES else DEFAULT_MERGE_STRATEGY)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "gh", "pr", "merge", pr_url, _STRATEGY, "--delete-branch",
+            "gh", "pr", "merge", pr_url, flag, "--delete-branch",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         out, _ = await proc.communicate()
@@ -70,7 +87,10 @@ async def merge_pr(pr_url: str) -> bool:
     return proc.returncode == 0
 
 
-def default_merger() -> Merger:
-    """The production merger (real gh). Indirected so goal_service can bind it and
-    tests inject a recording fake."""
-    return merge_pr
+def default_merger(strategy: str = DEFAULT_MERGE_STRATEGY) -> Merger:
+    """The production merger (real gh), bound to ``strategy`` so goal_service
+    can pass a project's resolved merge strategy. Indirected so tests inject a
+    recording fake."""
+    async def _merge(pr_url: str) -> bool:
+        return await merge_pr(pr_url, strategy)
+    return _merge

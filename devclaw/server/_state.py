@@ -82,6 +82,11 @@ else:
 # layer because GoalService reads it to resolve per-project automerge overrides.
 registry = ProjectRegistry(DB_PATH)
 
+# Wire the registry into the queue so the pre-PR review gate can honour a
+# per-project review_gate override (the queue is built before the registry, so
+# this is a post-construction setter rather than a constructor arg).
+queue.set_registry(registry)
+
 # The goal layer (folded-in goalclaw): durable, steerable, evaluated goals driven
 # across heartbeats, dispatching into the SAME queue in-process. Owns goals under
 # DEVCLAW_GOALS_DIR; the heartbeat + on-settle wake are started in the entrypoint.

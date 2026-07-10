@@ -47,13 +47,28 @@ ProjectStatus = Literal["active", "paused", "archived"]
 GoalGet = Callable[[str], dict]
 
 #: sentinel distinguishing "field not supplied" (leave unchanged) from an
-#: explicit ``None`` (clear the override, fall back to the global default) —
-#: only ``automerge`` needs this three-way partial-update semantics today.
+#: explicit ``None`` (clear the override, fall back to the global default).
+#: Every per-project OVERRIDE field (``automerge``, ``merge_strategy``,
+#: ``autodeploy``, ``review_gate``, ``verify_done``) uses this three-way
+#: partial-update semantics.
 _UNSET: Any = object()
+
+#: the per-project override fields, in one place so create/read/save/migrate
+#: stay in lockstep. Each is nullable = "inherit the devclaw-wide default"; a
+#: non-null value pins this project's behaviour regardless of the env default.
+#: ``bool`` fields persist as INTEGER (0/1), ``str`` fields as TEXT.
+_OVERRIDE_BOOL_FIELDS = ("automerge", "autodeploy", "review_gate", "verify_done")
+_OVERRIDE_STR_FIELDS = ("merge_strategy",)
+_OVERRIDE_FIELDS = _OVERRIDE_BOOL_FIELDS + _OVERRIDE_STR_FIELDS
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _bool_db(value: Optional[bool]) -> Optional[int]:
+    """Persist a three-way override bool: None stays NULL (inherit), else 0/1."""
+    return None if value is None else int(value)
 
 
 @dataclass
@@ -73,6 +88,14 @@ class Project:
     #: place auto-merge is configured — a goal's own goal.yaml has no
     #: automerge field (see devclaw.goal.merge.resolve_automerge).
     automerge: Optional[bool] = None
+    #: per-project overrides for delivery/quality knobs that are otherwise
+    #: devclaw-wide env defaults. ``None`` = inherit the default; a set value
+    #: pins this repo. Same altitude as ``automerge`` — a decision about a
+    #: REPO, not a goal's objective. Resolved via :meth:`resolve_override`.
+    merge_strategy: Optional[str] = None  # DEVCLAW_GOAL_MERGE_STRATEGY: squash|merge|rebase
+    autodeploy: Optional[bool] = None     # DEVCLAW_GOAL_AUTODEPLOY
+    review_gate: Optional[bool] = None    # DEVCLAW_REVIEW_GATE
+    verify_done: Optional[bool] = None    # DEVCLAW_GOAL_VERIFY_DONE
     created_at: int = field(default_factory=_now_ms)
     updated_at: int = field(default_factory=_now_ms)
 
@@ -87,6 +110,10 @@ class Project:
             "goalIds": list(self.goal_ids),
             "notes": self.notes,
             "automerge": self.automerge,
+            "mergeStrategy": self.merge_strategy,
+            "autodeploy": self.autodeploy,
+            "reviewGate": self.review_gate,
+            "verifyDone": self.verify_done,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
@@ -101,7 +128,17 @@ def _row_to_project(r: sqlite3.Row) -> Project:
                 goal_ids = [x for x in parsed if isinstance(x, str)]
         except json.JSONDecodeError:
             pass  # tolerate a corrupt cell — treat as no links
-    raw_automerge = r["automerge"] if "automerge" in r.keys() else None
+    keys = r.keys()
+
+    def _bool_col(name: str) -> Optional[bool]:
+        # Migration-safe: a row read before the column existed has no key.
+        raw = r[name] if name in keys else None
+        return None if raw is None else bool(raw)
+
+    def _str_col(name: str) -> Optional[str]:
+        raw = r[name] if name in keys else None
+        return None if raw is None else str(raw)
+
     return Project(
         id=r["id"],
         name=r["name"],
@@ -111,7 +148,11 @@ def _row_to_project(r: sqlite3.Row) -> Project:
         status=r["status"],
         goal_ids=goal_ids,
         notes=r["notes"] or "",
-        automerge=(None if raw_automerge is None else bool(raw_automerge)),
+        automerge=_bool_col("automerge"),
+        merge_strategy=_str_col("merge_strategy"),
+        autodeploy=_bool_col("autodeploy"),
+        review_gate=_bool_col("review_gate"),
+        verify_done=_bool_col("verify_done"),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
     )
@@ -154,20 +195,29 @@ class ProjectRegistry:
                   goal_ids      TEXT,
                   notes         TEXT,
                   automerge     INTEGER,
+                  merge_strategy TEXT,
+                  autodeploy    INTEGER,
+                  review_gate   INTEGER,
+                  verify_done   INTEGER,
                   created_at    INTEGER NOT NULL,
                   updated_at    INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
                 """
             )
-            # Migration for DBs created before `automerge` existed — CREATE
-            # TABLE IF NOT EXISTS above is a no-op on an already-existing
-            # table, so a pre-existing `projects` table needs the column
-            # added explicitly. NULL by default = "inherit the global
-            # DEVCLAW_GOAL_AUTOMERGE default", same as a freshly created row.
+            # Migration for DBs created before a given override column existed —
+            # CREATE TABLE IF NOT EXISTS above is a no-op on an already-existing
+            # table, so each per-project override column needs adding explicitly
+            # on an older `projects` table. NULL by default = "inherit the global
+            # env default", same as a freshly created row. SQLite type is INTEGER
+            # for bool fields, TEXT for the string field.
             cols = {row[1] for row in self._db.execute("PRAGMA table_info(projects)")}
-            if "automerge" not in cols:
-                self._db.execute("ALTER TABLE projects ADD COLUMN automerge INTEGER")
+            for name in _OVERRIDE_BOOL_FIELDS:
+                if name not in cols:
+                    self._db.execute(f"ALTER TABLE projects ADD COLUMN {name} INTEGER")
+            for name in _OVERRIDE_STR_FIELDS:
+                if name not in cols:
+                    self._db.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT")
             self._db.commit()
 
     # ---- CRUD --------------------------------------------------------------
@@ -183,23 +233,30 @@ class ProjectRegistry:
         notes: str = "",
         goal_ids: Optional[list[str]] = None,
         automerge: Optional[bool] = None,
+        merge_strategy: Optional[str] = None,
+        autodeploy: Optional[bool] = None,
+        review_gate: Optional[bool] = None,
+        verify_done: Optional[bool] = None,
     ) -> Project:
         p = Project(
             id=id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
             preview_url=preview_url, notes=notes, goal_ids=list(goal_ids or []),
-            automerge=automerge,
+            automerge=automerge, merge_strategy=merge_strategy, autodeploy=autodeploy,
+            review_gate=review_gate, verify_done=verify_done,
         )
         with self._lock:
             try:
                 self._db.execute(
                     """INSERT INTO projects
                          (id, name, repo_url, workspace_dir, preview_url, status,
-                          goal_ids, notes, automerge, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          goal_ids, notes, automerge, merge_strategy, autodeploy,
+                          review_gate, verify_done, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         p.id, p.name, p.repo_url, p.workspace_dir, p.preview_url,
                         p.status, json.dumps(p.goal_ids), p.notes,
-                        (None if p.automerge is None else int(p.automerge)),
+                        _bool_db(p.automerge), p.merge_strategy, _bool_db(p.autodeploy),
+                        _bool_db(p.review_gate), _bool_db(p.verify_done),
                         p.created_at, p.updated_at,
                     ),
                 )
@@ -245,15 +302,20 @@ class ProjectRegistry:
         status: Optional[ProjectStatus] = None,
         notes: Optional[str] = None,
         automerge: Optional[bool] = _UNSET,
+        merge_strategy: Optional[str] = _UNSET,
+        autodeploy: Optional[bool] = _UNSET,
+        review_gate: Optional[bool] = _UNSET,
+        verify_done: Optional[bool] = _UNSET,
     ) -> Project:
         """Partial update — only the supplied fields change. Returns the updated
         project. Raises KeyError if unknown. ``updated_at`` always bumps.
 
-        ``automerge`` uses three-way semantics (unlike the other fields):
-        omit it entirely to leave the current override untouched; pass
-        ``True``/``False`` to pin it; pass ``None`` explicitly to CLEAR the
-        override back to "inherit the global default". Passing the sentinel
-        default (i.e. not supplying the kwarg) is how "don't touch" is
+        The per-project override fields (``automerge``, ``merge_strategy``,
+        ``autodeploy``, ``review_gate``, ``verify_done``) use three-way
+        semantics (unlike the plain fields): omit one entirely to leave the
+        current override untouched; pass a concrete value to pin it; pass
+        ``None`` explicitly to CLEAR the override back to "inherit the global
+        default". The ``_UNSET`` sentinel default is how "don't touch" is
         distinguished from an explicit clear."""
         p = self.get(project_id)
         if p is None:
@@ -272,6 +334,14 @@ class ProjectRegistry:
             p.notes = notes
         if automerge is not _UNSET:
             p.automerge = automerge
+        if merge_strategy is not _UNSET:
+            p.merge_strategy = merge_strategy
+        if autodeploy is not _UNSET:
+            p.autodeploy = autodeploy
+        if review_gate is not _UNSET:
+            p.review_gate = review_gate
+        if verify_done is not _UNSET:
+            p.verify_done = verify_done
         p.updated_at = _now_ms()
         self._save(p)
         return p
@@ -308,12 +378,14 @@ class ProjectRegistry:
             self._db.execute(
                 """UPDATE projects SET
                      name=?, repo_url=?, workspace_dir=?, preview_url=?, status=?,
-                     goal_ids=?, notes=?, automerge=?, updated_at=?
+                     goal_ids=?, notes=?, automerge=?, merge_strategy=?, autodeploy=?,
+                     review_gate=?, verify_done=?, updated_at=?
                    WHERE id=?""",
                 (
                     p.name, p.repo_url, p.workspace_dir, p.preview_url, p.status,
                     json.dumps(p.goal_ids), p.notes,
-                    (None if p.automerge is None else int(p.automerge)),
+                    _bool_db(p.automerge), p.merge_strategy, _bool_db(p.autodeploy),
+                    _bool_db(p.review_gate), _bool_db(p.verify_done),
                     p.updated_at, p.id,
                 ),
             )
@@ -334,6 +406,27 @@ class ProjectRegistry:
             if _normalize_workspace(r["workspace_dir"]) == target:
                 return _row_to_project(r)
         return None
+
+    def resolve_override(self, workspace_dir: Optional[str], field: str, default: Any) -> Any:
+        """Resolve one per-project override for a goal/task working in
+        ``workspace_dir``: the owning project's value for ``field`` if it pins
+        one (non-null), else ``default`` (the devclaw-wide env default). This is
+        the single generic seam every override consumer routes through — a goal
+        has no such setting of its own, only its owning project does, and when
+        the fleet-wide settings store lands (PR B) only ``default``'s source
+        changes here, not the call sites.
+
+        ``field`` must be one of :data:`_OVERRIDE_FIELDS`; anything else is a
+        programming error and raises, rather than silently returning the
+        default and masking a typo."""
+        if field not in _OVERRIDE_FIELDS:
+            raise ValueError(f"not a per-project override field: {field!r}")
+        project = self.find_by_workspace_dir(workspace_dir)
+        if project is not None:
+            value = getattr(project, field)
+            if value is not None:
+                return value
+        return default
 
 
 def _normalize_workspace(path: Optional[str]) -> Optional[str]:

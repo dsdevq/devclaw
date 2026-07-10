@@ -330,3 +330,110 @@ def test_contended_writer_waits_instead_of_failing(tmp_path):
 
     assert released.is_set()
     assert writer.get("b") is not None
+
+
+# ---- per-project overrides (merge_strategy / autodeploy / review_gate /
+#      verify_done) — same three-way + inherit shape as automerge --------------
+
+
+def test_override_fields_default_to_none_on_create(reg):
+    p = reg.create(id="todo", name="Todo")
+    assert p.merge_strategy is None and p.autodeploy is None
+    assert p.review_gate is None and p.verify_done is None
+    got = reg.get("todo")
+    assert got.merge_strategy is None and got.autodeploy is None
+    assert got.review_gate is None and got.verify_done is None
+
+
+def test_override_fields_set_on_create_and_persist(tmp_path):
+    db = str(tmp_path / "devclaw.db")
+    ProjectRegistry(db).create(
+        id="p", name="P", workspace_dir="/src/p",
+        merge_strategy="rebase", autodeploy=False, review_gate=True, verify_done=False,
+    )
+    got = ProjectRegistry(db).get("p")  # reopen — proves durable
+    assert got.merge_strategy == "rebase"
+    assert got.autodeploy is False
+    assert got.review_gate is True
+    assert got.verify_done is False
+
+
+def test_update_three_way_semantics_per_override_field(reg):
+    reg.create(id="p", name="P", autodeploy=True, merge_strategy="squash")
+    # omit → untouched
+    reg.update("p", notes="unrelated")
+    assert reg.get("p").autodeploy is True and reg.get("p").merge_strategy == "squash"
+    # concrete → pinned
+    reg.update("p", autodeploy=False, merge_strategy="merge")
+    assert reg.get("p").autodeploy is False and reg.get("p").merge_strategy == "merge"
+    # explicit None → cleared back to inherit
+    reg.update("p", autodeploy=None, merge_strategy=None)
+    assert reg.get("p").autodeploy is None and reg.get("p").merge_strategy is None
+
+
+def test_override_fields_in_to_dict(reg):
+    p = reg.create(id="p", name="P", review_gate=False, verify_done=True, merge_strategy="rebase")
+    d = p.to_dict()
+    assert d["reviewGate"] is False and d["verifyDone"] is True
+    assert d["mergeStrategy"] == "rebase" and d["autodeploy"] is None
+
+
+def test_all_override_columns_migrate_onto_a_legacy_table(tmp_path):
+    """A projects table created before ANY override column existed must gain
+    all of them on next open — not error, not drop rows."""
+    import sqlite3
+
+    db = str(tmp_path / "devclaw.db")
+    con = sqlite3.connect(db)
+    con.executescript(
+        """
+        CREATE TABLE projects (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_url TEXT,
+          workspace_dir TEXT, preview_url TEXT, status TEXT NOT NULL DEFAULT 'active',
+          goal_ids TEXT, notes TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        """
+    )
+    con.execute(
+        "INSERT INTO projects (id, name, status, created_at, updated_at) "
+        "VALUES ('legacy', 'Legacy', 'active', 0, 0)"
+    )
+    con.commit()
+    con.close()
+
+    reg = ProjectRegistry(db)  # must not raise; must add all override columns
+    p = reg.get("legacy")
+    assert p is not None
+    assert p.automerge is None and p.merge_strategy is None
+    assert p.autodeploy is None and p.review_gate is None and p.verify_done is None
+    reg.update("legacy", merge_strategy="rebase", review_gate=True)  # columns writable
+    assert reg.get("legacy").merge_strategy == "rebase"
+    assert reg.get("legacy").review_gate is True
+
+
+# ---- resolve_override: the generic per-project resolution seam ---------------
+
+
+def test_resolve_override_project_value_wins_over_default(reg):
+    reg.create(id="p", name="P", workspace_dir="/src/p", autodeploy=False)
+    # default says True (env default), project pins False → project wins.
+    assert reg.resolve_override("/src/p", "autodeploy", True) is False
+    # a field the project didn't pin falls back to the default.
+    assert reg.resolve_override("/src/p", "verify_done", True) is True
+
+
+def test_resolve_override_unregistered_workspace_returns_default(reg):
+    assert reg.resolve_override("/src/nope", "review_gate", True) is True
+    assert reg.resolve_override(None, "review_gate", False) is False
+
+
+def test_resolve_override_string_field(reg):
+    reg.create(id="p", name="P", workspace_dir="/src/p", merge_strategy="rebase")
+    assert reg.resolve_override("/src/p", "merge_strategy", "squash") == "rebase"
+    reg.create(id="q", name="Q", workspace_dir="/src/q")  # no pin
+    assert reg.resolve_override("/src/q", "merge_strategy", "squash") == "squash"
+
+
+def test_resolve_override_rejects_unknown_field(reg):
+    with pytest.raises(ValueError):
+        reg.resolve_override("/src/p", "not_a_field", True)

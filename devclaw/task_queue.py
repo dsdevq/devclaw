@@ -212,10 +212,20 @@ class TaskQueue:
         self._planning: set[str] = set()
         #: the heartbeat tick task (started by the server, not in tests)
         self._tick_task: Optional[asyncio.Task] = None
+        #: optional project registry, wired post-construction (see set_registry) —
+        #: used ONLY to resolve a per-project review_gate override. None is fine:
+        #: the gate falls back to the devclaw-wide REVIEW_GATE_ENABLED default.
+        self._registry: Optional[object] = None
 
     def set_on_settle(self, hook: Optional[Callable[[], None]]) -> None:
         """Register the terminal-state hook (the goal layer's heartbeat wake)."""
         self._on_settle = hook
+
+    def set_registry(self, registry: Optional[object]) -> None:
+        """Wire the project registry after construction (the registry is built
+        after the queue in server/_state.py). Used only to resolve the
+        per-project ``review_gate`` override."""
+        self._registry = registry
 
     def _fire_settle(self) -> None:
         if self._on_settle is not None:
@@ -843,7 +853,7 @@ class TaskQueue:
                         integrity = _integrity_failure(diff)
                         review_fb = (
                             None if integrity is not None
-                            else await self._review_failure(kind, goal, diff)
+                            else await self._review_failure(kind, goal, diff, workspace_dir)
                         )
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
@@ -885,13 +895,26 @@ class TaskQueue:
         self._check_and_trip_breaker(workspace_dir, task_id)
         return None
 
-    async def _review_failure(self, kind: TaskKind, goal: str, diff: str) -> Optional[str]:
+    def _review_gate_enabled(self, workspace_dir: str) -> bool:
+        """Whether the pre-PR review gate runs for a task in ``workspace_dir``:
+        the owning project's ``review_gate`` override if set, else the
+        devclaw-wide ``REVIEW_GATE_ENABLED`` default. No registry wired → the
+        default."""
+        if self._registry is None:
+            return REVIEW_GATE_ENABLED
+        return self._registry.resolve_override(
+            workspace_dir, "review_gate", REVIEW_GATE_ENABLED
+        )
+
+    async def _review_failure(
+        self, kind: TaskKind, goal: str, diff: str, workspace_dir: str
+    ) -> Optional[str]:
         """Run the pre-PR adversarial review gate on the change's diff. Returns the
         request-changes feedback (→ fed back into the retry loop like a gate fail),
         or None to let the task ship. Fails OPEN — a disabled gate, a non-code kind,
         an empty diff, or any reviewer error returns None: a review hiccup must
         never block a change that already passed the behavioural gate."""
-        if not REVIEW_GATE_ENABLED or kind not in _REVIEWABLE_KINDS:
+        if not self._review_gate_enabled(workspace_dir) or kind not in _REVIEWABLE_KINDS:
             return None
         if not diff.strip():
             return None
