@@ -1783,6 +1783,7 @@ async def test_save_status_is_atomic_replace(tmp_path):
     assert store.load_status("g").in_flight.id == "p1"
 
 
+
 # ---- lost in-flight ref: block legibly, never wedge (audit 2026-07-10) ------
 # The engine row a ref points at can vanish (DB loss, manual cleanup, a
 # cross-environment restore). poll then raises GoalEngineError on EVERY tick,
@@ -1892,3 +1893,100 @@ async def test_lost_done_gate_ref_blocks_and_notifies_owner(tmp_path):
     assert "task t_gate" in (st.blocked_on or "")
     assert planner.calls == 0 and evaluator.calls == 0
     assert len(notifier.sent) == 1 and "t_gate" in notifier.sent[0]
+
+
+# ---- corrupt contract files block loudly (T0.4) -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_corrupt_checklist_blocks_tick_loudly_then_idles(tmp_path):
+    """A checklist.yaml that EXISTS but won't parse must BLOCK the goal with
+    the real parse error — not silently read as "no checklist" and revert the
+    goal to backlog mode. One OWNER ping, zero cognition; the next tick on the
+    same corruption idles quietly (no wedge loop, no re-ping)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")  # no STATUS yet → would plan+dispatch if healthy
+    (tmp_path / "g" / "checklist.yaml").write_text("not yaml: [garbage\n")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    assert planner.calls == 0 and evaluator.calls == 0  # corruption preempts cognition
+    assert engine.dispatched == []
+    s = store.load_status("g")
+    assert s.phase == "blocked"
+    assert "checklist.yaml" in s.blocked_on  # blocked_on names the doc
+    assert len(notifier.sent) == 1 and "corrupted" in notifier.sent[0]
+    assert "checklist.yaml" in store.recent_log("g")
+
+    # Tick again with the file still torn — idle, no re-ping, no log spam.
+    out2 = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out2 is Outcome.IDLE
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_corrupt_firmed_draft_blocks_tick_via_load_effective_goal(tmp_path):
+    """A torn firmed-draft.yaml used to make load_effective_goal silently
+    return the BASE goal — dropping the firmed done_when / stub_acceptable /
+    verify_cmd acceptance contract. Now it blocks at the tick's choke point
+    with the same loud-once / idle-after shape as the checklist case."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    (tmp_path / "g" / "firmed-draft.yaml").write_text("status: [garbage\n")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert engine.dispatched == []
+    s = store.load_status("g")
+    assert s.phase == "blocked"
+    assert "firmed-draft.yaml" in s.blocked_on
+    assert len(notifier.sent) == 1 and "corrupted" in notifier.sent[0]
+
+    out2 = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out2 is Outcome.IDLE
+    assert len(notifier.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_corrupt_doc_block_preserves_running_in_flight_ref(tmp_path):
+    """Blocking on a corrupt contract file stops NEW cognition — it must not
+    clobber the ref to an action that is already running. The ref survives the
+    block so the action settles normally once the file is fixed."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status(
+        "g", GoalStatus(phase="in_flight", in_flight=InFlight("devclaw", "start_program", "p1", "program")),
+    )
+    (tmp_path / "g" / "checklist.yaml").write_text("not yaml: [garbage\n")
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = FakeEngine(poll_result=PollResult(terminal=False, status="running"))
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.BLOCKED
+    assert engine.polls == 0  # blocked before polling — no new work of any kind
+    s = store.load_status("g")
+    assert s.phase == "blocked"
+    assert s.in_flight is not None and s.in_flight.id == "p1"  # ref preserved
+
+
+@pytest.mark.asyncio
+async def test_missing_checklist_and_firmed_draft_stay_backlog_mode(tmp_path):
+    """MISSING contract files remain the legitimate pre-decomposer /
+    pre-firming state: the goal plans from the backlog (base goal), no block,
+    no corruption noise."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")  # neither checklist.yaml nor firmed-draft.yaml
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED  # backlog mode unchanged
+    assert planner.calls == 1
+    assert store.load_status("g").phase == "in_flight"

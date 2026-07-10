@@ -442,7 +442,10 @@ class GoalService:
         # Effective goal so the MCP-exposed view shows what cognition actually
         # uses (firmed-derived done_when, firmed stub_acceptable) — not the
         # original owner statement that's already been firmed past.
-        g = self._goal_store.load_effective_goal(goal_id)
+        # Display path: a corrupt firmed draft degrades to the base goal here
+        # (the tick blocks the goal loudly; blocked_on carries the signal —
+        # a dashboard read must never 500 over it).
+        g = self._goal_store.load_effective_goal(goal_id, on_corrupt="none")
         s = self._goal_store.load_status(goal_id)
         firmed_draft = self._firmed_draft_payload(goal_id)
         return {
@@ -475,8 +478,10 @@ class GoalService:
     def _firmed_draft_payload(self, goal_id: str) -> Optional[dict]:
         """Serialize the goal's current firmed-draft for the waiter — only the
         fields the waiter renders (status, round, unknowns + their options/why,
-        success_criteria). Returns None when firming hasn't run yet."""
-        draft = self._goal_store.read_firmed_draft(goal_id)
+        success_criteria). Returns None when firming hasn't run yet — and on a
+        corrupt draft too (display path: the waiter's render must not raise;
+        the tick blocks the goal loudly and blocked_on names the doc)."""
+        draft = self._goal_store.read_firmed_draft(goal_id, on_corrupt="none")
         if draft is None:
             return None
         return {
@@ -517,7 +522,8 @@ class GoalService:
         time). Everything is bounded — read-only, never mutates the goal."""
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
-        g = self._goal_store.load_effective_goal(goal_id)
+        # Display path (see get_goal): corrupt firmed draft → base goal, no raise.
+        g = self._goal_store.load_effective_goal(goal_id, on_corrupt="none")
         s = self._goal_store.load_status(goal_id)
 
         live_events: list[dict] = []
@@ -603,7 +609,10 @@ class GoalService:
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
         # Effective goal so the evaluator's stub-policy check honors any
-        # stub_acceptable the owner added during firming.
+        # stub_acceptable the owner added during firming. Cognition path, NOT
+        # display: a corrupt firmed draft raises GoalDocCorrupt to the caller
+        # — evaluating direction against the base goal would judge the wrong
+        # contract, which is exactly the silent loss T0.4 closed.
         g = self._goal_store.load_effective_goal(goal_id)
         s = self._goal_store.load_status(goal_id)
         ev = await goal_evaluator.evaluate(
@@ -632,6 +641,9 @@ class GoalService:
         the structured next state (``firmed`` or ``needs_more_answers``)."""
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
+        # Control path, NOT display: a corrupt draft raises GoalDocCorrupt
+        # here — merging owner answers into a torn contract must fail loudly,
+        # not read as "firming hasn't run" (the ValueError below).
         draft = self._goal_store.read_firmed_draft(goal_id)
         if draft is None:
             raise ValueError(

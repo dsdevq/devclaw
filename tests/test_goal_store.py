@@ -201,6 +201,74 @@ def test_load_effective_goal_empty_firmed_stub_acceptable_falls_back_to_base(tmp
     assert eff.stub_acceptable == ["pre_authorized_tool"]
 
 
+# ---- firmed-draft missing vs corrupt (T0.4) --------------------------------
+
+
+def test_read_firmed_draft_missing_returns_none(tmp_path):
+    """No firmed-draft.yaml at all is a legitimate state (pre-firming / legacy
+    goal) — None, and load_effective_goal transparently returns the base goal."""
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws", done_when="o")
+    assert store.read_firmed_draft("g") is None
+    assert store.load_effective_goal("g") == store.load_goal("g")
+
+
+def test_read_firmed_draft_raises_goal_doc_corrupt_when_file_corrupt(tmp_path):
+    """A firmed draft that EXISTS but won't parse must raise — the old None
+    fallback made load_effective_goal silently return the BASE goal, dropping
+    the firmed done_when / stub_acceptable / verify_cmd acceptance contract."""
+    from devclaw.goal.store import GoalDocCorrupt
+
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws", done_when="o")
+    (tmp_path / "g" / "firmed-draft.yaml").write_text("status: [garbage\n")
+    with pytest.raises(GoalDocCorrupt) as excinfo:
+        store.read_firmed_draft("g")
+    assert excinfo.value.goal_id == "g"
+    assert excinfo.value.doc == "firmed-draft.yaml"
+
+
+def test_load_effective_goal_raises_on_corrupt_firmed_draft(tmp_path):
+    """The cognition/gating entry point propagates the corruption — never a
+    silent base-goal fallback."""
+    from devclaw.goal.store import GoalDocCorrupt
+
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws", done_when="o")
+    (tmp_path / "g" / "firmed-draft.yaml").write_text("status: [garbage\n")
+    with pytest.raises(GoalDocCorrupt):
+        store.load_effective_goal("g")
+
+
+def test_load_effective_goal_on_corrupt_none_degrades_to_base_for_display(tmp_path):
+    """Display paths (get_goal / tail_goal wire reads) pass on_corrupt='none'
+    and get the base goal back instead of a 500 — the tick blocks the goal
+    loudly, so blocked_on carries the signal for dashboards."""
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws", done_when="original")
+    (tmp_path / "g" / "firmed-draft.yaml").write_text("status: [garbage\n")
+    assert store.read_firmed_draft("g", on_corrupt="none") is None
+    eff = store.load_effective_goal("g", on_corrupt="none")
+    assert eff.done_when == "original"
+
+
+def test_write_firmed_draft_is_atomic_replace(tmp_path):
+    """write_firmed_draft must never leave a partial firmed-draft.yaml or a
+    stray tmp file — the draft carries the goal's acceptance contract."""
+    from devclaw.goal.firmed import FirmedGoal, SuccessCriterion
+
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws", done_when="o")
+    firmed = FirmedGoal(
+        status="firmed", round=1, intent="x",
+        success_criteria=[SuccessCriterion(id="c1", text="clause")],
+    )
+    store.write_firmed_draft("g", firmed)
+    assert not (tmp_path / "g" / "firmed-draft.yaml.tmp").exists()
+    loaded = store.read_firmed_draft("g")
+    assert loaded is not None and loaded.status == "firmed"
+
+
 def test_status_roundtrip_with_eval_and_done_check(tmp_path):
     store = GoalStore(tmp_path, now=Clock())
     s = GoalStatus(

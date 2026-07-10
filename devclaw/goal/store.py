@@ -42,6 +42,26 @@ def _default_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class GoalDocCorrupt(RuntimeError):
+    """A goal contract file EXISTS on disk but cannot be parsed.
+
+    Distinct from "missing" on purpose: a missing checklist/firmed-draft is a
+    legitimate state (backlog mode / pre-firming base goal), but a torn or
+    garbled file means the goal's acceptance contract is GONE and nothing may
+    silently fall back — a corrupt checklist used to read as "no checklist"
+    and quietly flip the goal into the backlog planning pipeline; a corrupt
+    firmed draft used to silently drop the firmed ``done_when`` /
+    ``stub_acceptable`` / ``verify_cmd``. The tick catches this at one choke
+    point and blocks loudly; display paths opt into graceful degrade via
+    ``on_corrupt="none"``."""
+
+    def __init__(self, goal_id: str, doc: str, cause: Exception) -> None:
+        self.goal_id = goal_id
+        self.doc = doc
+        self.cause = cause
+        super().__init__(f"{doc} for goal {goal_id!r} is corrupt: {cause}")
+
+
 class GoalStore:
     def __init__(self, goals_dir: Path, *, now: Callable[[], datetime] = _default_now) -> None:
         self._root = Path(goals_dir)
@@ -59,6 +79,17 @@ class GoalStore:
 
     def exists(self, goal_id: str) -> bool:
         return (self._dir(goal_id) / "goal.yaml").is_file()
+
+    def _write_atomic(self, goal_id: str, name: str, text: str) -> None:
+        """tmp-file + ``os.replace`` write for the goal's contract/artifact
+        files. Same treatment ``save_status`` got after the 2026-07-09 live
+        truncation (a crash mid-``write_text`` leaves a torn file that then
+        fails to parse — or worse, parses as something else)."""
+        d = self._dir(goal_id)
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f"{name}.tmp"
+        tmp.write_text(text)
+        os.replace(tmp, d / name)
 
     # ---- goal (facts) ------------------------------------------------------
 
@@ -224,15 +255,11 @@ class GoalStore:
         }
         body = self._render_status_body(goal_id, status)
         text = "---\n" + yaml.safe_dump(fm, sort_keys=False).rstrip() + "\n---\n\n" + body
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
         # Atomic replace: STATUS.md is rewritten on every tick and holds the
         # ONLY link to in-flight work — a crash mid-write (container restart,
         # 2026-07-09) left a truncated file that silently loaded as a default
         # status, orphaning a running program the goal then waited on forever.
-        tmp = d / "STATUS.md.tmp"
-        tmp.write_text(text)
-        os.replace(tmp, d / "STATUS.md")
+        self._write_atomic(goal_id, "STATUS.md", text)
 
     # ---- log (events) ------------------------------------------------------
 
@@ -279,11 +306,10 @@ class GoalStore:
         """Persist the ``investigating`` phase's discovery brief (current state ·
         gap-to-good · best-practice checklist) as a durable artifact the planner
         and evaluator draw on. Overwritten if investigation re-runs."""
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
         ts = self._now().isoformat(timespec="seconds")
-        (d / "discovery.md").write_text(
-            f"# {goal_id} — discovery brief\n\n_generated {ts}_\n\n{brief.strip()}\n"
+        self._write_atomic(
+            goal_id, "discovery.md",
+            f"# {goal_id} — discovery brief\n\n_generated {ts}_\n\n{brief.strip()}\n",
         )
 
     def read_discovery(self, goal_id: str) -> str:
@@ -300,15 +326,21 @@ class GoalStore:
         rewrite items)."""
         from .checklist import dump_checklist
 
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "checklist.yaml").write_text(dump_checklist(checklist))
+        self._write_atomic(goal_id, "checklist.yaml", dump_checklist(checklist))
 
-    def read_checklist(self, goal_id: str) -> "Checklist | None":  # type: ignore[name-defined]
+    def read_checklist(
+        self, goal_id: str, *, on_corrupt: str = "raise"
+    ) -> "Checklist | None":  # type: ignore[name-defined]
         """The current checklist, or ``None`` if the decomposer hasn't run
         yet (legacy goals + brand-new goals before the decomposing phase
         completes). The per-tick planner falls back to backlog-driven mode
-        when this is ``None``."""
+        when this is ``None``.
+
+        A file that EXISTS but fails to parse is a different animal: the
+        goal's structured plan is torn, and treating it as absent would
+        silently revert the goal to the backlog planning pipeline. Default is
+        to raise :class:`GoalDocCorrupt` (the tick blocks loudly at its choke
+        point); display paths pass ``on_corrupt="none"`` to degrade gracefully."""
         from .checklist import ChecklistParseError, parse_checklist
 
         path = self._dir(goal_id) / "checklist.yaml"
@@ -316,8 +348,10 @@ class GoalStore:
             return None
         try:
             return parse_checklist(path.read_text())
-        except ChecklistParseError:
-            return None  # corrupted on disk — caller treats as absent
+        except ChecklistParseError as exc:
+            if on_corrupt == "none":
+                return None  # display-grade degrade — never for cognition/gating
+            raise GoalDocCorrupt(goal_id, "checklist.yaml", exc) from exc
 
     # ---- firmed-draft (firming-phase output) -------------------------------
 
@@ -328,14 +362,19 @@ class GoalStore:
         audit log."""
         from .firmed import dump_firmed
 
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "firmed-draft.yaml").write_text(dump_firmed(firmed))
+        self._write_atomic(goal_id, "firmed-draft.yaml", dump_firmed(firmed))
 
-    def read_firmed_draft(self, goal_id: str) -> "FirmedGoal | None":  # type: ignore[name-defined]
+    def read_firmed_draft(
+        self, goal_id: str, *, on_corrupt: str = "raise"
+    ) -> "FirmedGoal | None":  # type: ignore[name-defined]
         """The current firmed draft, or ``None`` if firming hasn't run yet
-        (legacy goals + new goals before firming completes). A corrupted file
-        is also treated as absent — the next firming pass will rewrite it."""
+        (legacy goals + new goals before firming completes).
+
+        A file that EXISTS but fails to parse is NOT "absent": treating it as
+        such made :meth:`load_effective_goal` silently return the base goal —
+        dropping the firmed ``done_when`` / ``stub_acceptable`` /
+        ``verify_cmd`` acceptance contract with zero signal. Default raises
+        :class:`GoalDocCorrupt`; display paths pass ``on_corrupt="none"``."""
         from .firmed import FirmedParseError, parse_firmed
 
         path = self._dir(goal_id) / "firmed-draft.yaml"
@@ -343,10 +382,12 @@ class GoalStore:
             return None
         try:
             return parse_firmed(path.read_text())
-        except FirmedParseError:
-            return None
+        except FirmedParseError as exc:
+            if on_corrupt == "none":
+                return None  # display-grade degrade — never for cognition/gating
+            raise GoalDocCorrupt(goal_id, "firmed-draft.yaml", exc) from exc
 
-    def load_effective_goal(self, goal_id: str) -> Goal:
+    def load_effective_goal(self, goal_id: str, *, on_corrupt: str = "raise") -> Goal:
         """The goal as it currently is, with firming's outputs overlaid on the
         original ``goal.yaml`` facts. Use this everywhere cognition + gating
         need the CURRENT effective state (decomposer, planner, evaluator,
@@ -356,9 +397,14 @@ class GoalStore:
 
         Only firmed-status drafts overlay. While firming is in flight (status
         ``needs_owner_answers``) the base goal is returned — the partial draft
-        is not authoritative yet."""
+        is not authoritative yet.
+
+        ``on_corrupt`` is forwarded to :meth:`read_firmed_draft`: the default
+        raises :class:`GoalDocCorrupt` on a torn draft (returning the base
+        goal would silently drop the firmed acceptance contract); display
+        paths pass ``"none"`` to fall back to the base goal gracefully."""
         base = self.load_goal(goal_id)
-        firmed = self.read_firmed_draft(goal_id)
+        firmed = self.read_firmed_draft(goal_id, on_corrupt=on_corrupt)
         if firmed is None or firmed.status != "firmed":
             return base
         from dataclasses import replace as _replace
@@ -390,10 +436,10 @@ class GoalStore:
         Produced by the OpenClaw waiter's scope_grill conversation BEFORE the goal
         is created, passed in through create_goal, and read by the evaluator so
         done is judged against the shared contract."""
-        d = self._dir(goal_id)
-        d.mkdir(parents=True, exist_ok=True)
         ts = self._now().isoformat(timespec="seconds")
-        (d / "spec.md").write_text(f"# {goal_id} — spec\n\n_agreed {ts}_\n\n{spec.strip()}\n")
+        self._write_atomic(
+            goal_id, "spec.md", f"# {goal_id} — spec\n\n_agreed {ts}_\n\n{spec.strip()}\n"
+        )
 
     def read_spec(self, goal_id: str) -> str:
         path = self._dir(goal_id) / "spec.md"
