@@ -36,6 +36,7 @@ import os
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 import httpx
@@ -92,6 +93,13 @@ _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
 WORKSPACE_BREAK_THRESHOLD = int(os.environ.get("DEVCLAW_WORKSPACE_BREAK_THRESHOLD", "3"))
 WORKSPACE_BREAK_WINDOW_S = float(os.environ.get("DEVCLAW_WORKSPACE_BREAK_WINDOW_S", "900"))
 WORKSPACE_BREAK_HOLD_S = float(os.environ.get("DEVCLAW_WORKSPACE_BREAK_HOLD_S", "1800"))
+#: how many usage-limit pause→requeue cycles a single task gets before it is
+#: FAILED instead of requeued again. A permanently-failing task whose error text
+#: happens to match the quota/rate regexes would otherwise loop pause→requeue→
+#: re-run forever — the workspace breaker never sees it (a paused task never
+#: becomes a `failed` row). The global pause is still set either way: the
+#: account really is limited; only the doomed task stops riding it.
+MAX_PAUSE_REQUEUES = int(os.environ.get("DEVCLAW_MAX_PAUSE_REQUEUES", "5"))
 
 #: _run_and_settle returns this when a task was paused for a quota limit (not
 #: settled): the task is back to 'pending' and the global pause holds dispatch.
@@ -913,12 +921,34 @@ class TaskQueue:
             # Quota guard: a usage/rate limit must NOT be retried-now (that burns
             # the remaining quota on the same doomed call). Pause ALL dispatch and
             # requeue this task; the tick loop auto-resumes when the pause expires.
-            cls = classify_failure(last_failure)
+            # now_utc lets the classifier turn Claude's ABSOLUTE reset wording
+            # ("resets 10pm (UTC)") into a real hint; a stated hint is trusted
+            # past the default re-probe cap (pause_seconds' stated policy).
+            cls = classify_failure(last_failure, now_utc=datetime.now(timezone.utc))
             if cls.is_pausing:
-                backoff = pause_seconds(cls.retry_after_s)
+                backoff = pause_seconds(cls.retry_after_s, stated=cls.stated)
                 self._store.set_global_pause(
                     _now_ms() + backoff * 1000, f"{cls.kind.value}: {last_failure[:160]}"
                 )
+                task = self._store.get_task(task_id)
+                if task is not None and task.pause_count >= MAX_PAUSE_REQUEUES:
+                    # This one task has ridden the pause loop to its bound — fail
+                    # it with the real reason so the breaker (and a human) can
+                    # see it, instead of requeueing forever. The global pause
+                    # above still holds: the account IS limited.
+                    self._store.mark_failed(
+                        task_id,
+                        f"exceeded {MAX_PAUSE_REQUEUES} usage-limit pauses; "
+                        f"last: {last_failure}",
+                    )
+                    self._check_and_trip_breaker(workspace_dir, task_id)
+                    sys.stderr.write(
+                        f"task-queue: task {task_id} hit {cls.kind.value} after "
+                        f"{task.pause_count} pause-requeues — failing (bound "
+                        f"{MAX_PAUSE_REQUEUES} reached), dispatch still paused "
+                        f"~{backoff}s\n"
+                    )
+                    return None
                 self._store.requeue_task(task_id)
                 sys.stderr.write(
                     f"task-queue: task {task_id} hit {cls.kind.value} — pausing dispatch "

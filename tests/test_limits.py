@@ -4,9 +4,20 @@ Uses realistic error strings (Anthropic API + Claude Code OAuth usage-limit + th
 actual ACP auth error seen in the Wave-0 dogfood) so the classifier earns trust."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
-from devclaw.limits import FailureKind, classify_failure, _parse_retry_after
+from devclaw.limits import (
+    RATE_LIMIT_MAX_PAUSE_S,
+    RATE_LIMIT_PAUSE_S,
+    RATE_LIMIT_STATED_MAX_S,
+    FailureKind,
+    _parse_retry_after,
+    _seconds_until_reset,
+    classify_failure,
+    pause_seconds,
+)
 
 
 @pytest.mark.parametrize("text,kind", [
@@ -73,3 +84,81 @@ def test_retry_after_flows_through_on_pausing_kinds():
     # when the failure is a pausing kind, the parsed hint is surfaced
     assert classify_failure("429 too many requests; retry-after: 60").retry_after_s == 60
     assert classify_failure("usage limit reached; try again in 30 minutes").retry_after_s == 1800
+
+
+# ---- absolute reset times ("resets 10pm (UTC)") -----------------------------
+# Claude's REAL usage-cap wording states a wall-clock reset time, not a delay.
+# Parsing needs a clock, so it's injected (now_utc) — the module stays pure.
+
+_NOW = datetime(2026, 7, 10, 18, 0, 0, tzinfo=timezone.utc)  # 18:00 UTC
+
+
+@pytest.mark.parametrize("text,secs", [
+    # 10pm UTC is 4h ahead of 18:00 → 4h + 120s slack
+    ("You're out of extra usage · resets 10pm (UTC)", 4 * 3600 + 120),
+    # optional minutes + am; 12:20am is tomorrow 00:20 → 6h20m + slack
+    ("You've hit your session limit · resets 12:20am", 6 * 3600 + 20 * 60 + 120),
+    # "resets at" form, with minutes and a spaced 12-hour suffix
+    ("Your limit will reset at 9:00 PM.", 3 * 3600 + 120),
+    # stated time already passed today → wraps to tomorrow
+    ("usage limit reached · resets 10am", 16 * 3600 + 120),
+    # exactly now → next occurrence is a full day out
+    ("usage limit reached · resets 6pm", 24 * 3600 + 120),
+    # non-UTC zone name is treated as UTC (self-correcting on the next probe)
+    ("You've hit your session limit · resets 12:20am (Europe/Dublin)", 6 * 3600 + 20 * 60 + 120),
+    ("usage limit reached", None),                    # no absolute time stated
+    ("rate limit; try again in 5 minutes", None),     # relative-only → not ours
+])
+def test_seconds_until_reset(text, secs):
+    assert _seconds_until_reset(text, _NOW) == secs
+
+
+def test_classify_parses_absolute_reset_when_clock_injected():
+    c = classify_failure(
+        "Internal error: You're out of extra usage · resets 10pm (UTC)", now_utc=_NOW
+    )
+    assert c.kind is FailureKind.QUOTA
+    assert c.stated is True
+    assert c.retry_after_s == 4 * 3600 + 120
+
+
+def test_classify_without_clock_keeps_old_behavior():
+    c = classify_failure("Internal error: You're out of extra usage · resets 10pm (UTC)")
+    assert c.kind is FailureKind.QUOTA
+    assert c.retry_after_s is None
+    assert c.stated is False
+
+
+def test_relative_hint_is_stated_even_without_clock():
+    c = classify_failure("usage limit reached; try again in 30 minutes")
+    assert c.retry_after_s == 1800 and c.stated is True
+
+
+def test_relative_hint_beats_absolute_when_both_present():
+    # the relative parser runs first; the clock is only consulted when it misses
+    c = classify_failure("usage limit — try again in 5 minutes (resets 10pm)", now_utc=_NOW)
+    assert c.retry_after_s == 300 and c.stated is True
+
+
+def test_no_hint_with_clock_is_unstated():
+    c = classify_failure("usage limit reached", now_utc=_NOW)
+    assert c.retry_after_s is None and c.stated is False
+
+
+# ---- pause_seconds policy ----------------------------------------------------
+
+
+def test_stated_hint_survives_past_default_cap():
+    # a 10h stated reset must NOT be clobbered to the 3600s re-probe cap — that
+    # made devclaw re-probe a multi-hour cap hourly, each probe a doomed dispatch
+    assert pause_seconds(36000, stated=True) == 36000
+
+
+def test_stated_hint_still_bounded():
+    assert pause_seconds(RATE_LIMIT_STATED_MAX_S + 999, stated=True) == RATE_LIMIT_STATED_MAX_S
+
+
+def test_unstated_policy_unchanged():
+    assert pause_seconds(None) == RATE_LIMIT_PAUSE_S            # default backoff
+    assert pause_seconds(36000) == RATE_LIMIT_MAX_PAUSE_S       # legacy call form: old cap
+    assert pause_seconds(None, stated=False) == RATE_LIMIT_PAUSE_S

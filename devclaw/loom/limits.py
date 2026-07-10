@@ -16,9 +16,11 @@ Kinds:
 Auth failures (401 / "failed to authenticate") are REAL on purpose: waiting won't
 fix them (they need a re-login), so they must surface, not silently pause forever.
 
-Pure + deterministic (no I/O, no clock) so it's trivially unit-tested against real
-error strings. ``retry_after_s`` is parsed from the text when the provider states a
-reset hint; otherwise None and the caller applies a default backoff.
+Pure + deterministic (no I/O, no hidden clock) so it's trivially unit-tested
+against real error strings. ``retry_after_s`` is parsed from the text when the
+provider states a reset hint; otherwise None and the caller applies a default
+backoff. Absolute reset TIMES ("resets 10pm (UTC)") need a clock, so they are
+parsed only when the caller injects ``now_utc`` — the module stays pure.
 """
 
 from __future__ import annotations
@@ -26,19 +28,27 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 # Quota-pause policy (shared by the task queue and the goal heartbeat so both
 # layers pause as one). When a usage/rate limit gives no reset hint, pause this
-# long before re-probing; cap any stated hint to MAX so a weekly cap re-probes
-# hourly rather than sleeping for days.
+# long before re-probing (capped at MAX). A STATED hint — the provider told us
+# when the limit lifts, relative ("in 2 hours") or absolute ("resets 10pm") —
+# is trusted up to STATED_MAX instead: clamping it to MAX made devclaw re-probe
+# a multi-hour/day cap hourly, each probe a doomed dispatch.
 RATE_LIMIT_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_PAUSE_S", "1800"))
 RATE_LIMIT_MAX_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_MAX_PAUSE_S", "3600"))
+RATE_LIMIT_STATED_MAX_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_STATED_MAX_S", "86400"))
 
 
-def pause_seconds(retry_after_s: int | None) -> int:
-    """The backoff to use for a pausing failure: the stated hint (capped) or the
-    default. Centralizes the policy so task + goal layers agree."""
+def pause_seconds(retry_after_s: int | None, *, stated: bool = False) -> int:
+    """The backoff to use for a pausing failure. Centralizes the policy so task +
+    goal layers agree. ``stated=True`` means ``retry_after_s`` came from the
+    provider's own text (see :class:`Classification`), so it's trusted up to the
+    generous STATED cap; unstated hints keep the legacy default/cap."""
+    if stated and retry_after_s:
+        return min(retry_after_s, RATE_LIMIT_STATED_MAX_S)
     return min(retry_after_s or RATE_LIMIT_PAUSE_S, RATE_LIMIT_MAX_PAUSE_S)
 
 
@@ -59,6 +69,10 @@ class Classification:
     kind: FailureKind
     retry_after_s: int | None
     matched: str  # the phrase that triggered the classification (for logs)
+    #: True when ``retry_after_s`` was stated by the provider's own text
+    #: (relative "in 2 hours" or absolute "resets 10pm") — the caller may trust
+    #: it past the default re-probe cap (see :func:`pause_seconds`).
+    stated: bool = False
 
     @property
     def is_pausing(self) -> bool:
@@ -120,11 +134,49 @@ _RETRY_AFTER_UNIT = re.compile(
 # … and the bare HTTP header form "Retry-After: 30" (seconds, no unit word).
 _RETRY_AFTER_HEADER = re.compile(r"retry[- ]after:?\s*(\d+)\b", re.IGNORECASE)
 
+# Absolute reset TIME — Claude's actual usage-cap wording states a wall-clock
+# time, not a delay: "You're out of extra usage · resets 10pm (UTC)", "You've
+# hit your session limit · resets 12:20am", "Your limit will reset at 3:30pm".
+# Optional minutes, optional trailing "(zone)". Non-UTC zone names are treated
+# as UTC too — a wrong pause is self-correcting (the next probe re-classifies),
+# whereas skipping the hint left a multi-hour cap re-probed on the short cap.
+_RESET_AT_ABS = re.compile(
+    r"reset[s]?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+    re.IGNORECASE,
+)
+#: slack added past the stated reset so we don't probe a second early and
+#: re-trip the same limit.
+_RESET_ABS_SLACK_S = 120
+
+
+def _seconds_until_reset(text: str, now_utc: datetime) -> int | None:
+    """Seconds from ``now_utc`` to the NEXT occurrence of an absolute reset time
+    stated in ``text`` ("resets 10pm (UTC)"), plus a small slack. None when no
+    absolute time is stated. Assumes UTC when no/other zone is given (see the
+    regex note). Pure — the clock is injected, never read."""
+    m = _RESET_AT_ABS.search(text or "")
+    if not m:
+        return None
+    hour = int(m.group(1)) % 12
+    if m.group(3).lower() == "pm":
+        hour += 12
+    minute = int(m.group(2) or 0)
+    if minute > 59:
+        return None
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_utc = now_utc.astimezone(timezone.utc)
+    target = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now_utc:
+        target += timedelta(days=1)  # stated time already passed today → tomorrow
+    return int((target - now_utc).total_seconds()) + _RESET_ABS_SLACK_S
+
 
 def _parse_retry_after(text: str) -> int | None:
     """Best-effort parse of a stated reset delay → seconds. None if not stated.
-    (Absolute reset *times* like 'resets at 3pm' are intentionally not parsed —
-    that needs a clock/timezone; the caller applies a default backoff instead.)"""
+    (Absolute reset *times* like 'resets at 3pm' need a clock — see
+    :func:`_seconds_until_reset`, tried by :func:`classify_failure` only when
+    the caller injects ``now_utc``.)"""
     t = text or ""
     m = _RETRY_AFTER_UNIT.search(t)
     if m:
@@ -135,16 +187,30 @@ def _parse_retry_after(text: str) -> int | None:
     return None
 
 
-def classify_failure(text: str | None) -> Classification:
+def classify_failure(text: str | None, *, now_utc: datetime | None = None) -> Classification:
     """Classify a failure string. Defaults to REAL when nothing matches — an
-    unrecognized failure is treated as a real bug (fail), never silently paused."""
+    unrecognized failure is treated as a real bug (fail), never silently paused.
+
+    ``now_utc``, when given, also lets absolute reset times ("resets 10pm (UTC)")
+    become a ``retry_after_s`` hint; omitted (default) preserves the pure
+    text-only behavior exactly."""
     t = text or ""
+
+    def _hint() -> int | None:
+        h = _parse_retry_after(t)
+        if h is None and now_utc is not None:
+            h = _seconds_until_reset(t, now_utc)
+        return h
+
     if _AUTH.search(t):
         return Classification(FailureKind.REAL, None, "auth")
     if _QUOTA.search(t):
-        return Classification(FailureKind.QUOTA, _parse_retry_after(t), "quota")
+        h = _hint()
+        return Classification(FailureKind.QUOTA, h, "quota", stated=h is not None)
     if _RATE.search(t):
-        return Classification(FailureKind.RATE_LIMIT, _parse_retry_after(t), "rate_limit")
+        h = _hint()
+        return Classification(FailureKind.RATE_LIMIT, h, "rate_limit", stated=h is not None)
     if _TRANSIENT.search(t):
-        return Classification(FailureKind.TRANSIENT, _parse_retry_after(t), "transient")
+        h = _hint()
+        return Classification(FailureKind.TRANSIENT, h, "transient", stated=h is not None)
     return Classification(FailureKind.REAL, None, "")

@@ -114,6 +114,14 @@ class InProcessEngine:
     def clear_global_pause(self) -> None:
         self._store.clear_global_pause()
 
+    def pause_notified(self) -> bool:
+        """Whether the owner was already pinged about the current quota pause
+        (the goal tick pings once per pause + once on resume, not every tick)."""
+        return self._store.pause_notified()
+
+    def set_pause_notified(self, on: bool) -> None:
+        self._store.set_pause_notified(on)
+
     def operator_block(self, now_ms: int) -> tuple[bool, str]:
         """The manual-hold + daily run-window gate (``dispatch_gate.operator_block``),
         read by the goal heartbeat beside the quota pause. Delegates to the same
