@@ -25,7 +25,8 @@ def test_argv_includes_model_when_set():
     argv = _build_claude_argv("do the thing", "sonnet")
     assert "--model" in argv
     assert argv[argv.index("--model") + 1] == "sonnet"
-    assert argv[:3] == [planner.CLAUDE_BIN, "--print", "--output-format=text"]
+    # T0.5: json output format — the CLI envelope carries real token usage.
+    assert argv[:3] == [planner.CLAUDE_BIN, "--print", "--output-format=json"]
     # 2026-07-03 argv → stdin migration: prompt no longer rides on argv,
     # protecting against ``[Errno 7] Argument list too long`` on long prompts.
     assert "do the thing" not in argv
@@ -64,7 +65,9 @@ async def test_call_claude_passes_prompt_on_stdin(monkeypatch):
 
         async def communicate(self, input=None):  # noqa: A002
             captured["stdin_bytes"] = input
-            return b"ok", b""
+            # T0.5: the CLI replies with the json result envelope; callers
+            # still receive just the response text.
+            return b'{"type": "result", "subtype": "success", "result": "ok"}', b""
 
     async def fake_spawn(*argv, **kwargs):
         captured["argv"] = argv

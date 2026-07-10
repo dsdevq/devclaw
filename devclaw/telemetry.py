@@ -6,7 +6,8 @@ Two ways in:
 
 - ``compute_scorecard(store, window_hours=168)`` — a pure function over the
   state_store's ``tasks`` and ``traces`` tables. Cheap SQL + a light Python
-  pass over cognition ``response_preview`` strings; no cognition call.
+  pass over cognition response text (full ``response_text`` since T0.5,
+  ``response_preview`` for legacy rows); no cognition call.
 - ``devclaw scorecard`` (CLI) and the ``get_scorecard_metrics`` MCP tool
   wrap the same function.
 
@@ -35,11 +36,13 @@ _EVALUATOR_ROLE = "evaluator"
 #: into the telemetry module — telemetry stays a pure, dependency-light path.
 _EVAL_VERDICTS = ("on_track", "off_track", "achieved", "stalled", "needs_human")
 
-#: Best-effort verdict extractor. The tracer stores the model response as a
-#: 240-char ``response_preview``; that's plenty to see the JSON prefix a
-#: well-behaved evaluator returns. If the field can't be parsed (truncation,
-#: model returned prose, error string), the row lands under ``unparseable`` —
-#: a signal in its own right about model output quality.
+#: Best-effort verdict extractor. Since T0.5 the tracer stores the FULL model
+#: response as ``response_text``, so the verdict is found wherever it sits in
+#: the response; legacy rows carry only the 240-char ``response_preview`` and
+#: fall back to that. If neither yields a verdict (model returned prose, error
+#: string, or a legacy preview truncated mid-JSON), the row lands under
+#: ``unparseable`` — going forward that bucket should only contain genuinely
+#: verdict-less responses.
 _VERDICT_RE = re.compile(r'"verdict"\s*:\s*"(\w+)"')
 
 #: Same shape for the structural axis. Present only at done-gate responses;
@@ -55,8 +58,9 @@ def _now_ms() -> int:
 
 
 def _extract_verdict(preview: str) -> Optional[str]:
-    """Pull the verdict string out of an evaluator ``response_preview``.
-    Returns None when the preview doesn't look like an evaluator response
+    """Pull the verdict string out of an evaluator response (the full
+    ``response_text`` since T0.5; the 240-char ``response_preview`` for legacy
+    rows). Returns None when the text doesn't look like an evaluator response
     (which happens for planner/decomposer roles too — the caller filters
     by role first, but this stays defensive)."""
     if not preview:
@@ -140,15 +144,17 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
         if p.get("role") != _EVALUATOR_ROLE:
             continue
         eval_calls += 1
-        preview = p.get("response_preview") or ""
-        v = _extract_verdict(preview)
+        # T0.5: prefer the full response text; legacy rows only have the
+        # 240-char preview (verdicts past the truncation were "unparseable").
+        text = p.get("response_text") or p.get("response_preview") or ""
+        v = _extract_verdict(text)
         if v is None:
             unparseable += 1
             continue
         verdicts[v] += 1
         # Structural grade is present only at done-gate responses. Absent
         # elsewhere — don't inflate the denominator by counting misses.
-        g = _extract_structural(preview)
+        g = _extract_structural(text)
         if g is not None:
             structural[g] += 1
 

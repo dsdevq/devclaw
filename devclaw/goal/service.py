@@ -332,6 +332,12 @@ class GoalService:
         table. Disabled when DEVCLAW_TRACE_PERSIST=0 (test/local convenience).
         Each tick gets a fresh ``trace_id`` so the full causal chain of one
         wakeup can be replayed via ``get_trace(goal_id)``.
+
+        ``goals_dir`` is plumbed so cognition calls in the tick leave a full
+        prompt+response transcript under ``<goal_dir>/transcripts/`` (T0.5) —
+        the service already resolves the dir for GoalStore, so this is the
+        cleanest seam to the goal *directory* the tracer can't derive from the
+        goal id alone.
         """
         if not _TRACE_PERSIST_ENABLED:
             return None
@@ -340,6 +346,7 @@ class GoalService:
             trace_id=str(uuid.uuid4()),
             goal_id=goal_id,
             label=f"tick-{goal_id}",
+            goals_dir=self._cfg.goals_dir,
         )
 
     async def tick_all(self) -> dict:

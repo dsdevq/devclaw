@@ -767,7 +767,13 @@ class StateStore:
 
     def trace_totals(self, *, goal_id: str) -> dict:
         """Aggregate stats over all trace events for a goal: counts per kind,
-        cognition total latency + estimated tokens. Cheap SQL — no LLM call."""
+        cognition total latency, tokens, and cost. Cheap SQL — no LLM call.
+
+        Token totals prefer REAL usage (recorded from the CLI's json envelope
+        since T0.5) per row; rows without it (legacy rows, raw-stdout fallback)
+        contribute their len/4 estimate — ``cognition_rows_estimated`` says how
+        many rows in the total are estimates. The pure-estimate ``*_est`` sums
+        are kept for back-compat."""
         with self._lock:
             counts = dict(
                 self._db.execute(
@@ -783,19 +789,41 @@ class StateStore:
         latency_ms = 0
         tokens_in = 0
         tokens_out = 0
+        tokens_in_est = 0
+        tokens_out_est = 0
+        rows_with_real = 0
+        rows_estimated = 0
+        cost_usd = 0.0
         for r in cog_rows:
             try:
                 p = json.loads(r["payload_json"])
             except (TypeError, json.JSONDecodeError):
                 continue
             latency_ms += int(p.get("latency_ms") or 0)
-            tokens_in += int(p.get("tokens_in_est") or 0)
-            tokens_out += int(p.get("tokens_out_est") or 0)
+            tokens_in_est += int(p.get("tokens_in_est") or 0)
+            tokens_out_est += int(p.get("tokens_out_est") or 0)
+            real_in, real_out = p.get("tokens_in"), p.get("tokens_out")
+            if real_in is not None or real_out is not None:
+                rows_with_real += 1
+                tokens_in += int(real_in or 0)
+                tokens_out += int(real_out or 0)
+            else:
+                rows_estimated += 1
+                tokens_in += int(p.get("tokens_in_est") or 0)
+                tokens_out += int(p.get("tokens_out_est") or 0)
+            c = p.get("cost_usd")
+            if isinstance(c, (int, float)) and not isinstance(c, bool):
+                cost_usd += float(c)
         return {
             "events_by_kind": {k: int(v) for k, v in counts.items()},
             "cognition_total_latency_ms": latency_ms,
-            "cognition_tokens_in_est": tokens_in,
-            "cognition_tokens_out_est": tokens_out,
+            "cognition_tokens_in": tokens_in,
+            "cognition_tokens_out": tokens_out,
+            "cognition_rows_with_real_usage": rows_with_real,
+            "cognition_rows_estimated": rows_estimated,
+            "cognition_cost_usd": round(cost_usd, 6),
+            "cognition_tokens_in_est": tokens_in_est,
+            "cognition_tokens_out_est": tokens_out_est,
         }
 
     def list_events(

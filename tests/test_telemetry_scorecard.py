@@ -214,6 +214,60 @@ def test_structural_grades_counted_per_done_gate_response(store):
     assert sc["evaluator"]["total_calls"] == 5
 
 
+def test_verdict_extracted_from_full_response_text_past_preview_horizon(store):
+    """T0.5: the verdict sits AFTER 240 chars of rationale — the legacy preview
+    truncates it away, but the full ``response_text`` now carried in the
+    payload classifies it. This is exactly the row shape the tracer writes
+    since T0.5 (both fields present)."""
+    full = json.dumps({"rationale": "r" * 400, "verdict": "achieved"})
+    assert '"verdict"' not in full[:240]  # premise: preview alone can't see it
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "evaluator",
+                 "response_preview": full[:240], "response_text": full},
+    )
+    sc = compute_scorecard(store, window_hours=24)
+    assert sc["evaluator"]["verdicts"]["achieved"] == 1
+    assert sc["evaluator"]["unparseable_responses"] == 0
+
+
+def test_legacy_preview_only_rows_still_classify(store):
+    """Rows written before T0.5 carry only response_preview — they must keep
+    classifying (fallback path), alongside new full-text rows."""
+    # legacy row: preview only
+    store.append_trace_event(
+        trace_id="t1", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "evaluator",
+                 "response_preview": json.dumps({"verdict": "on_track"})[:240]},
+    )
+    # new row: full text (preview truncated mid-JSON)
+    full = json.dumps({"rationale": "x" * 300, "verdict": "off_track"})
+    store.append_trace_event(
+        trace_id="t2", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "evaluator",
+                 "response_preview": full[:240], "response_text": full},
+    )
+    sc = compute_scorecard(store, window_hours=24)
+    assert sc["evaluator"]["verdicts"]["on_track"] == 1
+    assert sc["evaluator"]["verdicts"]["off_track"] == 1
+    assert sc["evaluator"]["unparseable_responses"] == 0
+
+
+def test_structural_grade_extracted_from_full_response_text(store):
+    """The axis-B structural_health grade also benefits from the full text —
+    a done-gate response whose grade sits past the preview horizon."""
+    full = json.dumps(
+        {"rationale": "y" * 300, "verdict": "achieved", "structural_health": "clean"}
+    )
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "evaluator",
+                 "response_preview": full[:240], "response_text": full},
+    )
+    sc = compute_scorecard(store, window_hours=24)
+    assert sc["evaluator"]["structural_grades"]["clean"] == 1
+
+
 def test_format_scorecard_renders_structural_when_any_reported(store):
     """format_scorecard shows structural block only when the window contained
     at least one graded response — an all-zero row would be noise."""
