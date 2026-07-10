@@ -426,7 +426,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     reg = ProjectRegistry(_db_path())
     # All CLI subcommands receive the full goals list for uniformity. Only
     # `list` and `show` actually consume it; the rest ignore it.
-    all_goals = _list_goals(GoalStore(_goals_dir()))
+    # Share the server's devclaw.db so the CLI reads LIVE goal_status, not a
+    # private-DB snapshot. Without state=, GoalStore self-creates its own
+    # .goal-state.db, migrates each goal once from the STATUS.md view, then the
+    # has_status guard pins that first snapshot — every later `projects list`
+    # would show stale status while the server's DB moved on. (T1/PR3.)
+    all_goals = _list_goals(GoalStore(_goals_dir(), state=StateStore(_db_path())))
     return args.func(reg, all_goals, args)
 
 

@@ -48,8 +48,10 @@ spawn containers itself — it goes through the engine).
   checks run *before* any LLM call). Adding a tick-path LLM call that fires on idle
   breaks the quota guarantee (the test asserts `FakeClaude.calls == 0` on idle paths).
 - **Single writer to state.** Only the **TaskQueue** mutates task rows; `StateStore` is
-  an append-only event log, views are projections. Goal state lives only in `GoalStore`
-  (disk yaml/markdown), mutated only by the heartbeat. No upstream layer caches either.
+  an append-only event log, views are projections. Goal state is owned by `GoalStore`,
+  mutated only by the heartbeat, and (as of Tranche 1) lives in SQLite (`goal_status` in
+  `devclaw.db`); `STATUS.md`/`log.md`/`deliveries.md` are generated **views** — human- and
+  rollback-readable, never read back for decisions. No upstream layer caches either.
 - **"Done" is a proposal, gated on grounded evaluation.** The planner's `done` triggers
   a read-only `review_repository` against the firmed `done_when` + `stub_acceptable`; the
   goal closes **only if the evaluator confirms `achieved`**. Never gate completion on

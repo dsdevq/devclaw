@@ -1,6 +1,6 @@
-"""Tranche 1 substrate — the SQLite home for goal state (tables only, UNUSED).
+"""Tranche 1 substrate — the SQLite home for goal state.
 
-Goal state today is spread across per-goal files under ``DEVCLAW_GOALS_DIR``
+Goal state used to be spread across per-goal files under ``DEVCLAW_GOALS_DIR``
 (``goal.yaml`` / ``STATUS.md`` / ``log.md`` / ``inbox.md`` / ``deliveries.md`` …)
 and linked to the task queue only by a string goal id. The approved Tranche 1
 plan consolidates that state into the SAME ``devclaw.db`` SQLite database that
@@ -8,20 +8,30 @@ plan consolidates that state into the SAME ``devclaw.db`` SQLite database that
 connection guarded by a single ``threading.RLock``), so a task row and its
 owning goal's state can be written in one atomic :meth:`StateStore.transaction`.
 
-**This module is the foundation ONLY.** ``GoalState`` idempotently creates the
-goal-state tables on construction and nothing more — no read/write methods, and
-nothing in the running system reads or writes these tables yet. Later PRs (not
-this one) migrate status, phase history, steering, log, deliveries, settlements,
-and docs off the filesystem and onto these tables. Until then the tables are
-created-but-empty: pure substrate, zero behavior change.
+**PR3 brought ``goal_status`` + ``goal_phase_history`` LIVE.** ``GoalState``
+now owns the status read/write surface (:meth:`read_status` /
+:meth:`write_status` / the phase-history methods); ``GoalStore.load_status`` /
+``save_status`` are re-backed onto it, with ``STATUS.md`` demoted to a
+generated full-fidelity view (the rollback path). The remaining tables
+(``goal_steering`` / ``goal_log`` / ``goal_deliveries`` / ``goal_settlements``
+/ ``goal_docs``) stay created-but-empty until later PRs migrate onto them.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
+import time
 from typing import TYPE_CHECKING
+
+from .models import GoalStatus, InFlight
 
 if TYPE_CHECKING:
     from ..state_store import StateStore
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 class GoalState:
@@ -31,8 +41,10 @@ class GoalState:
     its ``RLock``, and its ``transaction()`` seam — so goal-state writes land in
     the same database and can join the same atomic unit as task/program writes.
     Construction bootstraps the tables idempotently (``CREATE TABLE IF NOT
-    EXISTS``), mirroring the store's own ``_bootstrap`` style. No other methods
-    yet — the tables stay unused until later Tranche 1 PRs migrate onto them.
+    EXISTS`` + forward-compat ALTERs), mirroring the store's own ``_bootstrap``
+    style. Since PR3 it also carries the status read/write surface
+    (``goal_status`` + ``goal_phase_history``); the other tables stay unused
+    until later Tranche 1 PRs migrate onto them.
     """
 
     def __init__(self, store: "StateStore") -> None:
@@ -46,14 +58,23 @@ class GoalState:
         with self._store._lock:
             self._store._db.executescript(
                 """
-                -- One row per goal: the machine state STATUS.md holds in YAML
-                -- frontmatter today. `version` is an optimistic-concurrency
-                -- counter a later migration bumps on each write; in_flight_*
-                -- carry the durable pointer to the goal's running task/program.
+                -- One row per goal: the machine state STATUS.md held in YAML
+                -- frontmatter before Tranche 1/PR3. This table is now the
+                -- source of truth for status; STATUS.md is a generated
+                -- full-fidelity view written on every save (the rollback path).
+                -- `phase`/`lifecycle` are the current GoalStatus fields;
+                -- `state` is reserved (nullable, unused) for PR4's consolidated
+                -- enum. `version` is an optimistic-concurrency counter a later
+                -- PR bumps on each write; in_flight_* carry the durable pointer
+                -- to the goal's running task/program (in_flight_json is the
+                -- authoritative serialized InFlight, ref_id/kind denormalized
+                -- for later indexing).
                 CREATE TABLE IF NOT EXISTS goal_status (
                   goal_id               TEXT PRIMARY KEY,
                   version               INTEGER NOT NULL DEFAULT 0,
                   state                 TEXT,
+                  phase                 TEXT,
+                  lifecycle             TEXT,
                   blocked_on            TEXT,
                   next                  TEXT,
                   last_plan_at          TEXT,
@@ -147,4 +168,207 @@ class GoalState:
                   ON goal_settlements(goal_id, ref_id);
                 """
             )
+
+            # Forward-compat ALTERs for DBs bootstrapped by PR2 (which created
+            # goal_status WITHOUT phase/lifecycle — those columns were only added
+            # in PR3, when the table went live). Idempotent: a fresh DB already
+            # has them from the CREATE above, so the duplicate-column error is
+            # swallowed. Mirrors StateStore._bootstrap's ALTER pattern.
+            for sql in (
+                "ALTER TABLE goal_status ADD COLUMN phase TEXT",
+                "ALTER TABLE goal_status ADD COLUMN lifecycle TEXT",
+            ):
+                try:
+                    self._store._db.execute(sql)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+
             self._store._commit()
+
+    # ---- goal_status persistence (PR3: STATUS.md re-backed onto SQLite) ----
+    #
+    # The store orchestrates STATUS.md-as-view + lazy migration; these methods
+    # are the pure DB surface. All borrow the shared connection + lock and use
+    # the store's _commit() (a no-op inside an open transaction()), so a status
+    # write can join the same atomic unit as a task write in a later PR.
+
+    def has_status(self, goal_id: str) -> bool:
+        """Whether a ``goal_status`` row exists — the lazy-migration guard."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_status WHERE goal_id = ? LIMIT 1", (goal_id,)
+            ).fetchone()
+        return row is not None
+
+    def current_phase(self, goal_id: str) -> "str | None":
+        """The stored phase, or None when no row exists. Read by save_status to
+        decide whether the phase changed (and a phase_history entry is due)."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT phase FROM goal_status WHERE goal_id = ?", (goal_id,)
+            ).fetchone()
+        return row["phase"] if row else None
+
+    def read_status(self, goal_id: str) -> GoalStatus:
+        """Rehydrate the full :class:`GoalStatus` (incl. in_flight + phase
+        history). Caller must ensure a row exists (see :meth:`has_status`)."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT * FROM goal_status WHERE goal_id = ?", (goal_id,)
+            ).fetchone()
+        return _row_to_status(row, self.read_phase_history(goal_id))
+
+    def write_status(self, goal_id: str, status: GoalStatus) -> None:
+        """Upsert the status row. The InFlight is serialized to in_flight_json
+        (authoritative) with id/kind denormalized for later indexing; the
+        phase_history tuple is NOT written here — it lives in
+        goal_phase_history (see :meth:`append_phase_history`)."""
+        in_flight_json = None
+        in_flight_ref_id = None
+        in_flight_kind = None
+        if status.in_flight is not None:
+            f = status.in_flight
+            in_flight_ref_id = f.id
+            in_flight_kind = f.ref_kind
+            in_flight_json = json.dumps(
+                {
+                    "engine": f.engine,
+                    "tool": f.tool,
+                    "id": f.id,
+                    "ref_kind": f.ref_kind,
+                    "goal": f.goal,
+                    "is_done_check": f.is_done_check,
+                    "is_discovery": f.is_discovery,
+                    "addresses": list(f.addresses),
+                }
+            )
+        with self._store._lock:
+            self._store._db.execute(
+                """
+                INSERT INTO goal_status (
+                  goal_id, phase, lifecycle, blocked_on, "next", last_plan_at,
+                  last_tick_at, actions_dispatched, deliveries_since_eval,
+                  last_eval_verdict, last_eval_at, last_eval_note, last_progress_at,
+                  no_progress_notified, in_flight_ref_id, in_flight_kind,
+                  in_flight_json, inbox_ingest_cursor, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(goal_id) DO UPDATE SET
+                  phase                 = excluded.phase,
+                  lifecycle             = excluded.lifecycle,
+                  blocked_on            = excluded.blocked_on,
+                  "next"                = excluded."next",
+                  last_plan_at          = excluded.last_plan_at,
+                  last_tick_at          = excluded.last_tick_at,
+                  actions_dispatched    = excluded.actions_dispatched,
+                  deliveries_since_eval = excluded.deliveries_since_eval,
+                  last_eval_verdict     = excluded.last_eval_verdict,
+                  last_eval_at          = excluded.last_eval_at,
+                  last_eval_note        = excluded.last_eval_note,
+                  last_progress_at      = excluded.last_progress_at,
+                  no_progress_notified  = excluded.no_progress_notified,
+                  in_flight_ref_id      = excluded.in_flight_ref_id,
+                  in_flight_kind        = excluded.in_flight_kind,
+                  in_flight_json        = excluded.in_flight_json,
+                  inbox_ingest_cursor   = excluded.inbox_ingest_cursor,
+                  updated_at            = excluded.updated_at
+                """,
+                (
+                    goal_id,
+                    status.phase,
+                    status.lifecycle,
+                    status.blocked_on,
+                    status.next,
+                    status.last_plan_at,
+                    status.last_tick_at,
+                    status.actions_dispatched,
+                    status.deliveries_since_eval,
+                    status.last_eval_verdict,
+                    status.last_eval_at,
+                    status.last_eval_note,
+                    status.last_progress_at,
+                    1 if status.no_progress_notified else 0,
+                    in_flight_ref_id,
+                    in_flight_kind,
+                    in_flight_json,
+                    status.inbox_cursor,
+                    _now_ms(),
+                ),
+            )
+            self._store._commit()
+
+    # ---- goal_phase_history (append-only phase transitions) ----------------
+
+    def read_phase_history(self, goal_id: str) -> "tuple[dict, ...]":
+        """The goal's phase transitions in append order — the tuple that lands
+        on ``GoalStatus.phase_history`` and in the STATUS.md view."""
+        with self._store._lock:
+            rows = self._store._db.execute(
+                "SELECT phase, at FROM goal_phase_history WHERE goal_id = ? ORDER BY id ASC",
+                (goal_id,),
+            ).fetchall()
+        return tuple({"phase": r["phase"], "at": r["at"]} for r in rows)
+
+    def append_phase_history(self, goal_id: str, phase: str, at: str) -> None:
+        """Append one phase transition. Called by save_status when the phase
+        differs from what's stored (one entry per entry-to-a-new-phase)."""
+        with self._store._lock:
+            self._store._db.execute(
+                "INSERT INTO goal_phase_history (goal_id, phase, at) VALUES (?, ?, ?)",
+                (goal_id, phase, at),
+            )
+            self._store._commit()
+
+    def seed_phase_history(self, goal_id: str, entries: "tuple[dict, ...]") -> None:
+        """Bulk-insert existing phase entries verbatim — the lazy migration path
+        that carries a legacy STATUS.md's phase_history onto the table."""
+        if not entries:
+            return
+        with self._store._lock:
+            self._store._db.executemany(
+                "INSERT INTO goal_phase_history (goal_id, phase, at) VALUES (?, ?, ?)",
+                [(goal_id, str(e["phase"]), str(e["at"])) for e in entries],
+            )
+            self._store._commit()
+
+
+def _row_to_status(row, phase_history: "tuple[dict, ...]") -> GoalStatus:
+    """Reconstruct a :class:`GoalStatus` from a ``goal_status`` row + its phase
+    history. Mirrors the field-by-field degrade of the old STATUS.md reader so a
+    migrated goal loads identically."""
+    in_flight = None
+    if row["in_flight_json"]:
+        f = json.loads(row["in_flight_json"])
+        raw_addr = f.get("addresses") or []
+        addresses = (
+            [str(a) for a in raw_addr if str(a).strip()]
+            if isinstance(raw_addr, list)
+            else []
+        )
+        in_flight = InFlight(
+            engine=f["engine"],
+            tool=f["tool"],
+            id=f["id"],
+            ref_kind=f["ref_kind"],
+            goal=f.get("goal", ""),
+            is_done_check=bool(f.get("is_done_check", False)),
+            is_discovery=bool(f.get("is_discovery", False)),
+            addresses=addresses,
+        )
+    return GoalStatus(
+        phase=row["phase"] or "idle",
+        lifecycle=row["lifecycle"] or None,
+        in_flight=in_flight,
+        blocked_on=row["blocked_on"] or None,
+        next=row["next"] or "",
+        last_plan_at=row["last_plan_at"] or None,
+        last_tick_at=row["last_tick_at"] or None,
+        inbox_cursor=int(row["inbox_ingest_cursor"] or 0),
+        actions_dispatched=int(row["actions_dispatched"] or 0),
+        deliveries_since_eval=int(row["deliveries_since_eval"] or 0),
+        last_eval_verdict=row["last_eval_verdict"] or None,
+        last_eval_at=row["last_eval_at"] or None,
+        last_eval_note=row["last_eval_note"] or "",
+        last_progress_at=row["last_progress_at"] or None,
+        no_progress_notified=bool(row["no_progress_notified"]),
+        phase_history=phase_history,
+    )

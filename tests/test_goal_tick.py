@@ -400,17 +400,22 @@ def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
 
     goals_dir = tmp_path / "goals"
     seed_goal(goals_dir, "g")
-    goal_store = _store(goals_dir, Clock())
-    goal_store.save_status("g", GoalStatus(phase="blocked", blocked_on="cap hit", actions_dispatched=5))
 
     db = StateStore(str(tmp_path / "state.db"))
     try:
         cfg = GoalConfig(goals_dir=goals_dir, notify_url="", tick_seconds=900, eval_every=99, verify_done=False)
         svc = GoalService(TaskQueue(db), db, config=cfg)
+        # Seed + read back through the service's OWN store: since Tranche 1/PR3
+        # status lives in the shared StateStore (not STATUS.md), so a separate
+        # GoalStore over the same goals_dir would read its own private DB, not
+        # the state the service mutated. (Matches test_cancel_goal.py.)
+        svc._goal_store.save_status(
+            "g", GoalStatus(phase="blocked", blocked_on="cap hit", actions_dispatched=5)
+        )
 
         svc.steer_goal("g", "resume with new approach")
 
-        saved = goal_store.load_status("g")
+        saved = svc._goal_store.load_status("g")
         assert saved.phase == "idle"
         assert saved.actions_dispatched == 0
     finally:
