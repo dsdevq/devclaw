@@ -1858,8 +1858,19 @@ async def test_lost_discovery_ref_blocks_and_notifies_owner(tmp_path):
     st = store.load_status("g")
     assert st.phase == "blocked" and st.in_flight is None
     assert "task t_disc" in (st.blocked_on or "")
+    # lifecycle pinned to executing: were it left "investigating", _classify
+    # would route the NEXT tick back into INVESTIGATING and silently dispatch a
+    # fresh review — contradicting the "paused; steer me" ping just sent.
+    assert st.lifecycle == "executing"
     assert planner.calls == 0 and evaluator.calls == 0
     assert len(notifier.sent) == 1 and "t_disc" in notifier.sent[0]
+
+    # Next tick: a true block — idles at zero tokens, no re-dispatch, no re-ping.
+    out2 = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out2 is Outcome.IDLE
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == 1
+    assert store.load_status("g").phase == "blocked"
 
 
 @pytest.mark.asyncio

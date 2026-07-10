@@ -408,9 +408,8 @@ def _classify(status: GoalStatus) -> Phase:
             return Phase.POLLING_DONE_GATE
         return Phase.POLLING_ACTION
     # No in-flight work — dispatch on lifecycle. A None lifecycle (legacy goal)
-    # behaves as "executing"; "investigating" without an in-flight ref is a
-    # crash-recovery edge that falls through to executing too (the discovery
-    # never resolved; carry on with the bare backlog).
+    # behaves as "executing"; "investigating" without an in-flight ref re-opens
+    # the investigation (the discovery never resolved — dispatch it again).
     lifecycle = status.lifecycle or "executing"
     if lifecycle == "investigating":
         return Phase.INVESTIGATING
@@ -1276,16 +1275,23 @@ async def _block_on_lost_ref(
     and tell the owner ONCE at OWNER altitude. Blocked goals are not re-poked
     by cadence (see :func:`_handle_executing`) — only steering unblocks them —
     so this is one legible failure, and the owner decides how to proceed
-    (typically steer_goal to re-plan). ``lifecycle`` stays untouched: blocking
-    is a phase, not a lifecycle transition. Catches :class:`GoalEngineError`
-    ONLY — a real bug must still surface through the catch-all, not be
-    absorbed as a lost ref."""
+    (typically steer_goal to re-plan). ``lifecycle`` is pinned to ``executing``
+    for the same reason :func:`_block_on_prep_failure` pins it: a lost
+    DISCOVERY ref would otherwise leave ``lifecycle="investigating"``, which
+    :func:`_classify` routes straight back into INVESTIGATING on the next tick
+    — a fresh dispatch that silently contradicts the "paused; steer me" ping
+    the owner just received. Catches :class:`GoalEngineError` ONLY — a real
+    bug must still surface through the catch-all, not be absorbed as a lost
+    ref."""
     ref = status.in_flight
     msg = f"lost in-flight {ref.ref_kind} {ref.id} — {exc}"
     ctx.store.append_log(goal_id, f"poll failed — blocking for the owner: {msg}")
     ctx.store.save_status(
         goal_id,
-        replace(status, in_flight=None, phase="blocked", blocked_on=msg, next=""),
+        replace(
+            status, lifecycle="executing", in_flight=None,
+            phase="blocked", blocked_on=msg, next="",
+        ),
     )
     await _notify(
         ctx.notifier, NotifyLevel.OWNER,
