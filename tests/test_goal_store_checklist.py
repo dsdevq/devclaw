@@ -1,5 +1,6 @@
-"""GoalStore's checklist artifact I/O — write / read / round-trip + the
-absent-file fallback path the per-tick planner relies on."""
+"""GoalStore's checklist artifact I/O — write / read / round-trip, the
+absent-file fallback path the per-tick planner relies on, and the T0.4
+missing-vs-corrupt distinction (missing → None; corrupt → loud)."""
 
 from __future__ import annotations
 
@@ -7,7 +8,7 @@ import pytest
 
 from devclaw.goal.checklist import dump_checklist
 from devclaw.goal.models import Checklist, ChecklistItem
-from devclaw.goal.store import GoalStore
+from devclaw.goal.store import GoalDocCorrupt, GoalStore
 
 
 def _store(tmp_path) -> GoalStore:
@@ -66,12 +67,39 @@ def test_read_returns_none_when_no_checklist_yet(tmp_path):
     assert store.read_checklist("g") is None
 
 
-def test_read_returns_none_when_file_corrupt(tmp_path):
+def test_read_raises_goal_doc_corrupt_when_file_corrupt(tmp_path):
+    """A checklist that EXISTS but won't parse must raise, not read as absent —
+    the old None fallback silently reverted the goal to the backlog planning
+    pipeline (a different contract) with zero signal."""
     store = _store(tmp_path)
     _seed_goal_dir(store)
-    # Hand-write a busted checklist on disk — the planner treats it as absent.
     (tmp_path / "g" / "checklist.yaml").write_text("not yaml: [garbage\n")
-    assert store.read_checklist("g") is None
+    with pytest.raises(GoalDocCorrupt) as excinfo:
+        store.read_checklist("g")
+    assert excinfo.value.goal_id == "g"
+    assert excinfo.value.doc == "checklist.yaml"
+    assert "checklist.yaml" in str(excinfo.value)
+
+
+def test_read_corrupt_degrades_to_none_for_display(tmp_path):
+    """The display accessor (on_corrupt='none') never raises — dashboards and
+    wire reads degrade gracefully while the tick path stays loud."""
+    store = _store(tmp_path)
+    _seed_goal_dir(store)
+    (tmp_path / "g" / "checklist.yaml").write_text("not yaml: [garbage\n")
+    assert store.read_checklist("g", on_corrupt="none") is None
+
+
+def test_write_checklist_is_atomic_replace(tmp_path):
+    """write_checklist must never leave a partial checklist.yaml or a stray tmp
+    file — the checklist IS the goal's structured plan (same tmp + os.replace
+    treatment save_status got after the 2026-07-09 truncation incident)."""
+    store = _store(tmp_path)
+    _seed_goal_dir(store)
+    cl = _example()
+    store.write_checklist("g", cl)
+    assert not (tmp_path / "g" / "checklist.yaml.tmp").exists()
+    assert store.read_checklist("g") == cl
 
 
 def test_write_creates_goal_dir_if_absent(tmp_path):

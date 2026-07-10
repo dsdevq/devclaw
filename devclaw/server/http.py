@@ -649,7 +649,12 @@ async def goal_json(request: Request) -> Response:
     base_cap = backlog_len + 2
     dispatch_cap: int
     try:
-        checklist = store.read_checklist(goal_id)
+        # Console DISPLAY path: read the checklist off the GOAL store (the
+        # module-level `store` is the SQLite StateStore and has no checklist
+        # — the old call here always raised AttributeError into the fallback).
+        # on_corrupt="none": a torn checklist must degrade the cap readout,
+        # never 500 the dashboard — the tick blocks the goal loudly instead.
+        checklist = goals._goal_store.read_checklist(goal_id, on_corrupt="none")
         cap_c = (len(checklist.items) + 2) if checklist else base_cap
         dispatch_cap = max(base_cap, cap_c)
     except Exception:

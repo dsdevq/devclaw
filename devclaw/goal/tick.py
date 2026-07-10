@@ -42,7 +42,7 @@ from .engine import GoalEngine, GoalEngineError
 from .models import Action, Checklist, EvalResult, Goal, GoalStatus, InFlight, PollResult
 from .notify import Notifier
 from .planner import ClaudeCaller
-from .store import GoalStore
+from .store import GoalDocCorrupt, GoalStore
 from ..loom import trace as _trace
 from ..loom.limits import classify_failure, pause_seconds
 from ..planner import PlannerError
@@ -289,6 +289,44 @@ async def _block_on_prep_failure(
     return Outcome.BLOCKED
 
 
+async def _block_on_corrupt_doc(
+    goal_id: str, status: GoalStatus, exc: "GoalDocCorrupt",
+    *, store: GoalStore, notifier: Notifier, summarize: "ClaudeCaller | None",
+) -> Outcome:
+    """A goal contract file (checklist.yaml / firmed-draft.yaml) EXISTS on disk
+    but won't parse. Before T0.4 this degraded SILENTLY: a torn checklist read
+    as "no checklist" and flipped the goal into the backlog planning pipeline;
+    a torn firmed draft made ``load_effective_goal`` return the base goal,
+    dropping the firmed done_when / stub_acceptable / verify_cmd contract with
+    zero signal. Neither self-heals — nothing rewrites these files on its own.
+
+    So: block with the real parse error as ``blocked_on`` and tell the owner
+    once, at OWNER altitude (same shape as :func:`_block_on_prep_failure`).
+    ``in_flight`` is preserved AS-IS — blocking stops new cognition, it must
+    not orphan a running action; the ref settles normally once the file is
+    fixed. ``lifecycle`` is pinned to ``executing`` so the goal routes through
+    the blocked-guard once it can tick again. A repeat tick on the SAME
+    corruption idles quietly (no log spam, no re-ping) — this handler runs
+    before the blocked-guard can gate it, so it dedupes on ``blocked_on``
+    itself. Recovery: fix (or delete) the file, then steer."""
+    msg = str(exc)
+    if status.phase == "blocked" and status.blocked_on == msg:
+        store.save_status(goal_id, replace(status, last_tick_at=store.now_iso()))
+        return Outcome.IDLE
+    store.append_log(goal_id, f"goal contract file corrupt — blocking for the owner: {msg}")
+    store.save_status(
+        goal_id,
+        replace(status, lifecycle="executing", phase="blocked", blocked_on=msg, next=""),
+    )
+    await _notify(
+        notifier, NotifyLevel.OWNER,
+        f"🟡 [{goal_id}] a goal contract file is corrupted — I've paused rather than "
+        f"work from the wrong contract; fix or steer: {msg}",
+        summarize=summarize,
+    )
+    return Outcome.BLOCKED
+
+
 def _progress_window_active(status: GoalStatus) -> bool:
     """Is this a goal the no-progress watchdog should measure? Only one that is
     actively executing — not waiting on the owner (the `blocked` phase, which
@@ -529,19 +567,38 @@ async def _tick_goal_impl(
         remote_checker=remote_checker,
     )
 
-    # Effective goal = goal.yaml overlaid with firmed.yaml outputs when firming
-    # has landed. Every cognition + gating path inside this tick (planner,
-    # evaluator, done-gate) reads from here, so firmed stub_acceptable / derived
-    # done_when are honored — not silently shadowed by the original goal.yaml.
-    goal = store.load_effective_goal(goal_id)
     status = store.load_status(goal_id)
     phase = _classify(status)
 
-    # Terminal short-circuit — skip even the watchdog.
+    # Terminal short-circuit — skip even the watchdog (and the contract-file
+    # probe below: a done/cancelled goal must keep skipping at zero cost even
+    # if a leftover doc rots on disk).
     if phase is Phase.TERMINAL_DONE:
         return Outcome.SKIP_DONE
     if phase is Phase.TERMINAL_CANCELLED:
         return Outcome.SKIP_CANCELLED
+
+    # Effective goal = goal.yaml overlaid with firmed.yaml outputs when firming
+    # has landed. Every cognition + gating path inside this tick (planner,
+    # evaluator, done-gate) reads from here, so firmed stub_acceptable / derived
+    # done_when are honored — not silently shadowed by the original goal.yaml.
+    #
+    # Contract-file choke point (T0.4): a checklist.yaml / firmed-draft.yaml
+    # that EXISTS but won't parse raises GoalDocCorrupt from the store, and
+    # this is the ONE place the tick catches it. The read_checklist call is a
+    # probe — its result is discarded; it exists so a torn checklist blocks
+    # HERE, loudly, instead of reading as "no checklist" at the many
+    # read_checklist sites further down (dispatch branch selection, cap
+    # computation, settle, done-gate), which are all unreachable for a
+    # corrupt-doc goal because of this guard.
+    try:
+        goal = store.load_effective_goal(goal_id)
+        store.read_checklist(goal_id)
+    except GoalDocCorrupt as exc:
+        return await _block_on_corrupt_doc(
+            goal_id, status, exc,
+            store=store, notifier=notifier, summarize=summary_caller,
+        )
 
     # Zero-token no-progress watchdog: pure timestamp math; fires one owner ping
     # if an executing goal hasn't shipped in too long. Mutates status; never
