@@ -104,7 +104,13 @@ class GoalService:
         project_registry: "Optional[ProjectRegistry]" = None,
     ) -> None:
         self._cfg = config or GoalConfig.from_env()
-        self._goal_store = GoalStore(self._cfg.goals_dir)
+        # Wire the goal store onto the SHARED StateStore (the one that owns
+        # devclaw.db) via the Tranche 1 `state=` seam, so goal_status lives
+        # beside the tasks table — the atomic-dispatch join later PRs need, and
+        # one fewer database to migrate. (Tests keep constructing
+        # GoalStore(tmp_path) with no `state=`, self-creating a private
+        # .goal-state.db, so they stay hermetic and unchanged.)
+        self._goal_store = GoalStore(self._cfg.goals_dir, state=store)
         self._queue = queue
         self._store = store  # task/event store — read by tail_goal for live events
         self._engine = InProcessEngine(queue, store)

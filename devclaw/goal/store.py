@@ -2,14 +2,18 @@
 
 Folded in from goalclaw. Layout per goal, under ``<goals_dir>/<goal_id>/``:
   goal.yaml      FACTS    — objective, cadence, engine, workspace_dir, done_when, backlog
-  STATUS.md      STATE    — machine state in YAML frontmatter, overwritten each tick
+  STATUS.md      STATE    — a generated full-fidelity VIEW (since Tranche 1/PR3): the
+                            source of truth is the ``goal_status`` SQLite table, but
+                            every save still rewrites the whole STATUS.md (same YAML
+                            frontmatter + body) so reverting PR3 recovers the state
   log.md         EVENTS   — append-only, newest at bottom
   inbox.md       STEERING — append-only direction (from Denys OR the evaluator); cursor-consumed
   deliveries.md  EVIDENCE — append-only, grounded record of what each action actually
                             shipped (agent summary + gate verdict + PR), read by the evaluator
 
-No database: the filesystem IS the store, git-synced like the rest of the vault.
-A clock is injected (``now``) so ticks are deterministic under test.
+Status is SQLite-backed via :class:`GoalState` (Tranche 1/PR3); the other
+artifacts are still plain files, git-synced like the rest of the vault. A clock
+is injected (``now``) so ticks are deterministic under test.
 """
 
 from __future__ import annotations
@@ -176,10 +180,48 @@ class GoalStore:
     # ---- status (state) ----------------------------------------------------
 
     def load_status(self, goal_id: str) -> GoalStatus:
+        # Source of truth is the goal_status table (Tranche 1/PR3). Migrate any
+        # legacy STATUS.md into it lazily + idempotently, then read the row back.
+        # A brand-new goal with neither a row nor a STATUS.md yields the default
+        # status (unchanged from the file-only behavior) and writes nothing —
+        # its first save_status creates the row.
+        self._ensure_status_row(goal_id)
+        if self._goal_state.has_status(goal_id):
+            return self._goal_state.read_status(goal_id)
+        return GoalStatus()
+
+    def _ensure_status_row(self, goal_id: str) -> None:
+        """Lazy, idempotent migration of a legacy STATUS.md into ``goal_status``.
+
+        Row already present → no-op (the idempotency guard). No STATUS.md yet →
+        no-op (brand-new/pre-save goal; ``load_status`` returns the default and
+        the first ``save_status`` creates the row). A STATUS.md that EXISTS —
+        even truncated/corrupt — is parsed with the current frontmatter reader
+        (which degrades every field to its default, never raising: T0.4's
+        GoalDocCorrupt is for checklist/firmed, NOT status) and INSERTed inside
+        a ``transaction()``, seeding ``goal_phase_history`` from its current
+        phase_history."""
+        if self._goal_state.has_status(goal_id):
+            return
         path = self._dir(goal_id) / "STATUS.md"
         if not path.exists():
-            return GoalStatus()
-        fm = self._read_frontmatter(path.read_text())
+            return
+        parsed = self._parse_status_md(path.read_text())
+        with self._state.transaction():
+            # Re-check under the txn lock so a concurrent migrate can't
+            # double-insert the row or double-seed phase_history.
+            if self._goal_state.has_status(goal_id):
+                return
+            self._goal_state.write_status(goal_id, parsed)
+            self._goal_state.seed_phase_history(goal_id, parsed.phase_history)
+
+    @staticmethod
+    def _parse_status_md(text: str) -> GoalStatus:
+        """Parse a STATUS.md's YAML frontmatter into a GoalStatus. Used only by
+        the lazy migration now; degrades field-by-field to defaults on a
+        truncated/garbled file (``_read_frontmatter`` returns ``{}``) — never
+        raises, matching the pre-PR3 ``load_status`` behavior exactly."""
+        fm = GoalStore._read_frontmatter(text)
         inflight = None
         if fm.get("in_flight"):
             f = fm["in_flight"]
@@ -221,30 +263,36 @@ class GoalStore:
         )
 
     def save_status(self, goal_id: str, status: GoalStatus) -> None:
-        # phase_history is append-only. When the phase differs from what's on
-        # disk we tack a new {phase, at} entry on. We consult the disk (not
-        # just the passed-in status) because callers sometimes hand us a
-        # snapshot older than the file — trusting only in-memory would let a
-        # stale save silently drop history.
-        prev_phase: str | None = None
-        prev_hist: tuple[dict, ...] = tuple(status.phase_history)
-        status_path = self._dir(goal_id) / "STATUS.md"
-        if status_path.exists():
-            prev_fm = self._read_frontmatter(status_path.read_text())
-            prev_phase = prev_fm.get("phase")
-            raw_prev_hist = prev_fm.get("phase_history") or []
-            disk_hist = tuple(
-                {"phase": str(e.get("phase")), "at": str(e.get("at"))}
-                for e in raw_prev_hist
-                if isinstance(e, dict) and e.get("phase") and e.get("at")
-            )
-            if len(disk_hist) > len(prev_hist):
-                prev_hist = disk_hist
-        if status.phase and status.phase != prev_phase:
-            prev_hist = prev_hist + (
-                {"phase": status.phase, "at": self._now().isoformat(timespec="seconds")},
-            )
-        status = replace(status, phase_history=prev_hist)
+        # Source of truth is the goal_status table; STATUS.md is a generated
+        # full-fidelity view rewritten on every save (the rollback path).
+        #
+        # Migrate any pre-existing STATUS.md history BEFORE appending, so a
+        # first save on a goal that was never load_status()'d can't drop the
+        # on-disk phase_history (idempotent — no-op once a row exists).
+        self._ensure_status_row(goal_id)
+        with self._state.transaction():
+            # phase_history is append-only. The table is now authoritative, so
+            # the old stale-snapshot merge hack (re-reading the disk file) is
+            # gone: append a {phase, at} entry only when the phase actually
+            # changed from what's stored.
+            prev_phase = self._goal_state.current_phase(goal_id)
+            if status.phase and status.phase != prev_phase:
+                self._goal_state.append_phase_history(
+                    goal_id, status.phase, self._now().isoformat(timespec="seconds")
+                )
+            history = self._goal_state.read_phase_history(goal_id)
+            status = replace(status, phase_history=history)
+            self._goal_state.write_status(goal_id, status)
+        # STATUS.md view — the exact frontmatter _read_frontmatter parses + the
+        # human body, written via the atomic tmp+os.replace. This is the
+        # rollback path: reverting PR3 makes load_status read this file again
+        # and recover the current state (a crash mid-write, container restart —
+        # 2026-07-09 — left a truncated file that must not orphan in-flight work).
+        self._write_status_view(goal_id, status)
+
+    def _write_status_view(self, goal_id: str, status: GoalStatus) -> None:
+        """Render + atomically write the STATUS.md view for ``status``. Full
+        fidelity: same frontmatter shape + body a reader/rollback needs."""
         fm: dict = {
             "phase": status.phase,
             "lifecycle": status.lifecycle,
@@ -278,10 +326,6 @@ class GoalStore:
         }
         body = self._render_status_body(goal_id, status)
         text = "---\n" + yaml.safe_dump(fm, sort_keys=False).rstrip() + "\n---\n\n" + body
-        # Atomic replace: STATUS.md is rewritten on every tick and holds the
-        # ONLY link to in-flight work — a crash mid-write (container restart,
-        # 2026-07-09) left a truncated file that silently loaded as a default
-        # status, orphaning a running program the goal then waited on forever.
         self._write_atomic(goal_id, "STATUS.md", text)
 
     # ---- log (events) ------------------------------------------------------
