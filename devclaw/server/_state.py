@@ -32,11 +32,15 @@ DB_PATH = os.path.abspath(os.environ.get("DEVCLAW_DB", "devclaw.db"))
 HTTP_PORT = int(os.environ.get("DEVCLAW_PORT", "8000"))
 # Default 0.0.0.0 so sibling compose containers (e.g. openclaw-gateway) can
 # reach the endpoint. Set DEVCLAW_HOST=127.0.0.1 to restrict to loopback.
+# A non-loopback bind REQUIRES DEVCLAW_TOKEN — the HTTP transport refuses to
+# start otherwise (lifecycle.auth_startup_error).
 HTTP_HOST = os.environ.get("DEVCLAW_HOST", "0.0.0.0")
-# Optional bearer-token guard for the HTTP transport. When DEVCLAW_TOKEN is set,
-# every route except /health requires it — via `Authorization: Bearer <token>`
+# Bearer-token guard for the HTTP transport. When DEVCLAW_TOKEN is set, every
+# route except /health requires it — via `Authorization: Bearer <token>`
 # (MCP clients) or a `?token=<token>` query param (the browser dashboard +
-# EventSource, which can't set headers). Unset -> auth disabled (local dev).
+# EventSource, which can't set headers). Unset -> auth disabled, which is only
+# allowed on a loopback bind (127.0.0.1 / ::1 / localhost); startup fails
+# closed on any other host.
 AUTH_TOKEN = os.environ.get("DEVCLAW_TOKEN", "")
 TOKEN_QS = f"?token={urllib.parse.quote(AUTH_TOKEN)}" if AUTH_TOKEN else ""
 

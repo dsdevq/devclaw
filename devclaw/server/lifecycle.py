@@ -22,8 +22,31 @@ from ._state import (
 )
 
 
+def auth_startup_error(transport: str, host: str, token: str | None) -> str | None:
+    """Fail-closed startup guard. Returns an actionable error message when the
+    HTTP transport would listen on a non-loopback interface with no token set
+    (the shipped default was http + 0.0.0.0 + no auth = every route, including
+    mutating ones, open on all interfaces). Returns None when safe to start:
+    stdio transport, a token is set, or the bind is loopback. Pure — unit-tested
+    without spinning up a server (tests/test_lifecycle_auth_guard.py)."""
+    if transport != "http" or token:
+        return None
+    h = (host or "").strip().lower().strip("[]")
+    if h in ("localhost", "::1") or h.startswith("127."):
+        return None
+    return (
+        f"refusing to start: DEVCLAW_TRANSPORT=http would bind {host!r} (non-loopback) "
+        "with no DEVCLAW_TOKEN set — every route, including mutating ones like "
+        "/prs/merge and /control/pause, would be reachable on the network with no auth. "
+        "Fix one of:\n"
+        "  * set DEVCLAW_TOKEN=<secret> to enable bearer-token auth, or\n"
+        "  * set DEVCLAW_HOST=127.0.0.1 to bind loopback only."
+    )
+
+
 class AuthMiddleware:
-    """Pure-ASGI bearer-token gate. No-op when DEVCLAW_TOKEN is unset. /health
+    """Pure-ASGI bearer-token gate. No-op when DEVCLAW_TOKEN is unset — startup
+    only allows that on a loopback bind (see auth_startup_error). /health
     stays open so container health checks don't need the token."""
 
     def __init__(self, app) -> None:
@@ -83,6 +106,12 @@ def main() -> None:
     transport = os.environ.get("DEVCLAW_TRANSPORT", "stdio")
     if transport not in ("stdio", "http"):
         raise SystemExit(f'Unknown DEVCLAW_TRANSPORT={transport}; expected "stdio" or "http"')
+
+    # Fail closed before anything serves: never expose the unauthenticated HTTP
+    # surface on a non-loopback interface.
+    auth_error = auth_startup_error(transport, HTTP_HOST, AUTH_TOKEN)
+    if auth_error:
+        raise SystemExit(auth_error)
 
     # Crash recovery before anything serves: reset tasks left 'running' by a
     # dead process so the heartbeat resumes them. Sync — runs before the loop.
