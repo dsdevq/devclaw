@@ -38,7 +38,7 @@ from . import remote_checks as _remote_checks
 from . import research as _research
 from . import world_research as _world_research
 from . import summary as _goal_summary
-from .engine import GoalEngine
+from .engine import GoalEngine, GoalEngineError
 from .models import Action, Checklist, EvalResult, Goal, GoalStatus, InFlight, PollResult
 from .notify import Notifier
 from .planner import ClaudeCaller
@@ -1261,6 +1261,41 @@ async def _dispatch_phase_handler(
 # so the EXECUTING handler can chain on the same tick.
 
 
+async def _block_on_lost_ref(
+    goal_id: str, status: GoalStatus, exc: GoalEngineError, ctx: TickContext,
+) -> Outcome:
+    """The in-flight ref points at a task/program row the engine no longer has
+    (a lost/replaced SQLite DB, manual row cleanup, a cross-environment
+    restore). The row never comes back, so an unguarded poll raises into
+    tick_all's per-goal catch-all — which logs "tick error (isolated)" but
+    never clears ``in_flight``, and the goal re-raises identically on EVERY
+    subsequent tick: a silent, permanent error loop the owner never hears
+    about (audit-found 2026-07-10).
+
+    Instead: clear the lost ref, block with the real error as ``blocked_on``,
+    and tell the owner ONCE at OWNER altitude. Blocked goals are not re-poked
+    by cadence (see :func:`_handle_executing`) — only steering unblocks them —
+    so this is one legible failure, and the owner decides how to proceed
+    (typically steer_goal to re-plan). ``lifecycle`` stays untouched: blocking
+    is a phase, not a lifecycle transition. Catches :class:`GoalEngineError`
+    ONLY — a real bug must still surface through the catch-all, not be
+    absorbed as a lost ref."""
+    ref = status.in_flight
+    msg = f"lost in-flight {ref.ref_kind} {ref.id} — {exc}"
+    ctx.store.append_log(goal_id, f"poll failed — blocking for the owner: {msg}")
+    ctx.store.save_status(
+        goal_id,
+        replace(status, in_flight=None, phase="blocked", blocked_on=msg, next=""),
+    )
+    await _notify(
+        ctx.notifier, NotifyLevel.OWNER,
+        f"🟡 [{goal_id}] I lost track of the in-flight work ({ref.ref_kind} {ref.id}) — "
+        "paused; steer me to continue",
+        summarize=ctx.summary_caller,
+    )
+    return Outcome.BLOCKED
+
+
 async def _resolve_polling_discovery(
     goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
 ) -> Outcome:
@@ -1268,7 +1303,10 @@ async def _resolve_polling_discovery(
     record the review outcome, clear in_flight, and synthesize the brief via
     :func:`_resolve_discovery`."""
     ref = status.in_flight
-    poll = await ctx.engine.poll(ref)
+    try:
+        poll = await ctx.engine.poll(ref)
+    except GoalEngineError as exc:
+        return await _block_on_lost_ref(goal_id, status, exc, ctx)
     if poll.running:
         ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
         return Outcome.IN_FLIGHT
@@ -1294,7 +1332,10 @@ async def _resolve_polling_done_gate(
     record the review outcome, clear in_flight, and judge the repo against
     ``done_when`` via :func:`_resolve_done_gate`."""
     ref = status.in_flight
-    poll = await ctx.engine.poll(ref)
+    try:
+        poll = await ctx.engine.poll(ref)
+    except GoalEngineError as exc:
+        return await _block_on_lost_ref(goal_id, status, exc, ctx)
     if poll.running:
         ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
         return Outcome.IN_FLIGHT
@@ -1353,7 +1394,10 @@ async def _resolve_polling_action(
     handler can plan the next action on the same tick with the just-finished
     detail in hand."""
     ref = status.in_flight
-    poll = await ctx.engine.poll(ref)
+    try:
+        poll = await ctx.engine.poll(ref)
+    except GoalEngineError as exc:
+        return await _block_on_lost_ref(goal_id, status, exc, ctx)
     if poll.running:
         ctx.store.save_status(goal_id, replace(status, last_tick_at=ctx.store.now_iso()))
         return Outcome.IN_FLIGHT
