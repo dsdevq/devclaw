@@ -24,6 +24,7 @@ import glob as _glob
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -354,6 +355,98 @@ def _run_verify(cmd: str, workspace_dir: str, timeout: int = _VERIFY_TIMEOUT_S) 
     }
 
 
+# --- usage-limit detection ---------------------------------------------------
+# Vendored subset — keep in sync with devclaw/loom/limits.py. The runner runs
+# inside the sandbox WITHOUT the devclaw package installed, so it cannot import
+# the canonical classifier; these are verbatim copies of its AUTH/QUOTA/RATE
+# patterns and the relative retry-after parser. Purpose: when the agent loop
+# dies on a clear model usage/rate limit, surface it STRUCTURALLY as
+# status="rate_limited" (+ retry_after seconds when the text states one) so the
+# host pauses instead of retry-burning quota. This is belt on top of suspenders:
+# anything ambiguous stays status="error" and the host-side regex fallback
+# (loom/limits.classify_failure) still sees the original text — false negatives
+# are fine, false positives are not.
+
+# AUTH: never a limit — a 401/expired login must surface as a real failure, not
+# pause forever. Checked FIRST, mirroring limits.py's priority order.
+_LIMIT_AUTH = re.compile(
+    r"\b401\b|invalid authentication|failed to authenticate|unauthor|"
+    r"authentication_error|oauth.*(expired|invalid)|please run /login",
+    re.IGNORECASE,
+)
+# QUOTA: the longer "you're out for a while" caps (Claude Pro/Max usage limits).
+_LIMIT_QUOTA = re.compile(
+    r"usage limit|weekly limit|quota|out of (extra )?usage|ran out of \w*\s*usage|"
+    r"limit reached|reached your (usage|plan) limit|you'?ve reached|"
+    r"plan limit|insufficient_quota|credit balance|"
+    r"session limit|hit your [\w ]{0,16}limit",
+    re.IGNORECASE,
+)
+# RATE: short-term throttling (per-min / 5-hour) + HTTP 429.
+_LIMIT_RATE = re.compile(
+    r"\b429\b|rate[ _-]?limit|too many requests|5[ -]?hour limit|"
+    r"slow down|requests per",
+    re.IGNORECASE,
+)
+
+_LIMIT_UNITS = {"s": 1, "m": 60, "h": 3600}
+
+# "try again in 5 minutes", "reset in 10m", "wait 2 hours" (number + unit) …
+_LIMIT_RETRY_AFTER_UNIT = re.compile(
+    r"(?:retry[- ]after|try again in|reset[s]? in(?: about)?|wait)\D{0,8}?"
+    r"(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|h|m|s)\b",
+    re.IGNORECASE,
+)
+# … and the bare HTTP header form "Retry-After: 30" (seconds, no unit word).
+_LIMIT_RETRY_AFTER_HEADER = re.compile(r"retry[- ]after:?\s*(\d+)\b", re.IGNORECASE)
+
+
+def _parse_retry_after(text: str) -> int | None:
+    """Best-effort parse of a stated reset delay → seconds. None if not stated.
+    (Absolute reset *times* like 'resets at 10pm' are intentionally not parsed —
+    that needs a clock/timezone; the host applies its default backoff instead.)"""
+    t = text or ""
+    m = _LIMIT_RETRY_AFTER_UNIT.search(t)
+    if m:
+        return int(m.group(1)) * _LIMIT_UNITS[m.group(2)[0].lower()]
+    m = _LIMIT_RETRY_AFTER_HEADER.search(t)
+    if m:
+        return int(m.group(1))  # bare Retry-After is seconds
+    return None
+
+
+def _detect_usage_limit(text: str | None) -> tuple[bool, int | None]:
+    """Is this error text CLEARLY a model usage/rate limit? → (matched, retry_after_s).
+
+    Conservative on purpose: auth-shaped text is never a limit (waiting can't fix
+    an expired login), and anything not matching the vendored QUOTA/RATE wording
+    returns (False, None) so it flows through as a plain error for the host regex
+    to classify. retry_after is None when the text states no relative delay.
+    """
+    t = text or ""
+    if _LIMIT_AUTH.search(t):
+        return False, None
+    if _LIMIT_QUOTA.search(t) or _LIMIT_RATE.search(t):
+        return True, _parse_retry_after(t)
+    return False, None
+
+
+def _failure_result(error_text: str, **extra) -> dict:
+    """Build the terminal result payload for an agent/conversation failure.
+
+    A clear usage/rate-limit wording becomes status="rate_limited" with the
+    ORIGINAL error text preserved (the host falls back to regex-classifying it
+    when retry_after is absent) plus retry_after seconds or None. Everything
+    else is the plain status="error" payload, byte-for-byte as before.
+    """
+    matched, retry_after = _detect_usage_limit(error_text)
+    payload: dict = {"status": "error", "error": error_text, **extra}
+    if matched:
+        payload["status"] = "rate_limited"
+        payload["retry_after"] = retry_after
+    return payload
+
+
 # `sys.__stdout__` is the original stdout the process was started with —
 # `contextlib.redirect_stdout` swaps `sys.stdout` but leaves `__stdout__`
 # alone. We write our prefixed protocol lines (`event:` / `result:`)
@@ -566,12 +659,14 @@ def main() -> None:
             conversation.run()
             agent.close()
     except Exception as exc:
-        err_payload = {
-            "status": "error",
-            "error": str(exc),
-            "trace": traceback.format_exc(),
-            "agent_output": captured_stdout.getvalue(),
-        }
+        # A clear usage/rate limit becomes status="rate_limited" so the host
+        # pauses-and-resumes instead of retry-burning quota; anything ambiguous
+        # stays status="error" (the host regex fallback classifies the text).
+        err_payload = _failure_result(
+            str(exc),
+            trace=traceback.format_exc(),
+            agent_output=captured_stdout.getvalue(),
+        )
         if hook_warnings:
             err_payload["hook_warnings"] = hook_warnings
         _emit_result(err_payload)

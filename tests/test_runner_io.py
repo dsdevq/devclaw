@@ -59,3 +59,19 @@ async def test_default_64k_limit_would_crash_on_the_same_line():
     proc = _FakeProc(_fed_reader(line, 64 * 1024), _fed_reader(b"", 64 * 1024))
     with pytest.raises(ValueError):
         await consume_runner_output(proc, None)
+
+
+async def test_rate_limited_result_line_passes_through_unchanged():
+    # the runner's structured usage-limit signal (status="rate_limited") must
+    # reach the task queue verbatim — the reader parses JSON as-is and never
+    # filters on status values.
+    payload = {
+        "status": "rate_limited",
+        "error": "You've hit your session limit · resets 12:20am",
+        "retry_after": None,
+    }
+    lines = ("result: " + json.dumps(payload) + "\n").encode()
+    proc = _FakeProc(_fed_reader(lines, STREAM_LINE_LIMIT),
+                     _fed_reader(b"", STREAM_LINE_LIMIT))
+    result = await consume_runner_output(proc, None)
+    assert result == payload
