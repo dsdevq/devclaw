@@ -42,6 +42,33 @@ def _passing_gate():
             "timed_out": False, "output": ""}
 
 
+async def test_integrity_scanner_crash_fails_closed(store, tmp_path, monkeypatch):
+    """A crash INSIDE the integrity scanner must not silently approve the
+    change (T0.2): the old `except → None` meant any scanner bug shipped a
+    potentially test-gutting diff unscanned. The crash feeds the retry loop
+    and, with retries exhausted, fails the task with the real error."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    repo = _repo_with_test(tmp_path)
+
+    def boom(diff):
+        raise RuntimeError("scanner exploded")
+    monkeypatch.setattr(task_queue, "scan_diff", boom)
+
+    async def runner(req: EngineRequest):
+        with open(os.path.join(req.workspace_dir, "f.py"), "w") as f:
+            f.write("x = 1\n")
+        return {"status": "ok", "workspaceDir": req.workspace_dir, "verify": _passing_gate()}
+
+    q = TaskQueue(store, runner=runner)
+    tid = q.submit(kind="fix_bug", workspace_dir=str(repo), goal="g", verify_cmd="pytest")
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "test-integrity gate crashed" in (t.error or "")
+    assert "scanner exploded" in (t.error or "")
+
+
 async def test_deleting_a_test_fails_the_gate(store, tmp_path, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)  # no retry → straight to failed
     repo = _repo_with_test(tmp_path)
