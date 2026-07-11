@@ -60,6 +60,19 @@ def test_build_prompt_carries_system_directive():
     assert "Vague items" in prompt or "vague items" in prompt.lower()
 
 
+def test_build_prompt_sequences_wide_refactors_expand_contract():
+    """Wide refactors must decompose as expand -> migrate batches -> contract
+    (three depends_on tiers), never as one unfinishable item or as parallel
+    items whose addresses_files collide."""
+    prompt = build_prompt(_goal())
+    assert "EXPAND–CONTRACT" in prompt
+    assert "blast radius" in prompt
+    assert "expand" in prompt and "contract" in prompt
+    assert "One-item wide refactors" in prompt  # the anti-pattern callout
+    # the prefactor framing that motivates step 5
+    assert "Make the change easy, then make the easy change" in prompt
+
+
 def test_build_prompt_includes_brief_and_digest_when_present():
     prompt = build_prompt(
         _goal(),

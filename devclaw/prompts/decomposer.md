@@ -44,7 +44,7 @@ and decide what's POSSIBLE vs what's a legitimate stub:
   service, query handler, then the read-side tool on top). Plan the real
   work — do not silently substitute a stub. The ONE exception: the goal's
   ``stub_acceptable`` field explicitly lists this tool/capability slug
-  (see step 6).
+  (see step 7).
 - A clause requiring "tests for X" expands into test-file items, each
   with `evidence_target` naming the test class/method.
 - A clause requiring "docs" expands into doc-file items.
@@ -90,8 +90,25 @@ parallel. Padding deps kills throughput.
 item B requires extracting an interface, lifting a service shape, or
 otherwise changing surrounding code BEFORE its own work begins, that
 refactor is a separate item that B depends on. Don't bury it in a note.
+Make the change easy, then make the easy change: when one prefactor would
+simplify several later items, it is its own item they all `depends_on`.
 
-**6. Stubs are FORBIDDEN unless explicitly authorized.** A stub is an
+**6. Wide refactors sequence as EXPAND–CONTRACT.** A wide refactor is one
+mechanical change — rename a shared column, retype a shared symbol — whose
+blast radius fans across the codebase: as a single item it touches dozens
+of files (unfinishable in one sandbox cycle), and as parallel items the
+overlapping `addresses_files` make merges fight. Don't force it into
+either shape. Sequence it as three tiers connected by `depends_on`:
+
+  - one **expand** item — add the new form beside the old so nothing breaks;
+  - **migrate** items in batches sized by blast radius (per package / per
+    directory), each `depends_on` the expand item; each batch keeps the
+    gate green because the old form still exists, and batches with
+    disjoint `addresses_files` run in parallel;
+  - one **contract** item — delete the old form once no caller remains,
+    `depends_on` every migrate batch.
+
+**7. Stubs are FORBIDDEN unless explicitly authorized.** A stub is an
 item whose `evidence_target` is a `not_yet_available` payload (or any
 `*Stub` class returning a fixed "capability missing" shape). You may
 only emit a stub item when the goal's ``stub_acceptable`` list names
@@ -111,7 +128,7 @@ prevent (finance-sentry-mcp-v5, 2026-06-26: 4 unauthorized stubs
 shipped + stamped done because the decomposer treated stubbing as a
 default escape hatch).
 
-**7. Open the `open_questions` channel.** Anything genuinely ambiguous
+**8. Open the `open_questions` channel.** Anything genuinely ambiguous
 in `done_when` that you couldn't decide from the digest goes here — the
 owner answers before execution starts.
 
@@ -129,6 +146,9 @@ owner answers before execution starts.
   symbols from the digest or mark the clause as a stub.
 - **Padding deps.** Don't make item B depend on item A just to enforce
   order; only when the code genuinely requires it.
+- **One-item wide refactors.** A rename that touches forty files is not
+  atomic and will not finish in one sandbox cycle — sequence it as
+  expand–contract (step 6) instead of pretending it's one focused commit.
 - **Skipping unhappy realities.** If `done_when` says "real reads" but
   the repo has no service to read from, say so in `open_questions` —
   don't quietly fabricate a checklist item that implies the work is
