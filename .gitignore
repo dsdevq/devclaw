@@ -40,7 +40,13 @@ auth-profiles.json
 
 # Eval run artifacts (results, not source)
 evals/runs/
-.claude/
+
+# Claude Code harness config: track shared skills/hooks/settings,
+# keep per-machine bits (settings.local.json, worktrees/) local
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+!.claude/hooks/
 
 # Console build output — the Vite+React SPA is built at image-build time
 # (compose/devclaw-mcp/Dockerfile), not vendored. hatchling force-includes it
