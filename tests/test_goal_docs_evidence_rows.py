@@ -116,11 +116,11 @@ def test_duplicate_delivery_is_impossible(tmp_path):
 
 def test_log_byte_parity_on_migration(tmp_path):
     """A legacy log.md (pre-PR6, no goal_log rows) reads back byte-identical
-    through the row-backed recent_log/log_contains — computed against a
-    reference derived straight from the file content, the same filter the
-    pre-PR6 file-tail read used (lines starting '- ['). The stray non-'- ['
-    line proves the filter still applies post-migration. A second call must
-    not duplicate rows — the migration is a true one-shot."""
+    through the row-backed recent_log — computed against a reference derived
+    straight from the file content, the same filter the pre-PR6 file-tail
+    read used (lines starting '- ['). The stray non-'- [' line proves the
+    filter still applies post-migration. A second call must not duplicate
+    rows — the migration is a true one-shot."""
     store = GoalStore(tmp_path, now=Clock())
     seed_goal(tmp_path, "g")
     d = tmp_path / "g"
@@ -140,15 +140,18 @@ def test_log_byte_parity_on_migration(tmp_path):
     expected_recent = "\n".join(ref_lines[-3:])
 
     assert store.recent_log("g", n=3) == expected_recent
-    assert store.log_contains("g", "third") is True
-    assert store.log_contains("g", "not-a-log-line") is False  # filtered, never ingested
-    assert store.log_contains("g", "nonexistent needle") is False
+    # log_contains-equivalent checks (PR8 retired log_contains — adapted onto
+    # recent_log with n wide enough to cover all 5 real rows).
+    full_log = store.recent_log("g", n=10)
+    assert "third" in full_log
+    assert "not-a-log-line" not in full_log  # filtered, never ingested
+    assert "nonexistent needle" not in full_log
 
     assert _peek_log_row_count(store, "g") == 5  # the 5 real log lines, not the stray one
 
     # Second call must not re-ingest / duplicate rows.
     store.recent_log("g", n=3)
-    store.log_contains("g", "fifth")
+    store.recent_log("g", n=10)
     assert _peek_log_row_count(store, "g") == 5
 
 

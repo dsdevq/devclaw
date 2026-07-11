@@ -666,7 +666,7 @@ class GoalStore:
         steering line by writing the file first. log.md is a pure OUTPUT
         view with no re-ingestion once a goal has rows — a mirror line
         without a row would be silently invisible to every DECISION reader
-        (``recent_log``/``log_contains``) forever, while a row without a
+        (``recent_log``) forever, while a row without a
         mirror line is merely a cosmetically stale (but harmless) log.md
         after a crash between the two writes. Rows are truth, so the row
         write must never be the one left dangling.
@@ -691,14 +691,6 @@ class GoalStore:
             path.write_text(f"# {goal_id} — log\n\n")
         with path.open("a") as fh:
             fh.write(f"{line}\n")
-
-    def log_contains(self, goal_id: str, needle: str) -> bool:
-        """Whether the goal's full log mentions ``needle``. Kept for other
-        callers/tests — the orphan-readopt guard that used to be its main
-        production caller moved onto :meth:`is_settled` in PR7 (a future
-        PR8 removes this method once nothing else needs it)."""
-        self._ingest_log(goal_id)
-        return self._goal_state.log_contains_row(goal_id, needle)
 
     def recent_log(self, goal_id: str, n: int = 20) -> str:
         """The last ``n`` log lines, newline-joined, oldest-of-the-tail
@@ -1163,22 +1155,16 @@ class GoalStore:
         rows = self._goal_state.unread_steering_rows(goal_id)
         return [(r["id"], r["line"]) for r in rows]
 
-    def unread_steering(self, goal_id: str, status: GoalStatus) -> str:
+    def unread_steering(self, goal_id: str) -> str:
         """Unread steering as one newline-joined string — kept for display /
         back-compat callers that don't consume by exact id. Re-implemented on
         top of :meth:`unread_steering_rows` (the row-backed source of truth
-        PR5 introduced); ``status`` is UNUSED — consumption is now by row id
-        via ``GoalStore.transition(consume_steering=...)``, never by a cursor
-        carried on ``status``. Kept in the signature for existing callers
-        (PR8 cleans this up)."""
+        PR5 introduced). Consumption is by exact row id via
+        ``GoalStore.transition(consume_steering=...)``, never by a cursor —
+        this read-only helper has nothing to do with that; it never took a
+        ``status`` argument to consume from (PR8 dropped the long-dead
+        parameter)."""
         return "\n".join(line for _, line in self.unread_steering_rows(goal_id)).strip()
-
-    def steering_cursor(self, goal_id: str) -> int:
-        """DEPRECATED — no longer used by production code (the tick consumes
-        by exact row id via ``transition(consume_steering=...)``, not a file-
-        line count). Kept for tests / back-compat callers; unchanged
-        pre-PR5 behavior (current ``inbox.md`` line count)."""
-        return len(self._inbox_lines(goal_id))
 
     def append_steering(self, goal_id: str, lines: list[str], *, source: str = "denys") -> None:
         """Append steering lines. Writes UNCONSUMED ``goal_steering`` rows

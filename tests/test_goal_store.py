@@ -326,8 +326,7 @@ def test_inbox_cursor_and_steering_sources(tmp_path):
     independently fresh regardless of what was already consumed."""
     store = GoalStore(tmp_path, now=Clock())
     store.append_steering("g1", ["focus on auth first"], source="denys")
-    s0 = store.load_status("g1")
-    assert "focus on auth first" in store.unread_steering("g1", s0)
+    assert "focus on auth first" in store.unread_steering("g1")
     rows = store.unread_steering_rows("g1")
     assert len(rows) == 1 and "focus on auth first" in rows[0][1]
 
@@ -335,14 +334,14 @@ def test_inbox_cursor_and_steering_sources(tmp_path):
     # and it disappears from unread, same observable effect the old cursor
     # bump produced.
     store._goal_state.consume_steering_rows("g1", [rid for rid, _ in rows], 1)
-    assert store.unread_steering("g1", s0) == ""
+    assert store.unread_steering("g1") == ""
 
     # evaluator appends a correction → becomes fresh steering, independent of
     # the already-consumed row. The [auto-eval] source marker must survive
     # into the planner-visible text — prompts/goal-planner.md documents
     # evaluator corrections as "marked [auto-eval]".
     store.append_steering("g1", ["redo the rate limiter per-user"], source="auto-eval")
-    fresh = store.unread_steering("g1", s0)
+    fresh = store.unread_steering("g1")
     assert "rate limiter" in fresh and "auto-eval" in fresh
 
 
