@@ -1,22 +1,32 @@
 """The durable mind on disk — reusing the vault ``projects/`` convention.
 
 Folded in from goalclaw. Layout per goal, under ``<goals_dir>/<goal_id>/``:
-  goal.yaml      FACTS    — objective, cadence, engine, workspace_dir, done_when, backlog
-  STATUS.md      STATE    — a generated full-fidelity VIEW (since Tranche 1/PR3): the
-                            source of truth is the ``goal_status`` SQLite table, but
-                            every save still rewrites the whole STATUS.md (same YAML
-                            frontmatter + body) so reverting PR3 recovers the state
-  log.md         EVENTS   — append-only, newest at bottom
-  inbox.md       STEERING — append-only direction (from Denys OR the evaluator); human-readable
-                            mirror + hand-append input. The ``goal_steering`` SQLite table
-                            (since Tranche 1/PR5) is the source of truth for what's unread —
-                            consumed by exact row id, never by counting lines
-  deliveries.md  EVIDENCE — append-only, grounded record of what each action actually
-                            shipped (agent summary + gate verdict + PR), read by the evaluator
+  goal.yaml           FACTS    — objective, cadence, engine, workspace_dir, done_when, backlog
+  STATUS.md           STATE    — a generated full-fidelity VIEW (since Tranche 1/PR3): the
+                                 source of truth is the ``goal_status`` SQLite table, but
+                                 every save still rewrites the whole STATUS.md (same YAML
+                                 frontmatter + body) so reverting PR3 recovers the state
+  log.md              EVENTS   — a generated VIEW (since Tranche 1/PR6) mirroring the
+                                 ``goal_log`` table, append-only, newest at bottom
+  inbox.md            STEERING — append-only direction (from Denys OR the evaluator); human-readable
+                                 mirror + hand-append input. The ``goal_steering`` SQLite table
+                                 (since Tranche 1/PR5) is the source of truth for what's unread —
+                                 consumed by exact row id, never by counting lines
+  deliveries.md       EVIDENCE — a generated VIEW (since Tranche 1/PR6) mirroring the
+                                 ``goal_deliveries`` table, append-only, grounded record of what
+                                 each action actually shipped, read by the evaluator
+  checklist.yaml       PLAN     — a generated VIEW (since Tranche 1/PR6) mirroring the
+                                 ``goal_docs`` table (kind ``checklist``): the decomposer's
+                                 structured plan, the source of truth the per-tick planner picks
+                                 actions from
+  firmed-draft.yaml    CONTRACT — a generated VIEW (since Tranche 1/PR6) mirroring the
+                                 ``goal_docs`` table (kind ``firmed_draft``): the firming phase's
+                                 done_when / stub_acceptable / verify_cmd acceptance contract
 
-Status AND steering are SQLite-backed via :class:`GoalState` (Tranche
-1/PR3 + PR5); the other artifacts are still plain files, git-synced like the
-rest of the vault. A clock is injected (``now``) so ticks are deterministic
+Status, steering, log, deliveries, and the checklist/firmed-draft docs are all
+SQLite-backed via :class:`GoalState` (Tranche 1/PR3, PR5, PR6); ``spec.md`` /
+``discovery.md`` are still plain files (display/prompt inputs, not
+consumed-state). A clock is injected (``now``) so ticks are deterministic
 under test.
 """
 
@@ -65,17 +75,27 @@ def _default_now() -> datetime:
 
 
 class GoalDocCorrupt(RuntimeError):
-    """A goal contract file EXISTS on disk but cannot be parsed.
+    """A goal's acceptance-contract document exists but cannot be parsed.
 
     Distinct from "missing" on purpose: a missing checklist/firmed-draft is a
     legitimate state (backlog mode / pre-firming base goal), but a torn or
-    garbled file means the goal's acceptance contract is GONE and nothing may
+    garbled doc means the goal's acceptance contract is GONE and nothing may
     silently fall back — a corrupt checklist used to read as "no checklist"
     and quietly flip the goal into the backlog planning pipeline; a corrupt
     firmed draft used to silently drop the firmed ``done_when`` /
     ``stub_acceptable`` / ``verify_cmd``. The tick catches this at one choke
     point and blocks loudly; display paths opt into graceful degrade via
-    ``on_corrupt="none"``."""
+    ``on_corrupt="none"``.
+
+    Since Tranche 1/PR6, ``checklist``/``firmed_draft`` live in the
+    ``goal_docs`` table. A LEGACY goal (no DB row yet) can still have a torn
+    ``checklist.yaml``/``firmed-draft.yaml`` on disk, and this exception
+    still fires for it exactly as before — the file is never ingested, so
+    the corruption isn't laundered into the DB by a later read. Once a goal
+    HAS a row, SQLite's atomic upsert makes a new torn write structurally
+    impossible; this class then only fires on a "should be impossible"
+    DB-content parse failure, which still raises rather than silently
+    downgrading (see ``read_checklist``/``read_firmed_draft``)."""
 
     def __init__(self, goal_id: str, doc: str, cause: Exception) -> None:
         self.goal_id = goal_id
@@ -505,46 +525,149 @@ class GoalStore:
         text = "---\n" + yaml.safe_dump(fm, sort_keys=False).rstrip() + "\n---\n\n" + body
         self._write_atomic(goal_id, "STATUS.md", text)
 
-    # ---- log (events) ------------------------------------------------------
+    # ---- log (events) — PR6: goal_log rows are the source of truth --------
+    #
+    # log.md is a pure OUTPUT view — nothing hand-appends to it (unlike
+    # inbox.md) — so migration is a true one-shot: :meth:`_ingest_log` runs
+    # its check on every call but only ever DOES anything once per goal
+    # (guarded by ``has_log_rows``).
+
+    def _ingest_log(self, goal_id: str) -> None:
+        """Lazy, one-shot migration of a legacy log.md into ``goal_log``
+        rows. Zero rows AND log.md exists → every line starting with
+        ``- [`` (the same filter the pre-PR6 ``recent_log`` used) is
+        inserted verbatim, in file order. No cursor needed: once ANY row
+        exists for the goal this is a no-op forever (``has_log_rows``)."""
+        if self._goal_state.has_log_rows(goal_id):
+            return
+        path = self._dir(goal_id) / "log.md"
+        if not path.exists():
+            return
+        lines = [ln for ln in path.read_text().splitlines() if ln.startswith("- [")]
+        if not lines:
+            return
+        self._goal_state.append_log_rows(goal_id, lines, _now_ms())
 
     def append_log(self, goal_id: str, message: str) -> None:
+        """Append one log line. Row-first, then the log.md mirror — the
+        OPPOSITE order from ``append_steering``'s file-first, and
+        deliberately so: inbox.md is a hand-append INPUT that self-heals via
+        re-ingestion on the next read, so PR5 protected against losing a
+        steering line by writing the file first. log.md is a pure OUTPUT
+        view with no re-ingestion once a goal has rows — a mirror line
+        without a row would be silently invisible to every DECISION reader
+        (``recent_log``/``log_contains``) forever, while a row without a
+        mirror line is merely a cosmetically stale (but harmless) log.md
+        after a crash between the two writes. Rows are truth, so the row
+        write must never be the one left dangling."""
+        self._ingest_log(goal_id)
+        line = f"- [{self._now().isoformat(timespec='seconds')}] {message}"
+        self._goal_state.append_log_row(goal_id, line, _now_ms())
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "log.md"
         if not path.exists():
             path.write_text(f"# {goal_id} — log\n\n")
         with path.open("a") as fh:
-            fh.write(f"- [{self._now().isoformat(timespec='seconds')}] {message}\n")
+            fh.write(f"{line}\n")
 
     def log_contains(self, goal_id: str, needle: str) -> bool:
         """Whether the goal's full log mentions ``needle``. Used by the
         orphaned-program reconcile to tell "settled and recorded" apart from
         "the in-flight ref was lost before the result was ever seen"."""
-        path = self._dir(goal_id) / "log.md"
-        return path.exists() and needle in path.read_text()
+        self._ingest_log(goal_id)
+        return self._goal_state.log_contains_row(goal_id, needle)
 
     def recent_log(self, goal_id: str, n: int = 20) -> str:
-        path = self._dir(goal_id) / "log.md"
+        """The last ``n`` log lines, newline-joined, oldest-of-the-tail
+        first — byte-identical to the pre-PR6 file-tail read for both fresh
+        and migrated goals."""
+        self._ingest_log(goal_id)
+        return "\n".join(self._goal_state.recent_log_rows(goal_id, n))
+
+    # ---- deliveries (grounded evidence for the evaluator) — PR6: rows are
+    # the source of truth, deliveries.md the mirror. Same shape as log.
+
+    def _ingest_deliveries(self, goal_id: str) -> None:
+        """Lazy, one-shot migration of a legacy deliveries.md into
+        ``goal_deliveries`` rows. Zero rows AND the file exists → split the
+        body (everything from the first ``## [`` section header onward —
+        the fixed ``# … — deliveries`` header line is discarded, since
+        ``recent_deliveries`` reconstructs it from the known constant
+        format) into sections, one row per section: ``ref_id`` NULL (legacy
+        sections predate the idempotency key and have nothing to dedupe
+        against), ``instruction`` parsed off the section's head line,
+        ``body`` the section's FULL text verbatim including its trailing
+        blank-line separation — so ``"".join(blocks)`` reconstructs the
+        original byte-for-byte. Guarded like ``_ingest_log``."""
+        if self._goal_state.has_delivery_rows(goal_id):
+            return
+        path = self._dir(goal_id) / "deliveries.md"
         if not path.exists():
-            return ""
-        lines = [ln for ln in path.read_text().splitlines() if ln.startswith("- [")]
-        return "\n".join(lines[-n:])
+            return
+        sections = self._split_delivery_sections(path.read_text())
+        if not sections:
+            return
+        ts_ms = _now_ms()
+        with self._state.transaction():
+            for instruction, block in sections:
+                self._goal_state.append_delivery_row(
+                    goal_id, None, block, ts_ms, instruction=instruction,
+                )
 
-    # ---- deliveries (grounded evidence for the evaluator) ------------------
+    _DELIVERY_HEAD = re.compile(r"^## \[", re.MULTILINE)
+    _DELIVERY_HEAD_LINE = re.compile(r"^## \[[^\]]*\]\s*(.*)$")
 
-    def append_delivery(self, goal_id: str, instruction: str, body: str) -> None:
+    @classmethod
+    def _split_delivery_sections(cls, text: str) -> "list[tuple[str, str]]":
+        """Split a deliveries.md body into ``(instruction, block)`` pairs on
+        lines starting ``## [`` — the exact boundary ``append_delivery``
+        writes. Text before the first match (the header) is dropped on
+        purpose; each returned ``block`` runs from its ``## [`` line up to
+        (not including) the next one, or end of text for the last section."""
+        starts = [m.start() for m in cls._DELIVERY_HEAD.finditer(text)]
+        sections: list[tuple[str, str]] = []
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else len(text)
+            block = text[start:end]
+            head_line = block.splitlines()[0] if block else ""
+            m = cls._DELIVERY_HEAD_LINE.match(head_line)
+            instruction = m.group(1) if m else ""
+            sections.append((instruction, block))
+        return sections
+
+    def append_delivery(
+        self, goal_id: str, instruction: str, body: str, *, ref_id: "str | None" = None,
+    ) -> None:
         """Append a grounded record of what one action actually shipped — the
         agent's own summary + the gate verdict + the PR url, captured in-process
         from the full task row (not the old over-the-wire blob). This is the
-        substrate the direction evaluator reads to judge shipped-vs-correct."""
+        substrate the direction evaluator reads to judge shipped-vs-correct.
+
+        ``ref_id`` (PR6) is the in-flight ref's id, threaded through by the
+        settle call site so a duplicate settle of the SAME ref (e.g. a
+        ``TransitionConflict`` retry landing after the first settle already
+        recorded the delivery) is a no-op: no second row, no second section
+        in deliveries.md. ``None`` (the default — callers that never settle
+        against a ref, e.g. tests) always inserts, matching pre-PR6
+        behavior exactly. Row-first, then the file mirror, ONLY when a row
+        was actually inserted — a duplicate ref_id must never produce a
+        duplicate section in the view (see ``GoalState.append_delivery_row``)."""
+        self._ingest_deliveries(goal_id)
+        ts = self._now().isoformat(timespec="seconds")
+        block = f"## [{ts}] {instruction}\n\n{body.strip()}\n\n"
+        inserted = self._goal_state.append_delivery_row(
+            goal_id, ref_id, block, _now_ms(), instruction=instruction,
+        )
+        if not inserted:
+            return  # duplicate ref_id — silent idempotency is the point
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "deliveries.md"
         if not path.exists():
             path.write_text(f"# {goal_id} — deliveries (what each action shipped)\n\n")
-        ts = self._now().isoformat(timespec="seconds")
         with path.open("a") as fh:
-            fh.write(f"## [{ts}] {instruction}\n\n{body.strip()}\n\n")
+            fh.write(block)
 
     def write_discovery(self, goal_id: str, brief: str) -> None:
         """Persist the ``investigating`` phase's discovery brief (current state ·
@@ -562,15 +685,21 @@ class GoalStore:
         return path.read_text() if path.exists() else ""
 
     # ---- checklist (decomposer output — the durable structured plan) ------
+    # PR6: goal_docs (kind "checklist") is the source of truth; checklist.yaml
+    # is a generated view, same shape as STATUS.md/log.md/deliveries.md.
 
     def write_checklist(self, goal_id: str, checklist: "Checklist") -> None:  # type: ignore[name-defined]
-        """Persist the decomposer's full output as ``checklist.yaml``. Lives
-        next to ``STATUS.md`` and is the source of truth the per-tick planner
-        picks actions from; mutable across ticks (settle hook + steer can
-        rewrite items)."""
+        """Persist the decomposer's full output. Writes the ``goal_docs`` row
+        FIRST (the source of truth the per-tick planner picks actions from;
+        mutable across ticks — settle hook + steer can rewrite items), then
+        the ``checklist.yaml`` view via the same atomic tmp+os.replace
+        treatment ``STATUS.md`` gets — the rollback path, and a legible
+        artifact to read without a DB client."""
         from .checklist import dump_checklist
 
-        self._write_atomic(goal_id, "checklist.yaml", dump_checklist(checklist))
+        content = dump_checklist(checklist)
+        self._goal_state.write_doc(goal_id, "checklist", content, _now_ms())
+        self._write_atomic(goal_id, "checklist.yaml", content)
 
     def read_checklist(
         self, goal_id: str, *, on_corrupt: str = "raise"
@@ -580,33 +709,56 @@ class GoalStore:
         completes). The per-tick planner falls back to backlog-driven mode
         when this is ``None``.
 
-        A file that EXISTS but fails to parse is a different animal: the
-        goal's structured plan is torn, and treating it as absent would
-        silently revert the goal to the backlog planning pipeline. Default is
-        to raise :class:`GoalDocCorrupt` (the tick blocks loudly at its choke
-        point); display paths pass ``on_corrupt="none"`` to degrade gracefully."""
+        DB-first: a ``goal_docs`` row exists → parse it. A parse failure on
+        DB content still raises :class:`GoalDocCorrupt` — SQLite's atomic
+        upsert makes a torn ROW structurally impossible, so this branch
+        should be unreachable, but "should be impossible" is not a license
+        to silently downgrade (fail loud, per T0.4).
+
+        No row → LEGACY file path (a goal that predates PR6, or one where
+        the decomposer genuinely hasn't run): file absent → ``None``
+        (legitimate); file present but corrupt → the EXACT pre-PR6 behavior
+        (:class:`GoalDocCorrupt`, or ``None`` for ``on_corrupt="none"``) —
+        the corrupt file is NEVER ingested into the DB, so a torn contract
+        can't be laundered into "migrated" truth. A file that parses cleanly
+        IS migrated (the row is written with its content verbatim) so this
+        goal never takes the legacy path again."""
         from .checklist import ChecklistParseError, parse_checklist
 
+        content = self._goal_state.read_doc(goal_id, "checklist")
+        if content is not None:
+            try:
+                return parse_checklist(content)
+            except ChecklistParseError as exc:
+                raise GoalDocCorrupt(goal_id, "checklist.yaml", exc) from exc
         path = self._dir(goal_id) / "checklist.yaml"
         if not path.exists():
             return None
+        text = path.read_text()
         try:
-            return parse_checklist(path.read_text())
+            parsed = parse_checklist(text)
         except ChecklistParseError as exc:
             if on_corrupt == "none":
                 return None  # display-grade degrade — never for cognition/gating
             raise GoalDocCorrupt(goal_id, "checklist.yaml", exc) from exc
+        self._goal_state.write_doc(goal_id, "checklist", text, _now_ms())  # migrate
+        return parsed
 
     # ---- firmed-draft (firming-phase output) -------------------------------
+    # PR6: goal_docs (kind "firmed_draft") is the source of truth;
+    # firmed-draft.yaml is a generated view — same DB-first/legacy-fallback
+    # shape as read_checklist above.
 
     def write_firmed_draft(self, goal_id: str, firmed: "FirmedGoal") -> None:  # type: ignore[name-defined]
-        """Persist the firming-phase output as ``firmed-draft.yaml``. One file
-        for both the in-progress (``status: needs_owner_answers``) and the
-        ready-for-decomposer (``status: firmed``) states — git history is the
-        audit log."""
+        """Persist the firming-phase output. One doc for both the in-progress
+        (``status: needs_owner_answers``) and the ready-for-decomposer
+        (``status: firmed``) states — the ``goal_docs`` row's history (and
+        git history on the ``firmed-draft.yaml`` view) is the audit log."""
         from .firmed import dump_firmed
 
-        self._write_atomic(goal_id, "firmed-draft.yaml", dump_firmed(firmed))
+        content = dump_firmed(firmed)
+        self._goal_state.write_doc(goal_id, "firmed_draft", content, _now_ms())
+        self._write_atomic(goal_id, "firmed-draft.yaml", content)
 
     def read_firmed_draft(
         self, goal_id: str, *, on_corrupt: str = "raise"
@@ -614,22 +766,37 @@ class GoalStore:
         """The current firmed draft, or ``None`` if firming hasn't run yet
         (legacy goals + new goals before firming completes).
 
-        A file that EXISTS but fails to parse is NOT "absent": treating it as
-        such made :meth:`load_effective_goal` silently return the base goal —
-        dropping the firmed ``done_when`` / ``stub_acceptable`` /
-        ``verify_cmd`` acceptance contract with zero signal. Default raises
-        :class:`GoalDocCorrupt`; display paths pass ``on_corrupt="none"``."""
+        DB-first, same shape as :meth:`read_checklist`: a row's parse
+        failure still raises (should be impossible post-migration — SQLite's
+        atomic upsert kills the torn-write class — but never silently
+        downgrades). No row → legacy file path: absent → ``None``; present
+        but corrupt → NOT "absent" — treating it as such made
+        :meth:`load_effective_goal` silently return the base goal, dropping
+        the firmed ``done_when`` / ``stub_acceptable`` / ``verify_cmd``
+        acceptance contract with zero signal — so this raises
+        :class:`GoalDocCorrupt` (or degrades to ``None`` for
+        ``on_corrupt="none"``) and is NEVER ingested; a clean parse migrates
+        the row verbatim."""
         from .firmed import FirmedParseError, parse_firmed
 
+        content = self._goal_state.read_doc(goal_id, "firmed_draft")
+        if content is not None:
+            try:
+                return parse_firmed(content)
+            except FirmedParseError as exc:
+                raise GoalDocCorrupt(goal_id, "firmed-draft.yaml", exc) from exc
         path = self._dir(goal_id) / "firmed-draft.yaml"
         if not path.exists():
             return None
+        text = path.read_text()
         try:
-            return parse_firmed(path.read_text())
+            parsed = parse_firmed(text)
         except FirmedParseError as exc:
             if on_corrupt == "none":
                 return None  # display-grade degrade — never for cognition/gating
             raise GoalDocCorrupt(goal_id, "firmed-draft.yaml", exc) from exc
+        self._goal_state.write_doc(goal_id, "firmed_draft", text, _now_ms())  # migrate
+        return parsed
 
     def load_effective_goal(self, goal_id: str, *, on_corrupt: str = "raise") -> Goal:
         """The goal as it currently is, with firming's outputs overlaid on the
@@ -690,11 +857,17 @@ class GoalStore:
         return path.read_text() if path.exists() else ""
 
     def recent_deliveries(self, goal_id: str, chars: int = 8000) -> str:
-        """The tail of deliveries.md (bounded — the evaluator's grounding context)."""
-        path = self._dir(goal_id) / "deliveries.md"
-        if not path.exists():
+        """The tail of the deliveries record (bounded — the evaluator's
+        grounding context). Reconstructs ``header + "".join(blocks)`` from
+        ``goal_deliveries`` rows — byte-identical to the pre-PR6
+        ``deliveries.md`` file-tail read, since the header format
+        (``# {goal_id} — deliveries (what each action shipped)\\n\\n``) is
+        the one constant :meth:`append_delivery` has ever written."""
+        self._ingest_deliveries(goal_id)
+        blocks = self._goal_state.recent_delivery_blocks(goal_id)
+        if not blocks:
             return ""
-        text = path.read_text()
+        text = f"# {goal_id} — deliveries (what each action shipped)\n\n" + "".join(blocks)
         return text[-chars:] if len(text) > chars else text
 
     # ---- inbox (steering) — PR5: goal_steering rows are the source of truth
