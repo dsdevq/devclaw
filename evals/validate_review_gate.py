@@ -6,7 +6,7 @@ false-positive rate) and TWO synthetic bad diffs (dead/no-op code; happy-path-on
 no-tests — measures true-positive power). Uses the REAL claude at the review tier.
 
 Run inside the devclaw-mcp container:
-    DEVCLAW_REVIEW_MODEL=sonnet python3 /var/lib/devclaw/qdriver/validate_review_gate.py
+    python3 /var/lib/devclaw/qdriver/validate_review_gate.py
 """
 
 from __future__ import annotations

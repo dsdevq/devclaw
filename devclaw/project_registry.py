@@ -94,7 +94,7 @@ class Project:
     #: REPO, not a goal's objective. Resolved via :meth:`resolve_override`.
     merge_strategy: Optional[str] = None  # DEVCLAW_GOAL_MERGE_STRATEGY: squash|merge|rebase
     autodeploy: Optional[bool] = None     # DEVCLAW_GOAL_AUTODEPLOY
-    review_gate: Optional[bool] = None    # DEVCLAW_REVIEW_GATE
+    review_gate: Optional[bool] = None    # devclaw default: task_queue.REVIEW_GATE_ENABLED
     verify_done: Optional[bool] = None    # DEVCLAW_GOAL_VERIFY_DONE
     created_at: int = field(default_factory=_now_ms)
     updated_at: int = field(default_factory=_now_ms)

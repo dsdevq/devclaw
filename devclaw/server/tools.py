@@ -896,9 +896,9 @@ async def register_project(
     configured per repo; a goal itself carries none of them:
       - ``automerge`` — auto-merge gate-passed PRs (DEVCLAW_GOAL_AUTOMERGE).
       - ``merge_strategy`` — squash|merge|rebase for the merge (DEVCLAW_GOAL_MERGE_STRATEGY).
-      - ``autodeploy`` — deploy on goal completion (DEVCLAW_GOAL_AUTODEPLOY).
-      - ``review_gate`` — run the pre-PR review gate (DEVCLAW_REVIEW_GATE).
-      - ``verify_done`` — grounded done-gate re-check before closing (DEVCLAW_GOAL_VERIFY_DONE)."""
+      - ``autodeploy`` — deploy on goal completion (devclaw default: on).
+      - ``review_gate`` — run the pre-PR review gate (devclaw default: on).
+      - ``verify_done`` — grounded done-gate re-check before closing (devclaw default: on)."""
     if not project_id or not name:
         raise ToolError("register_project requires project_id and name")
     _onoff = {"on": True, "off": False}

@@ -67,10 +67,10 @@ EVAL_EVERY = int(os.environ.get("DEVCLAW_GOAL_EVAL_EVERY", "3"))
 NO_PROGRESS_S = int(os.environ.get("DEVCLAW_GOAL_NO_PROGRESS_S", "21600"))
 #: when True, a planner "done" proposal dispatches a read-only review of the repo
 #: against done_when and the evaluator judges THAT before the goal closes.
-VERIFY_DONE = os.environ.get("DEVCLAW_GOAL_VERIFY_DONE", "1") not in ("0", "false", "")
+VERIFY_DONE = True
 #: when True, a goal reaching `achieved` auto-deploys the built app to a durable
 #: Tailscale URL. The devclaw-wide default; a project may override it.
-AUTODEPLOY_ENABLED = os.environ.get("DEVCLAW_GOAL_AUTODEPLOY", "1") not in ("0", "false", "")
+AUTODEPLOY_ENABLED = True
 #: when True, the investigating phase dispatches the decomposer after the
 #: discovery brief is written — emitting an atomic checklist that the per-tick
 #: planner picks actions from instead of the free-form backlog. Pillar 1 of the

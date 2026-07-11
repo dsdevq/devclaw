@@ -57,7 +57,7 @@ EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
 
 # Per-task wall-clock for the agent run (excluding verify). Mirrors the
 # OpenHands path's bound; the orchestration owns timeout policy.
-AGENT_TIMEOUT_S = int(os.environ.get("DEVCLAW_AGENT_TIMEOUT_S", "1800"))
+AGENT_TIMEOUT_S = 1800
 
 
 _PROMPT_SLUGS = {

@@ -45,7 +45,7 @@ _VERIFY_TIMEOUT_S = int(os.environ.get("DEVCLAW_VERIFY_TIMEOUT_S", "900"))
 _SKILLS_DIR = os.environ.get("DEVCLAW_SKILLS_DIR", "/opt/devclaw/skills")
 _HOOKS_DIR = os.environ.get("DEVCLAW_HOOKS_DIR", "/opt/devclaw/hooks")
 _WRITES_CODE_KINDS = {"implement_feature", "fix_bug"}
-_HOOK_TIMEOUT_S = int(os.environ.get("DEVCLAW_HOOK_TIMEOUT_S", "30"))
+_HOOK_TIMEOUT_S = 30
 
 
 def _read_skill(path: str) -> str:

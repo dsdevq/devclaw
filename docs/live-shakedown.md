@@ -6,7 +6,7 @@ runbook exercises the real pipeline against the **actual engine**: a logged-in
 layer builds on the last, so a failure tells you exactly which seam broke.
 
 > **Cost note.** Every real run spends your Claude Pro/Max session (no API key —
-> that's the design). Keep the shakedown goals *tiny*. A full `build_project` can
+> that's the design). Keep the shakedown goals *tiny*. A full goal build (L4) can
 > run for a long time; do L1–L3 first.
 
 ---
@@ -49,7 +49,7 @@ The image bakes a pinned `claude` CLI + `claude-agent-acp`; the host mounts your
 
 ```bash
 export DEVCLAW_DB=$PWD/.shakedown/devclaw.db        # keep state out of the repo
-export DEVCLAW_STATE=$PWD/.shakedown/state
+export DEVCLAW_GOALS_DIR=$PWD/.shakedown/goals      # goal-view files out of ~/memory
 export DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000
 devclaw-mcp          # logs to stderr; leave running in this terminal
 ```
@@ -208,7 +208,7 @@ safe no-op (`{"cancelled":false}`).
 
 - **Dashboard** `http://localhost:8000/dashboard` → click a program for the live SSE event stream.
 - **`get_events`** — the raw OpenHands events per task/program (Action/Observation, etc.).
-- **`$DEVCLAW_STATE/projects/<id>/`** — `idea.md`, `spec.md`, `project.json` (transcript).
+- **`$DEVCLAW_GOALS_DIR/<goal-id>/`** — `goal.yaml` + the generated views (`STATUS.md`, `log.md`, `deliveries.md`); state itself lives in SQLite (`get_goal`/`tail_goal` are the truth).
 - **Server stderr** — `recovered=N`, notify attempts, `reaped` logs, sandbox spawn errors.
 
 ---
@@ -222,7 +222,6 @@ safe no-op (`{"cancelled":false}`).
 | runner error `openhands-sdk not importable` | image built wrong | rebuild the sandbox image (§1) |
 | agent can't auth / 401 from claude | `~/.claude` not logged in, or mounted empty | log in on the host; confirm `~/.claude` has session files |
 | server won't start, `ANTHROPIC_API_KEY` complaints | a key is set in the env | `unset ANTHROPIC_API_KEY` |
-| build never starts after `approve_spec` | spec didn't plan (claude planner failed) | check stderr; `get_project` shows status; re-`approve_spec` is idempotent |
 | many containers pile up | global cap too high for the box | lower `DEVCLAW_MAX_CONCURRENT` |
 
 ---

@@ -8,9 +8,7 @@ description: Run the devclaw live shakedown — exercise the REAL pipeline (logg
 Exercises the actual engine seam: a logged-in `claude` driving OpenHands inside a
 real docker sandbox. Work the layers strictly in order — each builds on the last,
 so the first failing layer names the broken seam. Narrative background:
-[`docs/live-shakedown.md`](../../../docs/live-shakedown.md) (note: its §7 state
-paths and the `approve_spec`/`build_project`/`get_project` troubleshooting rows are
-stale spec-kit leftovers — this skill is the corrected procedure).
+[`docs/live-shakedown.md`](../../../docs/live-shakedown.md).
 
 **Cost guardrail.** Every run spends Denys's Claude Pro/Max session (OAuth, no API
 key — by design). Keep goals *tiny*. Default scope is **L1–L3 + L5**; run L4 (a
@@ -48,7 +46,7 @@ into it at runtime, so auth flows without a key.
 ```bash
 mkdir -p .shakedown
 export DEVCLAW_DB=$PWD/.shakedown/devclaw.db     # keep state out of the repo
-export DEVCLAW_STATE=$PWD/.shakedown/state
+export DEVCLAW_GOALS_DIR=$PWD/.shakedown/goals   # goal-view files out of ~/memory
 export DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000
 devclaw-mcp 2> .shakedown/server.log &           # run in background, keep the log
 ```

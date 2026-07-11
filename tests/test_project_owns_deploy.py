@@ -106,7 +106,7 @@ async def test_auto_deploy_still_fires_without_dockerfile(tmp_path):
 
 async def test_auto_deploy_kill_switch_still_works(tmp_path):
     """The autodeploy kill switch (now the resolved ``enabled=False`` flag —
-    a project override or the DEVCLAW_GOAL_AUTODEPLOY default, resolved upstream
+    a project override or the devclaw-wide autodeploy default, resolved upstream
     in GoalService) takes precedence over both branches: disabled means no
     deploy, no matter the Dockerfile."""
     (tmp_path / "Dockerfile").write_text("FROM alpine\n")  # would-normally-skip

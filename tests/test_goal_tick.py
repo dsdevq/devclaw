@@ -706,7 +706,7 @@ def _delivery_status():
 @pytest.mark.asyncio
 async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
     """A delivered change whose verify gate passed is merged by devclaw and a
-    TASK-altitude ping is emitted — when DEVCLAW_GOAL_AUTOMERGE is on.
+    TASK-altitude ping is emitted — when the automerge default is on.
     The ping is TASK-altitude (not OWNER) so per-PR merges don't spam the owner
     on a goal that lands many PRs; drop the floor so this test can observe it."""
     monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
@@ -734,7 +734,7 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 async def test_merge_fires_on_a_passed_merger_even_with_global_flag_off(tmp_path, monkeypatch):
     """Regression lock for the per-project-override bug found 2026-07-05: a
     project can pin automerge ON for its own repo even while the devclaw-wide
-    DEVCLAW_GOAL_AUTOMERGE default is off. GoalService resolves that into an
+    devclaw-wide automerge default is off. GoalService resolves that into an
     actual merger callable (or None) and hands it to the tick — this proves
     the tick honors WHATEVER merger it's given and does not independently
     re-check the raw global flag, which would silently override a project's
@@ -906,7 +906,7 @@ async def test_auto_merge_off_by_default(tmp_path):
     """With automerge disabled, no merger is ever passed down to a tick in the
     first place — the enabled/disabled decision is resolved ONCE, by
     GoalService._merger (project override, else the devclaw-wide
-    DEVCLAW_GOAL_AUTOMERGE default; see devclaw.goal.merge.resolve_automerge),
+    merge.AUTOMERGE_ENABLED default; see devclaw.goal.merge.resolve_automerge),
     before a merger callable is even constructed. This tick layer's own
     contract is simpler and absolute: given no merger (``merger=None``, what
     GoalService actually produces when automerge is off), never attempt to

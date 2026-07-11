@@ -25,16 +25,17 @@ from .planner import PlannerError, claude_with_model, extract_json
 
 #: conversational requirement-gathering — Sonnet is the right tier. Empty →
 #: account default. Read at call time so the env stays the single source.
-GRILL_MODEL = os.environ.get("DEVCLAW_GRILL_MODEL", "sonnet") or None
+from .model_tiers import model_for as _model_for
+GRILL_MODEL = _model_for("grill")
 
 #: per-call timeout. The finalize turn emits a full multi-section spec (3–6 KB
 #: of markdown) that routinely exceeds the global 90s ceiling on sonnet — chain
 #: test caught a 90s timeout on the second turn. Override via env when needed.
-GRILL_TIMEOUT_MS = int(os.environ.get("DEVCLAW_GRILL_TIMEOUT_MS", "180000"))
+GRILL_TIMEOUT_MS = 180_000
 
 #: hard cap so a grill can't loop forever — after this many answered turns the
 #: model is forced to finalize the spec from what it has.
-MAX_GRILL_QUESTIONS = int(os.environ.get("DEVCLAW_MAX_GRILL_QUESTIONS", "20"))
+MAX_GRILL_QUESTIONS = 20
 
 def build_grill_prompt(idea: str, transcript: list[dict], *, finalize: bool) -> str:
     from .prompts import load_prompt

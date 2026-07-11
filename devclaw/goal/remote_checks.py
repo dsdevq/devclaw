@@ -62,7 +62,7 @@ REMOTE_CHECKS_ENABLED = os.environ.get("DEVCLAW_GOAL_REMOTE_CHECKS", "1") not in
 #: "strict" → infra-broken CI (startup_failure-only / zero runs) blocks the
 #: done-gate; anything else → "flexible" (the default), where only real test
 #: failures and pending runs block.
-CI_GATE_MODE = "strict" if os.environ.get("DEVCLAW_GOAL_CI_GATE", "").strip().lower() == "strict" else "flexible"
+CI_GATE_MODE = "flexible"
 
 #: conclusions that contradict "this work is done". ``cancelled`` counts: a
 #: run that never finished proved nothing, and we only query THIS commit's
