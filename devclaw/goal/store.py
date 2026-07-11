@@ -7,13 +7,17 @@ Folded in from goalclaw. Layout per goal, under ``<goals_dir>/<goal_id>/``:
                             every save still rewrites the whole STATUS.md (same YAML
                             frontmatter + body) so reverting PR3 recovers the state
   log.md         EVENTS   — append-only, newest at bottom
-  inbox.md       STEERING — append-only direction (from Denys OR the evaluator); cursor-consumed
+  inbox.md       STEERING — append-only direction (from Denys OR the evaluator); human-readable
+                            mirror + hand-append input. The ``goal_steering`` SQLite table
+                            (since Tranche 1/PR5) is the source of truth for what's unread —
+                            consumed by exact row id, never by counting lines
   deliveries.md  EVIDENCE — append-only, grounded record of what each action actually
                             shipped (agent summary + gate verdict + PR), read by the evaluator
 
-Status is SQLite-backed via :class:`GoalState` (Tranche 1/PR3); the other
-artifacts are still plain files, git-synced like the rest of the vault. A clock
-is injected (``now``) so ticks are deterministic under test.
+Status AND steering are SQLite-backed via :class:`GoalState` (Tranche
+1/PR3 + PR5); the other artifacts are still plain files, git-synced like the
+rest of the vault. A clock is injected (``now``) so ticks are deterministic
+under test.
 """
 
 from __future__ import annotations
@@ -37,6 +41,8 @@ from .transitions import (
     TransitionConflict,
     derive_state,
 )
+
+from ..state_store import _now_ms
 
 if TYPE_CHECKING:
     from ..state_store import StateStore
@@ -320,6 +326,7 @@ class GoalStore:
 
     def transition(
         self, goal_id: str, event: "Event", new: GoalStatus, *, expect: GoalStatus,
+        consume_steering: "list[int] | None" = None,
     ) -> GoalStatus:
         """The choke point every PRODUCTION phase/lifecycle/in_flight change
         routes through (see :mod:`devclaw.goal.transitions`). Two guards, in
@@ -346,6 +353,16 @@ class GoalStore:
         (``new`` with ``state``/``version`` stamped) — callers MUST thread this
         forward instead of reusing their pre-call snapshot (see tick.py's
         "version threading rule").
+
+        ``consume_steering`` (PR5): exact ``goal_steering`` row ids to mark
+        consumed, INSIDE this same transaction, once past both guards. This
+        is what makes "consume exactly the steering rows the planner just
+        acted on" atomic with the decision write itself — a
+        :class:`TransitionConflict`/:class:`IllegalTransition` raised above
+        means this line never runs, so an abandoned tick's steering rides
+        the rollback and stays unread (closes "steer-during-planner-await
+        lost": the old model consumed by a count stamped AFTER the fact,
+        which could sweep up a row the planner never saw).
         """
         self._ensure_status_row(goal_id)
         with self._state.transaction():
@@ -361,6 +378,8 @@ class GoalStore:
             target = derive_state(new)
             if target not in LEGAL.get((cur_state, event), frozenset()):
                 raise IllegalTransition(goal_id, cur_state, event, target)
+            if consume_steering:
+                self._goal_state.consume_steering_rows(goal_id, consume_steering, _now_ms())
             prev_phase = self._goal_state.current_phase(goal_id)
             if new.phase and new.phase != prev_phase:
                 self._goal_state.append_phase_history(
@@ -678,7 +697,16 @@ class GoalStore:
         text = path.read_text()
         return text[-chars:] if len(text) > chars else text
 
-    # ---- inbox (steering) --------------------------------------------------
+    # ---- inbox (steering) — PR5: goal_steering rows are the source of truth
+    #
+    # ``inbox.md`` stays BOTH the human-readable mirror (every machine append
+    # writes a row AND a matching line) AND a hand-append INPUT (a line typed
+    # straight into the file is lazily ingested into a row the next time
+    # anything reads steering — see ``_ingest_inbox``). Consumption ("the
+    # planner acted on this") is by row id, via ``GoalStore.transition``'s
+    # ``consume_steering=``, never by counting lines — that count-based model
+    # is exactly what let a steer landing during the planner's cognition
+    # await get silently swallowed (steer-during-planner-await lost).
 
     def _inbox_lines(self, goal_id: str) -> list[str]:
         path = self._dir(goal_id) / "inbox.md"
@@ -691,22 +719,123 @@ class GoalStore:
                 out.append(s)
         return out
 
+    def _ingest_inbox(self, goal_id: str) -> None:
+        """Lazily convert ``inbox.md`` lines the store doesn't have
+        ``goal_steering`` rows for yet into rows. Called before every
+        steering read (``unread_steering_rows`` / ``unread_steering``) so a
+        line typed straight into the file — or mirrored there by
+        ``append_steering`` — becomes (or stays) visible without ever being
+        double-counted.
+
+        ``goal_status.inbox_ingest_cursor`` is this method's OWN boundary —
+        "how many inbox.md lines have already been turned into rows" — a
+        DIFFERENT thing from "how many are consumed". Only lines PAST the
+        cursor are new; already-ingested lines (including everything
+        ``append_steering`` just mirrored, which advances the cursor itself)
+        are never re-ingested. A no-op — no write, no version bump — when
+        there is nothing new AND no migration is due, so a normal tick that
+        finds no hand-typed content pays zero SQL writes for this call.
+
+        Lazy migration (first ingest for a goal that pre-dates PR5): before
+        this PR, the stored cursor WAS the consume cursor — lines below it
+        are already-acted-on history, not fresh steering. The FIRST ingest
+        for a goal with ZERO existing ``goal_steering`` rows treats
+        ``lines[:cursor]`` as already-CONSUMED (preserved for the record,
+        never fed to the planner) and only ``lines[cursor:]`` as new.
+        Idempotent by construction: once ANY row exists for the goal, this
+        branch can never fire again.
+
+        Tolerates ``cursor > len(lines)`` (an operator clearing/truncating
+        ``inbox.md`` by hand, or a crash between a row+cursor commit and the
+        file catching up to it): ``lines[cursor:]`` is then simply empty —
+        nothing is ingested, nothing goes negative, and the cursor is left
+        alone until the file has genuinely new content past it."""
+        self._ensure_status_row(goal_id)
+        if not self._goal_state.has_status(goal_id):
+            # Brand-new goal — no STATUS.md to migrate (_ensure_status_row is
+            # a no-op for one) and no row yet either. Give
+            # set_inbox_ingest_cursor somewhere to write.
+            self.save_status(goal_id, GoalStatus())
+        with self._state.transaction():
+            lines = self._inbox_lines(goal_id)
+            cursor = self._goal_state.read_status(goal_id).inbox_cursor
+            new_lines = lines[cursor:]
+            first_ingest = not self._goal_state.has_steering_rows(goal_id)
+            migrate_history = first_ingest and cursor > 0 and lines[:cursor]
+            if migrate_history:
+                now = _now_ms()
+                self._goal_state.append_steering_rows(
+                    goal_id, lines[:cursor], source="manual",
+                    created_at_ms=now, consumed=True,
+                )
+            if new_lines:
+                self._goal_state.append_steering_rows(goal_id, new_lines, source="manual")
+            if new_lines or migrate_history:
+                self._goal_state.set_inbox_ingest_cursor(goal_id, len(lines))
+
+    def unread_steering_rows(self, goal_id: str) -> "list[tuple[int, str]]":
+        """Unread steering — the exact-id source of truth PR5 introduced.
+        Ingests any new hand-typed ``inbox.md`` lines into rows FIRST (lazy,
+        idempotent — see ``_ingest_inbox``), then returns ``[(id, line), ...]``
+        for every row with ``consumed_at IS NULL``, oldest first. Callers that
+        need to consume EXACTLY what they read (the tick's post-plan
+        transition) thread the ids into ``GoalStore.transition(...,
+        consume_steering=[...])`` — that call, not this read, is what marks
+        them consumed."""
+        self._ingest_inbox(goal_id)
+        rows = self._goal_state.unread_steering_rows(goal_id)
+        return [(r["id"], r["line"]) for r in rows]
+
     def unread_steering(self, goal_id: str, status: GoalStatus) -> str:
-        lines = self._inbox_lines(goal_id)
-        fresh = lines[status.inbox_cursor :]
-        return "\n".join(fresh).strip()
+        """Unread steering as one newline-joined string — kept for display /
+        back-compat callers that don't consume by exact id. Re-implemented on
+        top of :meth:`unread_steering_rows` (the row-backed source of truth
+        PR5 introduced); ``status`` is UNUSED — consumption is now by row id
+        via ``GoalStore.transition(consume_steering=...)``, never by a cursor
+        carried on ``status``. Kept in the signature for existing callers
+        (PR8 cleans this up)."""
+        return "\n".join(line for _, line in self.unread_steering_rows(goal_id)).strip()
 
     def steering_cursor(self, goal_id: str) -> int:
+        """DEPRECATED — no longer used by production code (the tick consumes
+        by exact row id via ``transition(consume_steering=...)``, not a file-
+        line count). Kept for tests / back-compat callers; unchanged
+        pre-PR5 behavior (current ``inbox.md`` line count)."""
         return len(self._inbox_lines(goal_id))
 
     def append_steering(self, goal_id: str, lines: list[str], *, source: str = "denys") -> None:
-        """Append steering lines to inbox.md. Used by the steer_goal tool (source
-        'denys') AND by the direction evaluator writing corrections (source
-        'auto-eval') — the evaluator steers the goal the same way Denys would, so
-        the next-action planner picks it up through the one steering path."""
+        """Append steering lines. Writes UNCONSUMED ``goal_steering`` rows
+        (the source of truth the planner reads) AND mirrors the same lines
+        into ``inbox.md`` in the historical ``- [{source} {ts}] {line}``
+        format — kept EXACTLY, so ``devclaw.trend_signals``' H4 signal, which
+        parses that prefix straight off the file, keeps working unchanged.
+
+        Runs ``_ingest_inbox`` FIRST so any pre-existing hand-typed
+        ``inbox.md`` lines get their own rows (and the ingest cursor catches
+        up to them) BEFORE this call's own cursor math — otherwise a
+        hand-typed line sitting between the old cursor and the file's end
+        would be silently skipped once this call moves the cursor past it.
+
+        Ordering — deliberately FILE-append first, THEN the rows+cursor
+        commit: a crash in between leaves ``inbox.md`` with a line the rows
+        don't know about yet, which the next ``_ingest_inbox`` call picks up
+        as an ordinary hand-typed ``manual``-sourced row — the source label
+        is wrong but nothing is LOST. The reverse order (rows first) risks
+        the opposite: a crash after the row+cursor commit but before the
+        file write leaves the cursor ahead of the file, and if the retried
+        file write never lands with the exact same content, that text can
+        end up permanently below the (already-advanced) cursor — a genuine
+        loss. Losing steering is worse than a rare re-sourced duplicate, so
+        file-first wins.
+
+        The cursor is set to the CURRENT total ``inbox.md`` line count (read
+        fresh, after our own append) rather than computed as "old cursor +
+        len(clean)" — self-correcting regardless of exactly what
+        ``_ingest_inbox`` left it at."""
         clean = [ln.strip() for ln in lines if ln.strip()]
         if not clean:
             return
+        self._ingest_inbox(goal_id)
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "inbox.md"
@@ -716,6 +845,9 @@ class GoalStore:
         with path.open("a") as fh:
             for ln in clean:
                 fh.write(f"- [{source} {ts}] {ln}\n")
+        with self._state.transaction():
+            self._goal_state.append_steering_rows(goal_id, clean, source=source)
+            self._goal_state.set_inbox_ingest_cursor(goal_id, len(self._inbox_lines(goal_id)))
 
     # ---- helpers -----------------------------------------------------------
 

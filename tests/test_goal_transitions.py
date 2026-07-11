@@ -296,7 +296,13 @@ async def test_steer_unblock_mid_tick_abandons_cleanly(tmp_path):
     assert planner.calls == 1
     mid = store.load_status("g")
     assert mid.phase == "idle"  # the mid-tick unblock stuck
-    assert mid.inbox_cursor == 0  # the abandoned tick never consumed steering
+    # PR5: consumption is by exact goal_steering row id (rides the post-plan
+    # transition), not a cursor — the abandoned tick's consume_steering never
+    # landed (it rode the same failed CAS as the decision write), so BOTH
+    # lines are still unconsumed. Mechanically adapted from the pre-PR5
+    # `mid.inbox_cursor == 0` assertion; same intent.
+    unconsumed = [line for _, line in store.unread_steering_rows("g")]
+    assert unconsumed == ["first steer", "do X instead"]
 
     planner2 = FakeClaude(SLEEP)
     out2 = await _tick(store, "g", planner2, evaluator, engine, notifier)

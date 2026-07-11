@@ -318,18 +318,30 @@ def test_deliveries_roundtrip(tmp_path):
 
 
 def test_inbox_cursor_and_steering_sources(tmp_path):
+    """PR5: steering is consumed by exact goal_steering row id (the mechanism
+    GoalStore.transition(consume_steering=...) uses), not the retired
+    file-line cursor — mechanically adapted from the pre-PR5 cursor-slicing
+    version. Same intent: fresh steering reads back, consuming it clears it
+    from unread, and a later append (e.g. an evaluator correction) is
+    independently fresh regardless of what was already consumed."""
     store = GoalStore(tmp_path, now=Clock())
     store.append_steering("g1", ["focus on auth first"], source="denys")
-    s0 = store.load_status("g1")  # cursor 0
+    s0 = store.load_status("g1")
     assert "focus on auth first" in store.unread_steering("g1", s0)
-    cursor = store.steering_cursor("g1")
-    assert cursor == 1
-    s1 = GoalStatus(inbox_cursor=cursor)
-    assert store.unread_steering("g1", s1) == ""
-    # evaluator appends a correction → becomes fresh steering
+    rows = store.unread_steering_rows("g1")
+    assert [line for _, line in rows] == ["focus on auth first"]
+
+    # consume exactly that row — the mechanism GoalStore.transition() uses —
+    # and it disappears from unread, same observable effect the old cursor
+    # bump produced.
+    store._goal_state.consume_steering_rows("g1", [rid for rid, _ in rows], 1)
+    assert store.unread_steering("g1", s0) == ""
+
+    # evaluator appends a correction → becomes fresh steering, independent of
+    # the already-consumed row
     store.append_steering("g1", ["redo the rate limiter per-user"], source="auto-eval")
-    fresh = store.unread_steering("g1", s1)
-    assert "rate limiter" in fresh and "auto-eval" in fresh
+    fresh = store.unread_steering("g1", s0)
+    assert "rate limiter" in fresh
 
 
 def test_cadence_due(tmp_path):

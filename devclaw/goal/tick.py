@@ -797,10 +797,18 @@ async def _resolve_done_gate(
     summarize: "ClaudeCaller | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
     autodeploy: bool = AUTODEPLOY_ENABLED,
+    consume_steering: "list[int] | None" = None,
 ) -> Outcome:
     """A done-gate review just finished — judge the repo against done_when. Only
     'achieved' closes the goal; otherwise corrections are steered back in and the
     goal continues (its next tick plans the next step).
+
+    ``consume_steering`` (PR5): row ids the TICK's own post-plan call already
+    read this turn — rides whichever of the three verdict transitions below
+    fires, so consumption lands atomically with the decision. The two
+    polling-resolver call sites (``_resolve_polling_done_gate``, settling a
+    done-check dispatched on a PRIOR tick) pass nothing — their steering
+    wasn't read this turn, so there is nothing of theirs to consume.
 
     An ``achieved`` verdict additionally has to survive the grounded
     remote-checks verification (when a checker is bound and the goal works on
@@ -890,7 +898,8 @@ async def _resolve_done_gate(
     store.append_log(goal_id, f"done-gate: {ev.verdict} — {ev.rationale[:200]}")
     if ev.verdict == "achieved":
         store.transition(
-            goal_id, Event.ACHIEVE, replace(base, phase="done", next=ev.rationale[:200]), expect=status,
+            goal_id, Event.ACHIEVE, replace(base, phase="done", next=ev.rationale[:200]),
+            expect=status, consume_steering=consume_steering,
         )
         # Handoff: a completed goal should be a thing the owner can OPEN, not just a
         # closed ticket. Best-effort deploy the built app to a durable Tailscale URL.
@@ -901,14 +910,16 @@ async def _resolve_done_gate(
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"
         store.transition(
-            goal_id, Event.BLOCK, replace(base, phase="blocked", blocked_on=q, next=""), expect=status,
+            goal_id, Event.BLOCK, replace(base, phase="blocked", blocked_on=q, next=""),
+            expect=status, consume_steering=consume_steering,
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] not done — {q}", summarize=summarize)
         return Outcome.BLOCKED
     # on_track / off_track → not done yet. Steer corrections back in and continue.
     store.transition(
         goal_id, Event.RESUME_IDLE,
-        replace(base, phase="idle", next="done-gate said keep going"), expect=status,
+        replace(base, phase="idle", next="done-gate said keep going"),
+        expect=status, consume_steering=consume_steering,
     )
     _apply_corrections(store, goal_id, ev)
     await _notify(notifier, NotifyLevel.TASK, f"↩️ [{goal_id}] done-gate: not complete — {ev.rationale[:200]}")
@@ -922,11 +933,18 @@ async def _open_done_gate(
     note: str, summarize: "ClaudeCaller | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
     autodeploy: bool = AUTODEPLOY_ENABLED,
+    consume_steering: "list[int] | None" = None,
 ) -> Outcome:
     """The planner proposed done. Don't trust it: either dispatch a read-only
     review of the repo against done_when (the grounded path) and let the next
     tick judge it, or — if done-verification is disabled — run an artifact-only
-    done evaluation now."""
+    done evaluation now.
+
+    ``consume_steering`` (PR5): the row ids the tick's post-plan call read
+    this turn — rides EVERY transition below (the two retry-RESUME_IDLEs and
+    the VERIFYING open), and is forwarded into the ``verify_done=False``
+    fallthrough to :func:`_resolve_done_gate` too, so consumption is atomic
+    with whichever decision actually lands, no matter which branch fires."""
     if verify_done:
         # In checklist mode the done-gate reviewer needs to see the goal's
         # accumulated work — read the goal branch, not the default branch
@@ -938,7 +956,8 @@ async def _open_done_gate(
             store.append_log(goal_id, f"done-gate workspace prep failed: {exc}")
             store.transition(
                 goal_id, Event.RESUME_IDLE,
-                replace(base, phase="idle", next="retry done-gate"), expect=base,
+                replace(base, phase="idle", next="retry done-gate"),
+                expect=base, consume_steering=consume_steering,
             )
             await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate workspace prep failed: {exc}")
             return Outcome.ERROR
@@ -953,7 +972,8 @@ async def _open_done_gate(
             store.append_log(goal_id, f"done-gate dispatch failed: {exc}")
             store.transition(
                 goal_id, Event.RESUME_IDLE,
-                replace(base, phase="idle", next="retry done-gate"), expect=base,
+                replace(base, phase="idle", next="retry done-gate"),
+                expect=base, consume_steering=consume_steering,
             )
             await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate dispatch failed: {exc}")
             return Outcome.ERROR
@@ -961,7 +981,8 @@ async def _open_done_gate(
         _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""), is_done_check=True)
         store.transition(
             goal_id, Event.OPEN_DONE_GATE,
-            replace(base, phase="verifying", in_flight=ref, next="verifying done"), expect=base,
+            replace(base, phase="verifying", in_flight=ref, next="verifying done"),
+            expect=base, consume_steering=consume_steering,
         )
         store.append_log(goal_id, f"done proposed ({note}) → verifying via review {ref.id}")
         await _notify(notifier, NotifyLevel.TASK, f"🔎 [{goal_id}] looks complete — verifying against done_when")
@@ -971,6 +992,7 @@ async def _open_done_gate(
         goal_id, goal, base, review_report="",  # no review run; artifact-only
         store=store, evaluator_caller=evaluator_caller, notifier=notifier,
         summarize=summarize, remote_checker=remote_checker, autodeploy=autodeploy,
+        consume_steering=consume_steering,
     )
 
 
@@ -1261,6 +1283,7 @@ async def _dispatch_action(
     *, store: GoalStore, engine: GoalEngine, notifier: Notifier,
     notify_url: str, prepare_ws: WorkspacePrep,
     summarize: "ClaudeCaller | None" = None,
+    consume_steering: "list[int] | None" = None,
 ) -> Outcome:
     # Runaway backstop (mechanism, not cognition): never spawn more than the
     # goal's known-bounded work surface + a small margin without a human. A
@@ -1289,7 +1312,7 @@ async def _dispatch_action(
         store.transition(
             goal_id, Event.BLOCK,
             replace(base, phase="blocked", blocked_on=f"dispatch cap {cap} reached — review the open PRs"),
-            expect=base,
+            expect=base, consume_steering=consume_steering,
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review", summarize=summarize)
         return Outcome.BLOCKED
@@ -1314,7 +1337,8 @@ async def _dispatch_action(
     except Exception as exc:  # noqa: BLE001 — record + notify, retry next cadence
         store.append_log(goal_id, f"dispatch error ({action.tool}): {exc}")
         store.transition(
-            goal_id, Event.RESUME_IDLE, replace(base, phase="idle", next=action.goal), expect=base,
+            goal_id, Event.RESUME_IDLE, replace(base, phase="idle", next=action.goal),
+            expect=base, consume_steering=consume_steering,
         )
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] dispatch failed: {exc}")
         return Outcome.ERROR
@@ -1329,7 +1353,7 @@ async def _dispatch_action(
             base, phase="in_flight", in_flight=ref, blocked_on=None, next=action.goal,
             actions_dispatched=base.actions_dispatched + 1,
         ),
-        expect=base,
+        expect=base, consume_steering=consume_steering,
     )
     # Checklist mode: flip addressed items to in_flight so the planner doesn't
     # re-pick them next tick before this one settles. No-op in legacy mode.
@@ -1682,8 +1706,25 @@ async def _handle_executing(
     """The cognition path. Gate by work-present + cadence (preserves the
     zero-token guard — blocked goals only unblock on real work, never on the
     timer), then optionally run a periodic direction eval, then plan one
-    action and dispatch on the planner's decision."""
-    steering = ctx.store.unread_steering(goal_id, status)
+    action and dispatch on the planner's decision.
+
+    PR5: steering is read as exact ``goal_steering`` row ids (``rows``), not
+    a count. ``consume_ids`` — the ids as of the read that actually informed
+    the plan — rides the post-plan transition (``consume_steering=``) so
+    consumption lands atomically with the decision: a row inserted AFTER the
+    read (e.g. during the planner's cognition await) keeps ``consumed_at``
+    NULL and is seen next tick, whether or not this tick's own write
+    survives its CAS. On the plan-error path below, no transition fires at
+    all, so ``rows`` simply stays unconsumed — same net effect."""
+    rows = ctx.store.unread_steering_rows(goal_id)
+    steering = "\n".join(line for _, line in rows)
+    # unread_steering_rows() may have lazily ingested new inbox.md lines,
+    # which bumps goal_status.version (every write bumps version — PR4's
+    # rule). Reload so `expect=` below CAS's against the CURRENT row, not a
+    # pre-ingest snapshot — otherwise this tick's OWN ingest would look like
+    # a concurrent writer and self-inflict a TransitionConflict on every
+    # tick that finds fresh steering, not just a genuine race.
+    status = ctx.store.load_status(goal_id)
     work = bool(finished_detail) or bool(steering)
     if status.phase == "blocked":
         should_plan = work  # cadence does NOT re-poke a blocked goal; only work unblocks
@@ -1705,7 +1746,11 @@ async def _handle_executing(
         status = ctx.store.load_status(goal_id)  # eval may have written status + steering
         if blocked is not None:
             return blocked
-        steering = ctx.store.unread_steering(goal_id, status)  # re-read
+        rows = ctx.store.unread_steering_rows(goal_id)  # re-read
+        steering = "\n".join(line for _, line in rows)
+        status = ctx.store.load_status(goal_id)  # ingest (if any) may have bumped version again
+
+    consume_ids = [rid for rid, _ in rows]
 
     # Plan one next action. Pass the checklist if one exists — the planner
     # then runs in checklist mode and picks one ready item. Also surface the
@@ -1740,14 +1785,16 @@ async def _handle_executing(
         return Outcome.ERROR
 
     now = ctx.store.now_iso()
-    base = replace(
-        status, last_plan_at=now, last_tick_at=now,
-        inbox_cursor=ctx.store.steering_cursor(goal_id),  # all current steering consumed
-    )
+    # No `inbox_cursor=` here (PR5): that field now carries the INGEST cursor
+    # (bumped by _ingest_inbox/append_steering, reflected via the `status`
+    # reload above), not a consume cursor — consumption is `consume_ids`
+    # riding each transition below, atomic with the decision.
+    base = replace(status, last_plan_at=now, last_tick_at=now)
 
     if result.decision == "sleep":
         ctx.store.transition(
-            goal_id, Event.RESUME_IDLE, replace(base, phase="idle", next=result.note), expect=status,
+            goal_id, Event.RESUME_IDLE, replace(base, phase="idle", next=result.note),
+            expect=status, consume_steering=consume_ids,
         )
         ctx.store.append_log(goal_id, f"sleep: {result.note}")
         return Outcome.SLEPT
@@ -1755,7 +1802,8 @@ async def _handle_executing(
     if result.decision == "blocked":
         ctx.store.transition(
             goal_id, Event.BLOCK,
-            replace(base, phase="blocked", blocked_on=result.question, next=""), expect=status,
+            replace(base, phase="blocked", blocked_on=result.question, next=""),
+            expect=status, consume_steering=consume_ids,
         )
         ctx.store.append_log(goal_id, f"blocked: {result.question}")
         await _notify(
@@ -1772,6 +1820,7 @@ async def _handle_executing(
             verify_done=ctx.verify_done, note=result.note, summarize=ctx.summary_caller,
             remote_checker=ctx.remote_checker,
             autodeploy=ctx.autodeploy,
+            consume_steering=consume_ids,
         )
 
     # decision == "act"
@@ -1779,6 +1828,7 @@ async def _handle_executing(
         goal_id, goal, base, result.actions[0],
         store=ctx.store, engine=ctx.engine, notifier=ctx.notifier,
         notify_url=ctx.notify_url, prepare_ws=ctx.prepare_ws, summarize=ctx.summary_caller,
+        consume_steering=consume_ids,
     )
 
 
