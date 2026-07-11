@@ -33,6 +33,7 @@ from .models import Goal, GoalStatus
 from .notify import HttpNotifier, Notifier, NullNotifier
 from .store import GoalStore
 from .tick import AUTODEPLOY_ENABLED, EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
+from .transitions import Event
 from ..loom import trace as _trace
 from ..state_store import StateStore
 from ..task_queue import TaskQueue
@@ -610,9 +611,18 @@ class GoalService:
         self._goal_store.append_log(goal_id, f"steered: {message[:160]}")
         # Steering unblocks a blocked goal — flip it to idle and clear the
         # dispatch counter so the cap doesn't re-trigger on the very next tick.
+        # `s.phase == "blocked"` also matches firming-blocked (lifecycle=
+        # "firming"): UNBLOCK from FIRMING_BLOCKED legally targets
+        # FIRMING_IDLE, and replace(s, phase="idle") on a firming-lifecycle
+        # status derives exactly that — one call covers both cases. A
+        # TransitionConflict here (another writer landed between the load
+        # above and this write) is left to propagate as a visible MCP error —
+        # practically unreachable since nothing awaits between them.
         s = self._goal_store.load_status(goal_id)
         if s.phase == "blocked":
-            self._goal_store.save_status(goal_id, replace(s, phase="idle", actions_dispatched=0))
+            self._goal_store.transition(
+                goal_id, Event.UNBLOCK, replace(s, phase="idle", actions_dispatched=0), expect=s,
+            )
         self.poke()
         return {"goal_id": goal_id, "steered": True, "message": message}
 
@@ -634,9 +644,10 @@ class GoalService:
             claude_caller=self._evaluator(),
         )
         now = self._goal_store.now_iso()
-        self._goal_store.save_status(goal_id, replace(
-            s, last_eval_verdict=ev.verdict, last_eval_at=now, last_eval_note=ev.rationale[:300],
-        ))
+        # Telemetry-only (verdict/note) — column-only path, not a transition.
+        self._goal_store.update_status_fields(
+            goal_id, last_eval_verdict=ev.verdict, last_eval_at=now, last_eval_note=ev.rationale[:300],
+        )
         self._goal_store.append_log(goal_id, f"on-demand direction: {ev.verdict} — {ev.rationale[:200]}")
         if ev.corrections:
             self._goal_store.append_steering(goal_id, ev.corrections, source="auto-eval")
@@ -716,6 +727,8 @@ class GoalService:
                 self._queue.cancel_task(ref.id)
             else:
                 self._queue.cancel_program(ref.id)
-        self._goal_store.save_status(goal_id, replace(s, phase="cancelled", in_flight=None))
+        self._goal_store.transition(
+            goal_id, Event.CANCEL, replace(s, phase="cancelled", in_flight=None), expect=s,
+        )
         self._goal_store.append_log(goal_id, "goal cancelled")
         return {"goal_id": goal_id, "cancelled": True, "phase": "cancelled"}

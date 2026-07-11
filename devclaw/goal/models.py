@@ -163,6 +163,17 @@ class GoalStatus:
     #: timestamps. Deliberately unbounded — the log is human-scale (dozens of
     #: entries per goal at most).
     phase_history: tuple[dict, ...] = ()
+    #: the stored State value (see devclaw.goal.transitions) — None on a
+    #: legacy row / a status object never round-tripped through the store.
+    #: compare=False: two GoalStatus objects with identical business fields
+    #: still compare equal regardless of this projection (existing tests
+    #: build expected GoalStatus(...) objects without ever setting it — see
+    #: tests/test_goal_status_migration.py's `migrated == GoalStatus()`).
+    state: Optional[str] = field(default=None, compare=False)
+    #: optimistic-concurrency counter GoalStore.transition() CAS's against —
+    #: bumped by exactly 1 on every store write (save_status / transition /
+    #: update_status_fields). compare=False for the same reason as `state`.
+    version: int = field(default=0, compare=False)
 
 
 @dataclass(frozen=True)

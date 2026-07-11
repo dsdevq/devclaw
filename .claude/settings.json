@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/docs-reminder.py\"",
+            "timeout": 15,
+            "statusMessage": "Checking docs coverage for commit"
+          }
+        ]
+      }
+    ]
+  }
+}

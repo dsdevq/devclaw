@@ -29,6 +29,14 @@ import yaml
 
 from .models import Goal, GoalStatus, InFlight
 from .state import GoalState
+from .transitions import (
+    LEGAL,
+    Event,
+    IllegalTransition,
+    State,
+    TransitionConflict,
+    derive_state,
+)
 
 if TYPE_CHECKING:
     from ..state_store import StateStore
@@ -281,7 +289,15 @@ class GoalStore:
                     goal_id, status.phase, self._now().isoformat(timespec="seconds")
                 )
             history = self._goal_state.read_phase_history(goal_id)
-            status = replace(status, phase_history=history)
+            # PR4: stamp the derived enum state on EVERY write so the column
+            # can never go stale relative to phase/lifecycle/in_flight. This
+            # is still the UNGUARDED write path — no CAS, no legality check
+            # (production transition sites use .transition() instead) — but
+            # the column itself must always be correct so a later
+            # .transition() call has a trustworthy `cur_state` to CAS from.
+            status = replace(
+                status, phase_history=history, state=derive_state(status).value,
+            )
             self._goal_state.write_status(goal_id, status)
         # STATUS.md view — the exact frontmatter _read_frontmatter parses + the
         # human body, written via the atomic tmp+os.replace. This is the
@@ -289,6 +305,148 @@ class GoalStore:
         # and recover the current state (a crash mid-write, container restart —
         # 2026-07-09 — left a truncated file that must not orphan in-flight work).
         self._write_status_view(goal_id, status)
+
+    def _load_status_for_cas(self, goal_id: str) -> GoalStatus:
+        """The current row as a GoalStatus, or bare defaults when no row
+        exists yet — the read side of transition()'s / force_block()'s CAS.
+        Deliberately does NOT call :meth:`_ensure_status_row` itself (callers
+        do that first, matching save_status's ordering) and does NOT fall
+        back to STATUS.md — a status object built here only ever needs
+        `.state`/`.version`, both of which are meaningless on a file that
+        predates this table."""
+        if self._goal_state.has_status(goal_id):
+            return self._goal_state.read_status(goal_id)
+        return GoalStatus()
+
+    def transition(
+        self, goal_id: str, event: "Event", new: GoalStatus, *, expect: GoalStatus,
+    ) -> GoalStatus:
+        """The choke point every PRODUCTION phase/lifecycle/in_flight change
+        routes through (see :mod:`devclaw.goal.transitions`). Two guards, in
+        order:
+
+        1. **CAS** — the row's CURRENTLY STORED ``(state, version)`` must
+           match ``expect``'s (or the fresh defaults, when no row exists yet).
+           A mismatch means another writer (steer_goal / cancel_goal / a
+           parallel tick) committed between the caller's load and this call;
+           raises :class:`~devclaw.goal.transitions.TransitionConflict` and
+           writes NOTHING — the caller's decision was based on a snapshot
+           that's no longer current, so honoring it would silently clobber
+           whatever landed in between (the stale-snapshot un-cancel class this
+           PR closes).
+        2. **Legality** — ``event`` must permit landing on ``derive_state(new)``
+           from the row's CURRENT state per
+           :data:`~devclaw.goal.transitions.LEGAL`. A miss raises
+           :class:`~devclaw.goal.transitions.IllegalTransition` — always a
+           bug, never an expected race.
+
+        Only past both does this write (same shape as save_status: phase_history
+        append when phase changed, then write_status, then the STATUS.md view
+        AFTER the transaction commits). Returns the ACTUAL stored object
+        (``new`` with ``state``/``version`` stamped) — callers MUST thread this
+        forward instead of reusing their pre-call snapshot (see tick.py's
+        "version threading rule").
+        """
+        self._ensure_status_row(goal_id)
+        with self._state.transaction():
+            fresh = self._load_status_for_cas(goal_id)
+            cur_state = State(fresh.state) if fresh.state else derive_state(fresh)
+            expect_state = State(expect.state) if expect.state else derive_state(expect)
+            if cur_state != expect_state or fresh.version != expect.version:
+                raise TransitionConflict(
+                    goal_id,
+                    expected=(expect_state, expect.version),
+                    found=(cur_state, fresh.version),
+                )
+            target = derive_state(new)
+            if target not in LEGAL.get((cur_state, event), frozenset()):
+                raise IllegalTransition(goal_id, cur_state, event, target)
+            prev_phase = self._goal_state.current_phase(goal_id)
+            if new.phase and new.phase != prev_phase:
+                self._goal_state.append_phase_history(
+                    goal_id, new.phase, self._now().isoformat(timespec="seconds")
+                )
+            history = self._goal_state.read_phase_history(goal_id)
+            written = replace(
+                new, phase_history=history, state=target.value, version=fresh.version + 1,
+            )
+            self._goal_state.write_status(goal_id, written)
+        self._write_status_view(goal_id, written)
+        return written
+
+    def update_status_fields(self, goal_id: str, **fields) -> GoalStatus:
+        """Column-only telemetry update — ``last_tick_at`` / ``last_plan_at`` /
+        ``last_progress_at`` / ``no_progress_notified`` / ``last_eval_verdict``
+        / ``last_eval_at`` / ``last_eval_note`` / ``deliveries_since_eval``
+        ONLY (see :data:`GoalState.STATUS_FIELD_COLUMNS`). NEVER a full-row
+        rewrite, so it can never be the write that clobbers a concurrent
+        phase/lifecycle/in_flight transition — this is the mechanism half of
+        the fix .transition()'s CAS is the guard half of: bookkeeping writes
+        (last-tick timestamps, eval verdicts) don't need to fight over the row
+        at all when they physically cannot touch the columns a transition
+        cares about. No CAS, by design — these fields never conflict with a
+        concurrent transition.
+
+        Raises ``ValueError`` on any key outside the allowed set (especially
+        phase/lifecycle/in_flight/blocked_on/next — those MUST go through
+        :meth:`transition`). Falls back to :meth:`save_status` when no row
+        exists yet (first write for a goal). Returns the fresh, re-read
+        ``GoalStatus``."""
+        bad = set(fields) - set(GoalState.STATUS_FIELD_COLUMNS)
+        if bad:
+            raise ValueError(
+                f"update_status_fields: disallowed field(s) {sorted(bad)} — only "
+                f"{sorted(GoalState.STATUS_FIELD_COLUMNS)} may go through the "
+                "column-only path; phase/lifecycle/in_flight/blocked_on/next "
+                "must go through GoalStore.transition()"
+            )
+        self._ensure_status_row(goal_id)
+        if not self._goal_state.has_status(goal_id):
+            self.save_status(goal_id, replace(GoalStatus(), **fields))
+            return self.load_status(goal_id)
+        with self._state.transaction():
+            self._goal_state.update_columns(goal_id, fields)
+        fresh = self.load_status(goal_id)
+        self._write_status_view(goal_id, fresh)
+        return fresh
+
+    def force_block(self, goal_id: str, blocked_on: str) -> bool:
+        """Unconditional block write — bypasses the LEGAL-table check on
+        purpose. This is the ESCAPE HATCH used ONLY by tick_goal's
+        ``IllegalTransition`` catch: BLOCK is legal from every non-terminal
+        state, so no matter what a handler was mid-way through when it
+        proposed an illegal transition (always a bug, not an expected race —
+        see :class:`~devclaw.goal.transitions.IllegalTransition`), the goal
+        can always land on BLOCKED and the owner gets a legible ping instead
+        of the tick loop crash-retrying forever.
+
+        Preserves ``in_flight`` AS-IS (same reasoning as
+        ``_block_on_corrupt_doc``: blocking stops new cognition, it must not
+        orphan a running action). No-op — returns ``False``, writes nothing —
+        when the goal is already DONE/CANCELLED (terminal; nothing calls this
+        on a happy path, but a belt-and-suspenders guard against blocking a
+        finished goal). Returns ``True`` when it wrote."""
+        self._ensure_status_row(goal_id)
+        with self._state.transaction():
+            fresh = self._load_status_for_cas(goal_id)
+            cur_state = State(fresh.state) if fresh.state else derive_state(fresh)
+            if cur_state in (State.DONE, State.CANCELLED):
+                return False
+            new = replace(
+                fresh, phase="blocked", lifecycle="executing", blocked_on=blocked_on, next="",
+            )
+            prev_phase = self._goal_state.current_phase(goal_id)
+            if new.phase != prev_phase:
+                self._goal_state.append_phase_history(
+                    goal_id, new.phase, self._now().isoformat(timespec="seconds")
+                )
+            history = self._goal_state.read_phase_history(goal_id)
+            written = replace(
+                new, phase_history=history, state=State.BLOCKED.value, version=fresh.version + 1,
+            )
+            self._goal_state.write_status(goal_id, written)
+        self._write_status_view(goal_id, written)
+        return True
 
     def _write_status_view(self, goal_id: str, status: GoalStatus) -> None:
         """Render + atomically write the STATUS.md view for ``status``. Full

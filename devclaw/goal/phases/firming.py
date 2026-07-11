@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from ..firmed import FirmedGoal, FirmedParseError, derive_done_when, parse_firmed
 from ..models import Goal, GoalStatus
 from ..store import GoalStore
+from ..transitions import Event
 from . import PhaseResult
 
 if TYPE_CHECKING:
@@ -220,8 +221,10 @@ class FirmingHandler:
             store.append_log(goal_id, f"firming round 1 failed: {exc}")
             # Fall through to executing — firming is foundational but must not
             # wedge a goal forever (mirrors the discovery-synthesis degrade).
-            store.save_status(
-                goal_id, replace(status, lifecycle="executing", phase="idle"),
+            store.transition(
+                goal_id, Event.FIRMING_ADVANCE,
+                replace(status, lifecycle="executing", phase="idle"),
+                expect=status,
             )
             await ctx.notifier.send(
                 f"⚠️ [{goal_id}] firming failed ({exc}) — proceeding without it"
@@ -244,7 +247,16 @@ class FirmingHandler:
         merges + re-firms and returns the structured result the waiter renders.
 
         Returns a dict with ``status`` ('firmed' | 'needs_more_answers'),
-        ``unknowns`` (populated when more answers are needed), and ``round``."""
+        ``unknowns`` (populated when more answers are needed), and ``round``.
+
+        ``status`` is loaded fresh at the top of this method, but the firming
+        cognition call (``_firm_once``) awaits in between that load and the
+        eventual ``store.transition()`` in ``_land`` — if a concurrent
+        cancel/steer lands during that window, the transition CAS fails and
+        ``TransitionConflict`` propagates uncaught to the ``answer_unknowns``
+        MCP caller. Acceptable: this is an owner-invoked, on-demand call, not
+        a heartbeat tick — there's no choke-point catch to swallow it, and a
+        visible error here is the right signal (retry answering)."""
         store = ctx.store
         caller = self._caller or self._resolve_caller()
         goal = store.load_goal(goal_id)
@@ -354,10 +366,11 @@ class FirmingHandler:
         if draft.status == "firmed":
             goal = store.load_goal(goal_id)
             decompose_note = await self._fire_decomposer(goal_id, goal, draft, store)
-            store.save_status(
-                goal_id,
+            store.transition(
+                goal_id, Event.FIRMING_ADVANCE,
                 replace(status, lifecycle="executing", phase="idle",
                         blocked_on=None, next="firming done → executing"),
+                expect=status,
             )
             store.append_log(
                 goal_id,
@@ -377,10 +390,11 @@ class FirmingHandler:
         blocker_msg = (
             f"{n} question{'s' if n != 1 else ''} — reply in OpenClaw"
         )
-        store.save_status(
-            goal_id,
+        store.transition(
+            goal_id, Event.FIRMING_NEEDS_ANSWERS,
             replace(status, lifecycle="firming", phase="blocked",
                     blocked_on=blocker_msg, next=""),
+            expect=status,
         )
         store.append_log(
             goal_id, f"firming round {round_} → needs_owner_answers ({n} unknown(s))",
