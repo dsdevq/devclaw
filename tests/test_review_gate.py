@@ -32,6 +32,18 @@ def test_build_prompt_includes_ticket_diff_and_contract():
     assert "STRICT JSON" in p and "request_changes" in p
 
 
+def test_build_prompt_reviews_along_two_axes_with_smell_baseline():
+    """The review hunts spec-fidelity and standards as separate axes (one must
+    not mask the other), carries the Fowler smell baseline as judgement calls,
+    and keeps repo conventions authoritative over the baseline."""
+    p = build_review_prompt(goal="Add X", kind="implement_feature", diff="d")
+    assert "Spec axis" in p and "Standards axis" in p
+    assert "scope creep" in p
+    assert "speculative generality" in p and "shotgun surgery" in p
+    assert "judgement call" in p
+    assert "documented conventions" in p and "override" in p
+
+
 def test_clip_diff_truncates_oversized(monkeypatch):
     monkeypatch.setattr(review_gate, "_MAX_DIFF_CHARS", 50)
     big = "x" * 200
