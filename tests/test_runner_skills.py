@@ -65,6 +65,17 @@ def test_fix_bug_keeps_its_smallest_change_skill(runner, skill_dir):
     assert "smallest change" in bundle.lower()
 
 
+def test_fix_bug_loads_diagnosis_loop_after_scope(runner, skill_dir):
+    """The diagnosis-loop discipline ships in the fix_bug tier, ordered after
+    the scope skill (00- prefix before 10-) so scope framing comes first."""
+    bundle = runner._load_skills("fix_bug")
+    assert "Diagnosis loop" in bundle
+    assert "red-capable" in bundle
+    assert bundle.index("Bug-fix scope") < bundle.index("Diagnosis loop")
+    for kind in ("implement_feature", "review_repository", "onboard"):
+        assert "Diagnosis loop" not in runner._load_skills(kind)
+
+
 def test_review_repository_loads_only_read_only_skill(runner, skill_dir):
     bundle = runner._load_skills("review_repository")
     assert "READ ONLY" in bundle
