@@ -526,7 +526,7 @@ async def test_done_gate_review_off_track_steers_and_continues(tmp_path):
     s = store.load_status("g")
     assert s.phase == "idle"
     # the correction was steered back in for the next plan
-    assert "add a test for /health" in store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    assert "add a test for /health" in store.unread_steering("g")
 
 
 @pytest.mark.asyncio
@@ -1511,7 +1511,7 @@ async def test_failing_remote_checks_block_the_close(tmp_path):
     assert s.last_eval_verdict == "off_track"
     assert "remote checks (goal/g): failing" in store.recent_log("g")
     # the correction steers the fix
-    steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    steering = store.unread_steering("g")
     assert "[remote-checks]" in steering
     assert "startup_failure" in steering
 
@@ -1533,7 +1533,7 @@ async def test_never_ran_ci_blocks_the_close_under_strict_gate(tmp_path, monkeyp
 
     assert out is Outcome.SLEPT
     assert store.load_status("g").phase != "done"
-    steering = store.unread_steering("g", GoalStatus(inbox_cursor=0))
+    steering = store.unread_steering("g")
     assert "ZERO" in steering or "zero" in steering
 
 

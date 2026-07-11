@@ -574,8 +574,8 @@ class GoalState:
     # it — so migration is a true one-shot with no ongoing ingest cursor: once
     # ANY row exists for a goal, :meth:`GoalStore._ingest_log` never runs
     # again for it. Rows store the MIRROR-FORMATTED line verbatim (the PR5
-    # rule — see ``append_steering``), so ``recent_log``/``log_contains``
-    # read back byte-identical text to the pre-PR6 file-tail read.
+    # rule — see ``append_steering``), so ``recent_log`` reads back
+    # byte-identical text to the pre-PR6 file-tail read.
 
     def has_log_rows(self, goal_id: str) -> bool:
         """Whether ANY ``goal_log`` row exists yet — the lazy-migration guard
@@ -624,20 +624,6 @@ class GoalState:
                 (goal_id, n),
             ).fetchall()
         return [r["message"] for r in reversed(rows)]
-
-    def log_contains_row(self, goal_id: str, needle: str) -> bool:
-        """Whether any row's ``message`` contains ``needle`` — the row-backed
-        read behind :meth:`GoalStore.log_contains` (kept for other callers;
-        the orphan-readopt guard moved onto :meth:`has_settlement` in PR7).
-        Uses ``instr(message, ?) > 0`` rather than ``LIKE`` to dodge
-        ``%``/``_`` escaping — ``needle`` here is caller-built text (e.g. a
-        program id), never a curated LIKE pattern."""
-        with self._store._lock:
-            row = self._store._db.execute(
-                "SELECT 1 FROM goal_log WHERE goal_id = ? AND instr(message, ?) > 0 LIMIT 1",
-                (goal_id, needle),
-            ).fetchone()
-        return row is not None
 
     def all_log_rows(self, goal_id: str) -> "list[str]":
         """Every ``message`` for ``goal_id``, in natural (ascending) order —

@@ -21,6 +21,7 @@ claude — and the quota assertion is just "FakeClaude.calls == 0" on idle paths
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -463,6 +464,38 @@ def _classify(status: GoalStatus) -> Phase:
     return Phase.EXECUTING
 
 
+# ---- per-goal tick serialization (Tranche 1/PR8) ---------------------------
+#
+# CAS (GoalStore.transition's optimistic-concurrency check) already guarantees
+# CORRECTNESS when two ticks race the SAME goal — an MCP-driven tick_one
+# (manual poke, ops-agent) overlapping the heartbeat's tick_all is the one
+# remaining same-goal concurrency left after PR4. Pre-PR8, that race meant
+# BOTH ticks ran a full cognition round (a planner/evaluator call can take
+# minutes) and the loser abandoned its ENTIRE planning round to a
+# TransitionConflict — correct, but a wasted round of tokens and a confusing
+# trace. This lock adds EFFICIENCY + LEGIBILITY on top of CAS's correctness:
+# the second tick simply waits for the first to finish, then reads FRESH
+# state — usually landing on IDLE at zero cognition cost instead of losing a
+# race it already lost the moment it started.
+#
+# Deliberately scoped to tick_goal ONLY — steer_goal / cancel_goal /
+# evaluate_goal stay lock-free on purpose. They are synchronous, loop-atomic
+# MCP calls that must never wait behind a minutes-long cognition await; CAS
+# remains their guard, unchanged. This is the design's decision, verbatim:
+# "one per-goal asyncio.Lock around tick_goal only; steer/cancel stay sync +
+# loop-atomic."
+#
+# Unbounded growth (a Lock object per goal id, forever, even for done/
+# cancelled goals) is fine — goals number in the dozens, not millions; the
+# per-goal Lock is a few dozen bytes and there is no eviction path worth the
+# complexity for a fleet this small.
+_TICK_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _tick_lock(goal_id: str) -> asyncio.Lock:
+    return _TICK_LOCKS.setdefault(goal_id, asyncio.Lock())
+
+
 async def tick_goal(
     goal_id: str,
     *,
@@ -493,68 +526,79 @@ async def tick_goal(
     ``trend_detector`` (typed as ``object`` to avoid an import cycle with
     ``devclaw.trend_detector``): when set, runs per-project trend signals after
     the tick body settles. Telemetry-shaped: a detector exception NEVER breaks
-    the tick — it is recorded as a note and swallowed."""
-    status_before = store.load_status(goal_id)
-    phase_before = _classify(status_before)
-    lifecycle_before = status_before.lifecycle or "executing"
-    try:
-        outcome = await _tick_goal_impl(
-            goal_id,
-            store=store, engine=engine,
-            planner_caller=planner_caller, evaluator_caller=evaluator_caller,
-            notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
-            eval_every=eval_every, verify_done=verify_done, autodeploy=autodeploy,
-            no_progress_s=no_progress_s,
-            decompose_enabled=decompose_enabled,
-            summary_caller=summary_caller, merger=merger,
-            decomposer_caller=decomposer_caller,
-            world_research_caller=world_research_caller,
-            remote_checker=remote_checker,
-        )
-    except IllegalTransition as exc:
-        # A handler proposed an (event, target) the LEGAL table doesn't permit
-        # from the goal's CURRENT stored state — always a bug (the handler
-        # computed the wrong event, or LEGAL is missing a real code path),
-        # never an expected race (see TransitionConflict below for that). Force
-        # -block rather than let the tick loop crash-retry the same bug every
-        # heartbeat — loud failure over silent degradation (CLAUDE.md's
-        # hardening philosophy: verification fails closed, corruption blocks
-        # legibly, and this is the state-machine's version of the same rule).
-        store.append_log(goal_id, f"ILLEGAL transition — blocking: {exc}")
-        store.force_block(goal_id, f"illegal state transition: {exc}")
-        await _notify(
-            notifier, NotifyLevel.OWNER,
-            f"🟥 [{goal_id}] internal state error — I've paused this goal; steer to resume: {exc}",
-            summarize=summary_caller,
-        )
-        outcome = Outcome.BLOCKED
-    except TransitionConflict as exc:
-        # Expected, not a bug: another writer (steer_goal / cancel_goal,
-        # typically) committed between this tick's load and its write. The
-        # tick's write is simply abandoned — nothing from this turn was
-        # persisted — and the NEXT tick reads the fresh state instead of
-        # clobbering it (the stale-snapshot un-cancel class this PR closes:
-        # today, without this catch, the tick's stale write would silently
-        # win and un-cancel the goal). Zero notify — benign and self-healing,
-        # a notification here would just be tick-cadence noise.
-        store.append_log(goal_id, f"tick abandoned — state changed mid-tick: {exc}")
-        outcome = Outcome.CONFLICT
-    if trend_detector is not None:
+    the tick — it is recorded as a note and swallowed.
+
+    The ENTIRE body runs under this goal's :func:`_tick_lock` (PR8) — a
+    concurrent tick for the SAME goal (tick_one racing tick_all's sweep) waits
+    here instead of both running cognition and one losing its round to a
+    TransitionConflict. See the lock's own comment for the full rationale.
+    Different goals use different Lock objects, so this never serializes the
+    fleet — only same-goal overlap."""
+    async with _tick_lock(goal_id):
+        status_before = store.load_status(goal_id)
+        phase_before = _classify(status_before)
+        lifecycle_before = status_before.lifecycle or "executing"
         try:
-            goal = store.load_goal(goal_id)
-            await trend_detector.run_per_goal(
-                goal_id=goal_id, workspace_dir=goal.workspace_dir,
+            outcome = await _tick_goal_impl(
+                goal_id,
+                store=store, engine=engine,
+                planner_caller=planner_caller, evaluator_caller=evaluator_caller,
+                notifier=notifier, notify_url=notify_url, prepare_ws=prepare_ws,
+                eval_every=eval_every, verify_done=verify_done, autodeploy=autodeploy,
+                no_progress_s=no_progress_s,
+                decompose_enabled=decompose_enabled,
+                summary_caller=summary_caller, merger=merger,
+                decomposer_caller=decomposer_caller,
+                world_research_caller=world_research_caller,
+                remote_checker=remote_checker,
             )
-        except Exception as exc:  # noqa: BLE001 — telemetry must not break ticks
-            _trace.record_note(
-                f"trend_detector.run_per_goal failed for {goal_id}: "
-                f"{exc.__class__.__name__}: {exc}"
+        except IllegalTransition as exc:
+            # A handler proposed an (event, target) the LEGAL table doesn't permit
+            # from the goal's CURRENT stored state — always a bug (the handler
+            # computed the wrong event, or LEGAL is missing a real code path),
+            # never an expected race (see TransitionConflict below for that). Force
+            # -block rather than let the tick loop crash-retry the same bug every
+            # heartbeat — loud failure over silent degradation (CLAUDE.md's
+            # hardening philosophy: verification fails closed, corruption blocks
+            # legibly, and this is the state-machine's version of the same rule).
+            store.append_log(goal_id, f"ILLEGAL transition — blocking: {exc}")
+            store.force_block(goal_id, f"illegal state transition: {exc}")
+            await _notify(
+                notifier, NotifyLevel.OWNER,
+                f"🟥 [{goal_id}] internal state error — I've paused this goal; steer to resume: {exc}",
+                summarize=summary_caller,
             )
-    _trace.record_tick(
-        goal_id=goal_id, lifecycle=lifecycle_before,
-        phase=phase_before.value, outcome=outcome.value,
-    )
-    return outcome
+            outcome = Outcome.BLOCKED
+        except TransitionConflict as exc:
+            # Expected, not a bug: another writer (steer_goal / cancel_goal,
+            # typically) committed between this tick's load and its write. The
+            # tick's write is simply abandoned — nothing from this turn was
+            # persisted — and the NEXT tick reads the fresh state instead of
+            # clobbering it (the stale-snapshot un-cancel class this PR closes:
+            # today, without this catch, the tick's stale write would silently
+            # win and un-cancel the goal). Zero notify — benign and self-healing,
+            # a notification here would just be tick-cadence noise. Note: the
+            # PR8 lock makes a tick_one-vs-tick_all conflict on the SAME goal
+            # unreachable (they now serialize); this catch remains load-bearing
+            # for steer_goal/cancel_goal, which stay lock-free by design.
+            store.append_log(goal_id, f"tick abandoned — state changed mid-tick: {exc}")
+            outcome = Outcome.CONFLICT
+        if trend_detector is not None:
+            try:
+                goal = store.load_goal(goal_id)
+                await trend_detector.run_per_goal(
+                    goal_id=goal_id, workspace_dir=goal.workspace_dir,
+                )
+            except Exception as exc:  # noqa: BLE001 — telemetry must not break ticks
+                _trace.record_note(
+                    f"trend_detector.run_per_goal failed for {goal_id}: "
+                    f"{exc.__class__.__name__}: {exc}"
+                )
+        _trace.record_tick(
+            goal_id=goal_id, lifecycle=lifecycle_before,
+            phase=phase_before.value, outcome=outcome.value,
+        )
+        return outcome
 
 
 async def _tick_goal_impl(
@@ -1753,7 +1797,12 @@ async def sweep_orphaned_refs(store: GoalStore, engine: GoalEngine) -> "dict[str
     goal that already has a fresh in_flight ref, are skipped) with no ref.
     A single goal's bad state (a corrupt status row, a raised finder) is
     isolated — logged where possible, never allowed to sink the whole sweep,
-    matching ``tick_all``'s per-goal isolation."""
+    matching ``tick_all``'s per-goal isolation.
+
+    Does NOT take :func:`_tick_lock` (PR8): this runs once, before the
+    heartbeat loop starts (see ``GoalService._loop``) — single-threaded at
+    that point, nothing else can be ticking any goal yet, so there is no
+    same-goal concurrency for the lock to guard against here."""
     result: "dict[str, str]" = {}
     for goal_id in store.list_goal_ids():
         try:
