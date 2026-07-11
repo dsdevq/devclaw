@@ -91,6 +91,25 @@ class GoalConfig:
         )
 
 
+def _should_repoke(outcomes: "dict[str, str]") -> bool:
+    """Whether the heartbeat should immediately re-tick after this sweep.
+
+    ``advanced``: a lifecycle transition (discovery→executing, firming→executing)
+    happened without dispatching a task — the next planning tick should start
+    now, not a full heartbeat interval later.
+
+    ``conflict`` (T1/PR4+): a tick's write was abandoned because another writer
+    landed mid-tick. The writers that matter most (steer_goal, evaluate_goal
+    with corrections) poke the loop themselves, but a writer that doesn't
+    (e.g. evaluate_goal returning no corrections, whose telemetry write still
+    bumps the version) would otherwise leave the conflicted goal's pending
+    work — steering, a just-finished action's detail — waiting out the full
+    interval. Retrying immediately is bounded: the retry re-reads fresh state,
+    and a successful re-plan consumes the very work that made it fire.
+    """
+    return any(v in ("advanced", "conflict") for v in outcomes.values())
+
+
 class GoalService:
     def __init__(
         self,
@@ -325,11 +344,7 @@ class GoalService:
             self._wake.clear()
             try:
                 outcomes = await self.tick_all()
-                # A lifecycle transition (discovery→executing, plan_review→executing)
-                # returns ADVANCED to signal "something changed but no task was
-                # dispatched yet." Re-poke immediately so the next planning tick
-                # starts without waiting the full 900s heartbeat interval.
-                if any(v == "advanced" for v in outcomes.values()):
+                if _should_repoke(outcomes):
                     self.poke()
             except Exception as exc:  # noqa: BLE001 — a tick crash must not kill the loop
                 sys.stderr.write(f"goal-layer: tick crashed: {exc}\n")
