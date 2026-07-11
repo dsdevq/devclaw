@@ -35,6 +35,7 @@ search path via `DEVCLAW_DOTENV` (must be set in the shell to bootstrap).
 | `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | Wall-clock cap for the `verify_cmd` step (the gate that runs after the agent finishes). |
 | `DEVCLAW_RATE_LIMIT_PAUSE_S` | `1800` | Default pause length when a usage/rate-limit failure is classified (gates both the task queue and goal heartbeat — zero tokens while paused). |
 | `DEVCLAW_RATE_LIMIT_MAX_PAUSE_S` | `3600` | Upper bound on the pause length. |
+| `DEVCLAW_SKILL_LIBRARY` | `/opt/devclaw/skill-library` | Host-side curated skill library; `Goal.skills_required` slugs are provisioned from here into the workspace's `.agent/skills/`. The repo ships the curated content in `skill-library/`. Missing library degrades soft (warning, not rejection). |
 
 ## Engine selection
 
