@@ -37,7 +37,7 @@ Five distinct layers below the user, and only one of them is an agent harness in
 | Layer | What it is | Harness? |
 |---|---|---|
 | **MCP surface** (`devclaw.server`) | HTTP/stdio protocol exposing tools (`create_goal`, `get_goal`, `answer_unknowns`, …) | No — protocol |
-| **GoalService + heartbeat** (`devclaw.goal`) | State machine + scheduler; owns lifecycle (`investigating → firming → executing`); ticks every ~15 min; reads on-disk state and decides the next move per goal | No — orchestrator |
+| **GoalService + heartbeat** (`devclaw.goal`) | State machine + scheduler; owns lifecycle (`investigating → firming → executing`); ticks every ~15 min; reads goal state (SQLite, since Tranche 1 — `.md`/`.yaml` files are generated views) and decides the next move per goal | No — orchestrator |
 | **Cognition callers** (firming, decomposer, planner, evaluator, summarizer) | One-shot `claude --print` invocations with baked prompts + goal state; return YAML the loop parses | Borderline — Claude as a reasoning API, not an interactive agent |
 | **TaskQueue + sandcastle engine** (`devclaw.engine`) | Receives "do task X" → `docker run devclaw-sandbox(-dotnet):local <payload>`; streams stdout events back | No — container launcher |
 | **Worker harness** (`runner.py` → `claude-agent-acp` → `claude-code` CLI + MCP servers, e.g. Playwright MCP) | The actual agent turn-loop. Tool calls (Read/Edit/Bash/browser), edits the repo, commits, exits | **Yes — the only true harness in the stack** |
@@ -95,7 +95,7 @@ devclaw/
 │   ├── tick.py         #   one heartbeat: check → plan → evaluate → dispatch → done-gate
 │   ├── planner.py      #   next-action cognition (one claude --print per tick past the gate)
 │   ├── evaluator.py    #   direction evaluation, grounded in deliveries.md
-│   ├── store.py        #   on-disk mind: goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md
+│   ├── store.py        #   GoalStore — goal.yaml (facts) + SQLite status/steering/log/deliveries/docs
 │   ├── engine.py       #   in-process dispatch into the task queue
 │   ├── research.py · merge.py · notify.py · summary.py · models.py
 ├── engine/             # everything that EXECUTES the work:
@@ -158,11 +158,13 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 | Tool | Does |
 |---|---|
 | `create_goal(goal_id, objective, workspace_dir, done_when, backlog, …)` | Register a durable goal DevClaw drives over time |
+| `verify_goal(objective, workspace_dir, …)` | Pre-flight check — same admission validations as `create_goal`, no side effects; previews reject/warn conditions |
 | `get_goal(goal_id)` | Objective, phase, what's in flight, the latest direction verdict, recent log |
 | `list_goals()` | All goals + phase + direction |
 | `steer_goal(goal_id, message)` | Correct/redirect — recorded as steering, honored on the next tick |
+| `evaluate_goal(goal_id)` | Force an on-demand, artifact-grounded direction evaluation now (not just on the periodic cadence) |
 | `tail_goal(goal_id, …)` | Deep read-only feed: deliveries tail (what each action actually shipped) + recent events |
-| `answer_goal(goal_id, answer)` | Reply to a goal waiting on the owner (Telegram answer channel for scope questions) |
+| `answer_unknowns(goal_id, answers)` | Owner's answers to the firming phase's named unknowns (`{unknown_id: answer_text}`, must cover every open one) — advances firming toward `executing` |
 | `cancel_goal(goal_id)` | Permanently stop a goal — terminal `cancelled`, tears down any in-flight action |
 
 **Lifecycle:** every goal moves through `investigating → firming → executing`. Investigation produces a repo discovery brief; firming sharpens the goal into a typed contract (success criteria + unknowns + conventions + blockers + stub policy); executing runs the cascade.

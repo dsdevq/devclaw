@@ -11,8 +11,8 @@ This doc complements [`architecture-v2.md`](./architecture-v2.md) (the "why Open
 | # | Layer | Code | Owns |
 |---|---|---|---|
 | 1 | **MCP surface** | `devclaw/server/` | HTTP/stdio transport, MCP tool decorators, auth middleware, dashboard. Pure protocol. |
-| 2 | **Orchestrator** (GoalService + heartbeat) | `devclaw/goal/` | State machine, lifecycle (`investigating → firming → executing`), scheduler, persistence. Owns goal state on disk. |
-| 3 | **Cognition callers** | `devclaw/goal/planner.py`, `decomposer.py`, `evaluator.py`, `firming.py`, `summary.py` | One-shot `claude --print` invocations with baked prompts + goal state; return parsed YAML. |
+| 2 | **Orchestrator** (GoalService + heartbeat) | `devclaw/goal/` | State machine, lifecycle (`investigating → firming → executing`), scheduler, persistence. Owns goal state (SQLite-backed since Tranche 1). |
+| 3 | **Cognition callers** | `devclaw/goal/planner.py`, `decomposer.py`, `evaluator.py`, `phases/firming.py`, `summary.py`, `world_research.py`; `devclaw/elicitation.py` (scope_grill) | One-shot `claude --print` invocations with baked prompts + goal state; return parsed YAML. |
 | 4 | **TaskQueue + Engine** | `devclaw/task_queue.py`, `devclaw/engine/` | Receives task dispatches, runs them (in sandbox / on host / in stub), streams events back. |
 | 5 | **Worker harness** | `openhands-runner/runner.py` (inside sandbox image) | The agent turn-loop: `claude-agent-acp` → `claude-code` CLI + tools + MCP. Only true agent harness in the stack. |
 
@@ -31,11 +31,11 @@ Above layer 1: humans + OpenClaw waiter. Below layer 5: Claude (the LLM, via Pro
 
 ### Layer 2 — Orchestrator
 
-- **Public surface:** `GoalService` methods (`create_goal`, `get_goal`, `answer_unknowns`, `steer_goal`, `cancel_goal`, …). Plus the heartbeat loop owned by `serve_loop`.
-- **Internal state:** `GoalStore` (yaml/markdown on disk) + `StateStore` (SQLite for the task queue's events).
+- **Public surface:** `GoalService` methods (`create_goal`, `get_goal`, `answer_unknowns`, `steer_goal`, `evaluate_goal`, `cancel_goal`, …). Plus the heartbeat loop owned by `serve_loop`.
+- **Internal state:** `GoalStore`, backed by the goal-state tables inside the SAME `StateStore`/`devclaw.db` the task queue uses (`goal_status`, `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs`, `goal_phase_history` — Tranche 1). `goal.yaml` (facts), `spec.md`, `discovery.md` stay plain files; `STATUS.md` / `log.md` / `inbox.md` / `deliveries.md` / `checklist.yaml` / `firmed-draft.yaml` are generated **views** rewritten after every write, for human reading and rollback — never read back for decisions.
 - **Allowed to call:** layer 3 (cognition callers) and layer 4 (via the in-process engine).
-- **Forbidden:** spawning sandbox containers directly (must go through `TaskQueue` + `Engine`); calling `claude` directly (must go through a cognition caller).
-- **Tested by:** `tests/test_goal_*.py` (e.g. `test_goal_tick.py`, `test_goal_engine.py`, `test_goal_reconcile.py`), `tests/test_firming_handler.py`, `tests/test_goal_tick_firming.py` — drive single ticks with stubbed cognition + stubbed engine.
+- **Forbidden:** spawning sandbox containers directly (must go through `TaskQueue` + `Engine`); calling `claude` directly (must go through a cognition caller); mutating `goal_status`'s phase/lifecycle/in_flight outside `GoalStore.transition()` (the CAS'd choke point in `devclaw/goal/transitions.py`).
+- **Tested by:** `tests/test_goal_*.py` (e.g. `test_goal_tick.py`, `test_goal_engine.py`, `test_goal_reconcile.py`), `tests/test_firming_handler.py`, `tests/test_goal_tick_firming.py` — drive single ticks with stubbed cognition + stubbed engine. The SQLite-backed state substrate itself: `tests/test_goal_state.py` (the `GoalState` tables), `tests/test_goal_store.py` + `tests/test_goal_store_checklist.py` (`GoalStore`'s row-first/view-mirror behavior, migration from legacy `.md`/`.yaml`), `tests/test_goal_transitions.py` (the `LEGAL` table + CAS/legality guards in isolation).
 
 ### Layer 3 — Cognition callers
 
@@ -68,7 +68,7 @@ Above layer 1: humans + OpenClaw waiter. Below layer 5: Claude (the LLM, via Pro
 ### Layer-separation invariants
 
 1. **No cross-layer reach-through.** Layer 1 must not call layer 3 or 4 directly. Layer 2 must not bypass layer 4 to spawn containers itself. The chain is strict: 1 → 2 → 3 (for cognition) or 1 → 2 → 4 → 5 (for execution).
-2. **Single source of truth per state.** Goal state lives in `GoalStore` (disk yaml/markdown). Task state lives in `StateStore` (SQLite). Each is owned by one layer (layer 2). No caching of either in upstream layers.
+2. **Single source of truth per state.** Goal state lives in `GoalStore`, SQLite-backed via `GoalState` inside the shared `StateStore`/`devclaw.db` (Tranche 1) — `.md`/`.yaml` files are generated views, not read back for decisions. Task/program state lives in the same `StateStore`. Each is owned by one layer (layer 2). No caching of either in upstream layers.
 3. **Engines are pure async callables.** An engine implementation may not assume which orchestrator called it. It receives an `EngineRequest`, returns an `EngineResult`. No back-channel.
 4. **Cognition callers are stateless.** Every call gets the full prompt + state it needs as input. No process-level memory between calls.
 
@@ -83,8 +83,8 @@ The worker harness layer is the *only* place model-coupling is allowed. Everythi
 
 ### Persistence invariants
 
-1. **Goals are durable.** `GoalStore` writes go through fsync via yaml.safe_dump + atomic file writes; the heartbeat is the only owner of mutations once a goal is created.
-2. **Tasks are append-only events.** `StateStore` is an event log; mutations are appends. State views (program/task status) are projections.
+1. **Goals are durable.** `GoalStore`'s phase/lifecycle/in_flight changes go through `GoalStore.transition()` — a CAS'd (compare-and-swap on stored `(state, version)`) write inside a `StateStore` transaction, legality-checked against the `LEGAL` table in `devclaw/goal/transitions.py`. This is NOT heartbeat-exclusive: `steer_goal` and `cancel_goal` write directly from the MCP-tool call path (layer 1→2), concurrently with the heartbeat — the CAS exists precisely to stop one writer's stale snapshot from clobbering the other's write (a mismatch raises `TransitionConflict`, abandoning that write cleanly). Generated `.md`/`.yaml` views are written atomically (tmp-file + `os.replace`) immediately after each transaction commits.
+2. **Tasks are append-only events.** `StateStore`'s `events` table is an append-only log; mutations are appends. State views (program/task status) are projections. (Goal-state tables in the SAME `StateStore` are not all append-only — `goal_status`/`goal_docs` are mutable single-row-per-key, CAS'd or upserted; `goal_steering`/`goal_log`/`goal_deliveries`/`goal_phase_history` are append-only, matching their `.md` view's append-only shape.)
 3. **Hooks may write best-effort.** Pre-run / post-run hooks may write scratch files (`.devclaw-pre-head`); post-run is responsible for cleaning them up. No hook output is durable beyond `hook_warnings` in the runner result.
 
 ---
@@ -110,7 +110,7 @@ Anything that requires a real `claude` call or real `docker run` is an integrati
 | Component | Implementations today | Proof of replaceability |
 |---|---|---|
 | Engine (layer 4) | 4 (sandcastle, claude_sdk, host, stub) | ✅ strong |
-| Notifier | 3 (HTTP, Null, presumably one more) | ✅ ok |
+| Notifier | 2 (`HttpNotifier`, `NullNotifier`) | ✅ ok |
 | Cognition | 2 (Claude subprocess, Stub) | ⚠ weak — only the stub-vs-real axis |
 | Worker harness (layer 5) | 1 (claude-agent-acp + claude-code) | ❌ no proof — model-agnostic invariants exist but unenforced |
 | Phase handler | 1 (FirmingHandler) | n/a — registry exists, only one handler so far |

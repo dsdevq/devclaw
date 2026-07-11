@@ -45,13 +45,16 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │  long-lived; runs as `node`; needs docker.sock + GID 990    │  ◄── perm-denied if .env
      │  │                                                             │      LIFEKIT_DOCKER_GID
      │  │  Step A — @mcp.tool create_goal runs:                       │      missing (2026-06-25 bug)
-     │  │     • write /var/lib/devclaw/goals/<id>/{goal.yaml,         │
-     │  │       STATUS.md, log.md, deliveries.md}                     │
+     │  │     • write /var/lib/devclaw/goals/<id>/goal.yaml (facts,   │
+     │  │       plain file) + the first goal_status SQLite row        │
+     │  │       (STATUS.md is rendered alongside as a generated view) │
      │  │     • lifecycle="investigating", phase="idle"               │
      │  │     • return {goal_id, ...} to the waiter                   │
      │  │                                                             │
      │  │  Step B — heartbeat (15-min loop in goal/service.py):       │
-     │  │     • read STATUS.md + inbox.md (cheap, 0 tokens)           │
+     │  │     • read goal_status + unread goal_steering rows          │
+     │  │       (SQLite, cheap, 0 tokens — STATUS.md/inbox.md are     │
+     │  │       the generated views of the same rows, since T1)       │
      │  │     • if phase==idle and no in_flight:                      │
      │  │         planner.py invokes `claude --print` ◄────┐          │
      │  │           - reads inbox steering + log tail      │          │
@@ -150,9 +153,10 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │     • gh pr create  (conventional commit + diffstat body)   │                      │
      │  │     • record PR URL                                         │                      │
      │  │                                                             │                      │
-     │  │  Step K — append to deliveries.md (grounded evidence        │                      │
-     │  │     for the direction evaluator).                           │                      │
-     │  │     Save STATUS, set in_flight=null, last_progress_at=now.  │                      │
+     │  │  Step K — append a goal_deliveries row (grounded evidence   │                      │
+     │  │     for the direction evaluator; deliveries.md mirrors it). │                      │
+     │  │     Transition goal_status: in_flight=null,                 │                      │
+     │  │     last_progress_at=now (STATUS.md view rewritten after).  │                      │
      │  │                                                             │                      │
      │  │  Step L — notify (notify_url POST to notify-relay:8090):    │                      │
      │  │     → Telegram message to Denys with PR link + gate verdict │                      │
