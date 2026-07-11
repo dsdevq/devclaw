@@ -51,6 +51,12 @@ async def test_dispatch_feature_then_poll_terminal(wired):
     action = Action(engine="devclaw", tool="implement_feature", goal="add /health", open_pr=False)
     ref = await engine.dispatch(action, _goal(), notify_url="")
     assert ref.ref_kind == "task"
+    # PR7: dispatch() no longer auto-pumps (submit(pump=False)) — it only
+    # creates the row, so the goal tick can wrap it in an atomic
+    # transaction. Direct-dispatch callers (like this test) now kick the
+    # queue explicitly, same as the goal tick does right after its dispatch
+    # transaction commits.
+    engine.kick()
     await queue.drain()
     poll = await engine.poll(ref)
     assert poll.terminal is True
@@ -90,6 +96,9 @@ async def test_dispatch_program_then_poll(wired, tmp_path):
     action = Action(engine="devclaw", tool="start_program", goal="build the thing", open_pr=True)
     ref = await engine.dispatch(action, _goal(str(repo)), notify_url="")
     assert ref.ref_kind == "program"
+    # PR7: dispatch() no longer auto-kicks off planning (submit_program(pump=
+    # False)) — see the note in test_dispatch_feature_then_poll_terminal above.
+    engine.kick()
     await queue.drain()
     poll = await engine.poll(ref)
     assert poll.status == "done"

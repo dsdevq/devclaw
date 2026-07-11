@@ -110,8 +110,9 @@ state_of = derive_state
 #: phase=blocked+no-ref goal to EXECUTING, and `_handle_executing` still plans
 #: when unread steering exists — so a blocked goal can dispatch, propose done,
 #: sleep, or re-block, exactly like an executing_idle one. `BLOCKED,
-#: DISPATCH_ACTION` also covers `_readopt_orphaned_program` re-adopting a lost
-#: ref from a blocked goal.
+#: DISPATCH_ACTION` also covers `tick._readopt_orphaned_ref` (PR7's startup
+#: sweep; formerly the per-tick `_readopt_orphaned_program`) re-adopting a
+#: lost ref from a blocked goal.
 LEGAL: dict[tuple[State, Event], frozenset[State]] = {
     (State.INVESTIGATING_IDLE, Event.DISPATCH_DISCOVERY): frozenset({State.DISCOVERY_IN_FLIGHT}),
     (State.INVESTIGATING_IDLE, Event.RESOLVE_INVESTIGATION): frozenset(

@@ -53,6 +53,17 @@ class InProcessEngine:
         return getattr(self._queue, "engine_kind", "unknown")
 
     async def dispatch(self, action: Action, goal: Goal, notify_url: str) -> InFlight:
+        """Dispatch ONE action. ``pump=False`` on both submit calls (PR7 —
+        the dispatch/pump split): this method runs INSIDE the goal tick's
+        atomic dispatch transaction (see ``tick._run_atomic``), which holds
+        the shared StateStore's lock for its whole extent. The row-creation
+        write joins that transaction (and rolls back with it on a CAS
+        conflict or a later raise); it must NOT also claim + launch — that
+        synchronously mutates OTHER, unrelated pending rows as part of the
+        same atomic unit and spawns real background execution for them that
+        a rollback cannot undo (a phantom container running against a row
+        that no longer exists). The caller (tick.py) explicitly kicks the
+        queue via ``kick()`` AFTER its transaction commits."""
         ws = goal.workspace_dir
         nu = notify_url or None
         if action.tool == "start_program":
@@ -68,6 +79,7 @@ class InProcessEngine:
                 open_pr=action.open_pr,
                 verify_cmd=action.verify_cmd or goal.verify_cmd,
                 parent_goal_id=goal.id,
+                pump=False,
             )
             return InFlight("devclaw", "start_program", program_id, "program", action.goal)
         if action.tool in ("implement_feature", "fix_bug", "review_repository"):
@@ -83,9 +95,19 @@ class InProcessEngine:
                 deliver=False if is_review else action.open_pr,
                 title=None if is_review else action.title,
                 parent_goal_id=goal.id,
+                pump=False,
             )
             return InFlight("devclaw", action.tool, task_id, "task", action.goal)
         raise GoalEngineError(f"unknown engine tool: {action.tool}")
+
+    def kick(self) -> None:
+        """Nudge the task queue to claim + launch any pending row NOW, rather
+        than wait for its periodic pump (``TaskQueue.start_ticking``'s
+        ``TICK_SECONDS`` loop). Called by the goal tick AFTER its dispatch
+        transaction commits (see ``tick._engine_kick``) — a crash between
+        commit and kick is self-healing: the row is durably 'pending' either
+        way, and the queue's own heartbeat pumps it within one tick."""
+        self._queue.pump()
 
     async def poll(self, ref: InFlight) -> PollResult:
         if ref.ref_kind == "program":
@@ -94,12 +116,23 @@ class InProcessEngine:
 
     def latest_program_for_goal(self, goal_id: str) -> Optional[tuple[str, str]]:
         """(program_id, program_goal) of the goal's most recent program, or
-        None. The tick's orphaned-program reconcile uses this to rediscover a
-        program whose in-flight ref was lost from STATUS.md — without it a
-        crash mid-status-write silently divorces a goal from its own running
-        (or already-failed) program and the goal waits forever."""
+        None. The orphan sweep (``tick.sweep_orphaned_refs``) uses this to
+        rediscover a program whose in-flight ref was lost from STATUS.md —
+        without it a crash mid-status-write silently divorces a goal from
+        its own running (or already-failed) program and the goal waits
+        forever."""
         p = self._store.latest_program_for_goal(goal_id)
         return (p.id, p.goal) if p is not None else None
+
+    def latest_task_for_goal(self, goal_id: str) -> Optional[tuple[str, str, str]]:
+        """(task_id, task_goal, task_kind) of the goal's most recent task, or
+        None. Mirrors :meth:`latest_program_for_goal` — the orphan sweep's
+        finder for the TASK half of a lost in-flight ref (PR7 extends
+        re-adoption from programs-only to both). ``task_kind`` (e.g.
+        ``implement_feature``) is what the sweep uses to rebuild the
+        InFlight's ``tool`` field."""
+        t = self._store.latest_task_for_goal(goal_id)
+        return (t.id, t.goal, t.kind) if t is not None else None
 
     # ---- shared quota pause (same flag the task queue honours) --------------
     # The OAuth quota is account-wide, so the goal heartbeat and the task queue

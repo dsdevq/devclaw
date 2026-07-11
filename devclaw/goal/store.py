@@ -60,6 +60,12 @@ if TYPE_CHECKING:
 _FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 _DURATION = re.compile(r"^\s*(\d+)\s*([smhd])\s*$")
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+#: settle-line arrow scan for the lazy settlement seed (PR7) — the token
+#: immediately before " → " on a "- [ts] ... <token> → <status>" log line.
+#: Deliberately loose (matches ANY " x → y" substring) so it over-captures
+#: exactly what ``log_contains(f" {id} → ")`` used to answer True for —
+#: readopt/sweep decisions must be IDENTICAL on legacy goals either way.
+_SETTLE_ARROW_RE = re.compile(r" (\S+) → (\S+)")
 
 
 def parse_duration(s: str) -> int:
@@ -127,6 +133,16 @@ class GoalStore:
             state = StateStore(str(self._root / ".goal-state.db"))
         self._state = state
         self._goal_state = GoalState(self._state)
+        #: PR7 mirror discipline — file mirrors deferred by a mirror=False /
+        #: render_view=False write (or a transition()/save_status() call
+        #: that finds itself nested inside a caller-opened transaction())
+        #: land here instead of hitting disk immediately. goal_id ->
+        #: [("log", line) | ("delivery", block) | ("doc", filename, content)
+        #: | ("status", GoalStatus), ...], in write order. Deliberately dumb
+        #: (a plain dict of lists, no locking) — the tick is single-threaded
+        #: per goal, so there's no concurrent writer to guard against here.
+        #: See transaction()/render_mirrors()/discard_pending_mirrors().
+        self._pending_mirrors: "dict[str, list]" = {}
 
     # ---- discovery ---------------------------------------------------------
 
@@ -151,6 +167,96 @@ class GoalStore:
         tmp = d / f"{name}.tmp"
         tmp.write_text(text)
         os.replace(tmp, d / name)
+
+    # ---- transactions + mirror discipline (Tranche 1/PR7) ------------------
+    #
+    # transaction() lets tick.py group several row writes spanning MULTIPLE
+    # GoalStore calls (e.g. a dispatch's task/program creation + the status
+    # transition + the log row) into ONE atomic unit — a crash or CAS
+    # conflict anywhere inside rolls the WHOLE unit back. The rule this
+    # implies: a FILE mirror (log.md / deliveries.md / checklist.yaml /
+    # STATUS.md) must never be written while a transaction() opened here is
+    # still open, because a rollback can still undo the DB row it would be
+    # mirroring — a file written early would then show state the DB no
+    # longer has (the emergency-downgrade rail depends on files always
+    # matching the rolled-back DB). append_log/append_delivery/write_checklist
+    # accept mirror=False/render_view=False for exactly this: skip the file
+    # write and remember it in self._pending_mirrors instead.
+    # transition()/save_status()/force_block()/update_status_fields() do the
+    # SAME thing automatically for STATUS.md — they detect nesting via the
+    # shared StateStore's transaction depth (see _flush_or_defer_status_view)
+    # rather than taking their own mirror= parameter, since they're called
+    # from dozens of standalone (non-nested) sites tick-wide and only the
+    # NEW dispatch/settle sites ever nest them.
+
+    def transaction(self):
+        """Thin public passthrough to the shared StateStore's transaction().
+        Nested transaction() calls (this one, plus whatever GoalStore method
+        the caller invokes inside it) join the SAME atomic unit — one commit
+        or one rollback at the outermost exit."""
+        return self._state.transaction()
+
+    def render_mirrors(self, goal_id: str) -> None:
+        """Flush every mirror write deferred for ``goal_id`` (in the order
+        recorded) to disk, then clear the pending list. Idempotent — a no-op
+        when nothing is pending. Callers invoke this immediately AFTER their
+        own transaction() block commits (see the dispatch/settle sites in
+        tick.py); on the exception path they call discard_pending_mirrors
+        instead, never this."""
+        pending = self._pending_mirrors.pop(goal_id, None)
+        if not pending:
+            return
+        for item in pending:
+            kind = item[0]
+            if kind == "log":
+                _, line = item
+                d = self._dir(goal_id)
+                d.mkdir(parents=True, exist_ok=True)
+                path = d / "log.md"
+                if not path.exists():
+                    path.write_text(f"# {goal_id} — log\n\n")
+                with path.open("a") as fh:
+                    fh.write(f"{line}\n")
+            elif kind == "delivery":
+                _, block = item
+                d = self._dir(goal_id)
+                d.mkdir(parents=True, exist_ok=True)
+                path = d / "deliveries.md"
+                if not path.exists():
+                    path.write_text(f"# {goal_id} — deliveries (what each action shipped)\n\n")
+                with path.open("a") as fh:
+                    fh.write(block)
+            elif kind == "doc":
+                _, name, content = item
+                self._write_atomic(goal_id, name, content)
+            elif kind == "status":
+                _, status = item
+                self._write_status_view(goal_id, status)
+
+    def discard_pending_mirrors(self, goal_id: str) -> None:
+        """Drop any mirror writes deferred for ``goal_id`` WITHOUT rendering
+        them — the exception-path counterpart of render_mirrors(), called
+        when the transaction() they belonged to rolled back. Prevents an
+        abandoned tick's mirror lines from leaking into the NEXT successful
+        flush for the same goal."""
+        self._pending_mirrors.pop(goal_id, None)
+
+    def _flush_or_defer_status_view(self, goal_id: str, status: GoalStatus) -> None:
+        """Render STATUS.md now, UNLESS this write is nested inside a
+        caller-opened transaction() (the atomic dispatch/settle units): the
+        DB write hasn't actually committed at that point (StateStore joins
+        nested transaction() calls into one outer commit), so rendering the
+        file immediately would show state a rollback could still undo.
+        Deferred writes join the SAME pending-mirror list append_log /
+        append_delivery / write_checklist use — the caller's render_mirrors()
+        (called right after ITS OWN transaction() exits) flushes it, or
+        discard_pending_mirrors() drops it on the exception path. Standalone
+        (non-nested) callers — the overwhelming majority of call sites —
+        behave exactly as before: depth is 0, so this renders immediately."""
+        if self._state._txn_depth > 0:
+            self._pending_mirrors.setdefault(goal_id, []).append(("status", status))
+        else:
+            self._write_status_view(goal_id, status)
 
     # ---- goal (facts) ------------------------------------------------------
 
@@ -330,7 +436,9 @@ class GoalStore:
         # rollback path: reverting PR3 makes load_status read this file again
         # and recover the current state (a crash mid-write, container restart —
         # 2026-07-09 — left a truncated file that must not orphan in-flight work).
-        self._write_status_view(goal_id, status)
+        # Deferred (not written here) when this call is nested inside a
+        # caller-opened transaction() — see _flush_or_defer_status_view.
+        self._flush_or_defer_status_view(goal_id, status)
 
     def _load_status_for_cas(self, goal_id: str) -> GoalStatus:
         """The current row as a GoalStatus, or bare defaults when no row
@@ -369,10 +477,12 @@ class GoalStore:
 
         Only past both does this write (same shape as save_status: phase_history
         append when phase changed, then write_status, then the STATUS.md view
-        AFTER the transaction commits). Returns the ACTUAL stored object
-        (``new`` with ``state``/``version`` stamped) — callers MUST thread this
-        forward instead of reusing their pre-call snapshot (see tick.py's
-        "version threading rule").
+        AFTER the transaction commits — or DEFERRED, when this call is itself
+        nested inside a caller-opened ``transaction()`` (PR7's atomic dispatch/
+        settle units): see :meth:`_flush_or_defer_status_view`). Returns the
+        ACTUAL stored object (``new`` with ``state``/``version`` stamped) —
+        callers MUST thread this forward instead of reusing their pre-call
+        snapshot (see tick.py's "version threading rule").
 
         ``consume_steering`` (PR5): exact ``goal_steering`` row ids to mark
         consumed, INSIDE this same transaction, once past both guards. This
@@ -410,7 +520,7 @@ class GoalStore:
                 new, phase_history=history, state=target.value, version=fresh.version + 1,
             )
             self._goal_state.write_status(goal_id, written)
-        self._write_status_view(goal_id, written)
+        self._flush_or_defer_status_view(goal_id, written)
         return written
 
     def update_status_fields(self, goal_id: str, **fields) -> GoalStatus:
@@ -446,7 +556,7 @@ class GoalStore:
         with self._state.transaction():
             self._goal_state.update_columns(goal_id, fields)
         fresh = self.load_status(goal_id)
-        self._write_status_view(goal_id, fresh)
+        self._flush_or_defer_status_view(goal_id, fresh)
         return fresh
 
     def force_block(self, goal_id: str, blocked_on: str) -> bool:
@@ -484,7 +594,7 @@ class GoalStore:
                 new, phase_history=history, state=State.BLOCKED.value, version=fresh.version + 1,
             )
             self._goal_state.write_status(goal_id, written)
-        self._write_status_view(goal_id, written)
+        self._flush_or_defer_status_view(goal_id, written)
         return True
 
     def _write_status_view(self, goal_id: str, status: GoalStatus) -> None:
@@ -548,7 +658,7 @@ class GoalStore:
             return
         self._goal_state.append_log_rows(goal_id, lines, _now_ms())
 
-    def append_log(self, goal_id: str, message: str) -> None:
+    def append_log(self, goal_id: str, message: str, *, mirror: bool = True) -> None:
         """Append one log line. Row-first, then the log.md mirror — the
         OPPOSITE order from ``append_steering``'s file-first, and
         deliberately so: inbox.md is a hand-append INPUT that self-heals via
@@ -559,10 +669,21 @@ class GoalStore:
         (``recent_log``/``log_contains``) forever, while a row without a
         mirror line is merely a cosmetically stale (but harmless) log.md
         after a crash between the two writes. Rows are truth, so the row
-        write must never be the one left dangling."""
+        write must never be the one left dangling.
+
+        ``mirror=False`` (PR7): skip the file append and remember the
+        rendered line in ``self._pending_mirrors[goal_id]`` instead — for
+        callers writing INSIDE an open ``transaction()`` (the atomic
+        dispatch/settle units), where a file write must never race a
+        possible rollback. The caller flushes via ``render_mirrors()`` after
+        its transaction commits, or drops via ``discard_pending_mirrors()``
+        on the exception path."""
         self._ingest_log(goal_id)
         line = f"- [{self._now().isoformat(timespec='seconds')}] {message}"
         self._goal_state.append_log_row(goal_id, line, _now_ms())
+        if not mirror:
+            self._pending_mirrors.setdefault(goal_id, []).append(("log", line))
+            return
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "log.md"
@@ -572,9 +693,10 @@ class GoalStore:
             fh.write(f"{line}\n")
 
     def log_contains(self, goal_id: str, needle: str) -> bool:
-        """Whether the goal's full log mentions ``needle``. Used by the
-        orphaned-program reconcile to tell "settled and recorded" apart from
-        "the in-flight ref was lost before the result was ever seen"."""
+        """Whether the goal's full log mentions ``needle``. Kept for other
+        callers/tests — the orphan-readopt guard that used to be its main
+        production caller moved onto :meth:`is_settled` in PR7 (a future
+        PR8 removes this method once nothing else needs it)."""
         self._ingest_log(goal_id)
         return self._goal_state.log_contains_row(goal_id, needle)
 
@@ -584,6 +706,60 @@ class GoalStore:
         and migrated goals."""
         self._ingest_log(goal_id)
         return "\n".join(self._goal_state.recent_log_rows(goal_id, n))
+
+    # ---- settlements (settled-and-recorded truth — PR7) --------------------
+    #
+    # goal_settlements has no corresponding .md view — these are plain row
+    # writes/reads. record_settlement joins whichever transaction() (if any)
+    # is open; is_settled lazy-seeds from historical goal_log rows first so
+    # a goal that settled work before PR7 ever existed answers identically
+    # to the old ``log_contains(f" {id} → ")`` guard.
+
+    def record_settlement(
+        self, goal_id: str, *, ref_id: str, ref_kind: "str | None", status: "str | None",
+    ) -> bool:
+        """Record ONE settled ref. INSERT OR IGNORE against
+        ``UNIQUE(goal_id, ref_id)`` — a settle retried after a
+        ``TransitionConflict`` rollback re-records the identical row, no
+        duplicate. Row-only; no file mirror to defer."""
+        return self._goal_state.record_settlement(goal_id, ref_id, ref_kind, status, _now_ms())
+
+    def is_settled(self, goal_id: str, ref_id: str) -> bool:
+        """Whether ``ref_id`` has a recorded settlement for ``goal_id`` — the
+        orphan sweep's "settled and recorded" vs. "lost mid-flight" guard.
+        Lazy-seeds from historical log rows first (see
+        :meth:`_seed_settlements`) so legacy goals answer identically to the
+        pre-PR7 ``log_contains(f" {id} → ")`` check."""
+        self._seed_settlements(goal_id)
+        return self._goal_state.has_settlement(goal_id, ref_id)
+
+    def _seed_settlements(self, goal_id: str) -> None:
+        """One-shot lazy seed of ``goal_settlements`` from historical
+        ``goal_log`` rows — the migration path for a goal that settled work
+        before ``goal_settlements`` was ever read. Guarded on ZERO existing
+        settlement rows for the goal (real or seeded) — never re-seeds once
+        anything has been recorded.
+
+        Intentionally over-captures: :data:`_SETTLE_ARROW_RE` matches ANY
+        ``... <token> → <status>`` substring on a log line and seeds a
+        settlement for ``<token>``, exactly matching what
+        ``log_contains(f" {id} → ")`` used to answer True for — so
+        readopt/sweep decisions are IDENTICAL on legacy goals either way. A
+        fresh goal (no log content at all) seeds nothing; the guard stays
+        open until its first REAL settlement row."""
+        if self._goal_state.has_any_settlements(goal_id):
+            return
+        self._ingest_log(goal_id)  # legacy log.md → rows first, so the scan is complete
+        rows = self._goal_state.all_log_rows(goal_id)
+        if not rows:
+            return
+        now = _now_ms()
+        for line in rows:
+            m = _SETTLE_ARROW_RE.search(line)
+            if not m:
+                continue
+            ref_id, status = m.group(1), m.group(2)
+            self._goal_state.record_settlement(goal_id, ref_id, None, status, now)
 
     # ---- deliveries (grounded evidence for the evaluator) — PR6: rows are
     # the source of truth, deliveries.md the mirror. Same shape as log.
@@ -637,7 +813,8 @@ class GoalStore:
         return sections
 
     def append_delivery(
-        self, goal_id: str, instruction: str, body: str, *, ref_id: "str | None" = None,
+        self, goal_id: str, instruction: str, body: str, *,
+        ref_id: "str | None" = None, mirror: bool = True,
     ) -> None:
         """Append a grounded record of what one action actually shipped — the
         agent's own summary + the gate verdict + the PR url, captured in-process
@@ -652,7 +829,12 @@ class GoalStore:
         against a ref, e.g. tests) always inserts, matching pre-PR6
         behavior exactly. Row-first, then the file mirror, ONLY when a row
         was actually inserted — a duplicate ref_id must never produce a
-        duplicate section in the view (see ``GoalState.append_delivery_row``)."""
+        duplicate section in the view (see ``GoalState.append_delivery_row``).
+
+        ``mirror=False`` (PR7): once a row IS inserted, skip the file append
+        and remember the rendered section in ``self._pending_mirrors`` —
+        same deferral contract as :meth:`append_log`, for callers writing
+        inside an open ``transaction()``."""
         self._ingest_deliveries(goal_id)
         ts = self._now().isoformat(timespec="seconds")
         block = f"## [{ts}] {instruction}\n\n{body.strip()}\n\n"
@@ -661,6 +843,9 @@ class GoalStore:
         )
         if not inserted:
             return  # duplicate ref_id — silent idempotency is the point
+        if not mirror:
+            self._pending_mirrors.setdefault(goal_id, []).append(("delivery", block))
+            return
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         path = d / "deliveries.md"
@@ -688,17 +873,28 @@ class GoalStore:
     # PR6: goal_docs (kind "checklist") is the source of truth; checklist.yaml
     # is a generated view, same shape as STATUS.md/log.md/deliveries.md.
 
-    def write_checklist(self, goal_id: str, checklist: "Checklist") -> None:  # type: ignore[name-defined]
+    def write_checklist(
+        self, goal_id: str, checklist: "Checklist", *, render_view: bool = True,  # type: ignore[name-defined]
+    ) -> None:
         """Persist the decomposer's full output. Writes the ``goal_docs`` row
         FIRST (the source of truth the per-tick planner picks actions from;
         mutable across ticks — settle hook + steer can rewrite items), then
         the ``checklist.yaml`` view via the same atomic tmp+os.replace
         treatment ``STATUS.md`` gets — the rollback path, and a legible
-        artifact to read without a DB client."""
+        artifact to read without a DB client.
+
+        ``render_view=False`` (PR7): skip the file write and remember the
+        rendered content in ``self._pending_mirrors`` — same deferral
+        contract as :meth:`append_log`, for callers (the dispatch hook's
+        in_flight flag, a settle's checklist update) writing inside an open
+        ``transaction()``."""
         from .checklist import dump_checklist
 
         content = dump_checklist(checklist)
         self._goal_state.write_doc(goal_id, "checklist", content, _now_ms())
+        if not render_view:
+            self._pending_mirrors.setdefault(goal_id, []).append(("doc", "checklist.yaml", content))
+            return
         self._write_atomic(goal_id, "checklist.yaml", content)
 
     def read_checklist(

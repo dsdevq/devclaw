@@ -722,7 +722,7 @@ class StateStore:
 
     def latest_program_for_goal(self, goal_id: str) -> Optional[Program]:
         """The most recent program dispatched by ``goal_id`` (any status).
-        Read by the goal tick's orphaned-program reconcile: if this program's
+        Read by the goal layer's startup orphan sweep: if this program's
         result never made it into the goal's log, the goal re-adopts it."""
         with self._lock:
             row = self._db.execute(

@@ -449,7 +449,21 @@ class TaskQueue:
         deliver: bool = False,
         title: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        pump: bool = True,
     ) -> str:
+        """Create a task row (status 'pending') and, by default, immediately
+        reconcile execution against it (claim + launch, up to the caps).
+
+        ``pump=False`` (PR7 — the dispatch/pump split): create the row ONLY,
+        no claim, no launch. ``_pump()`` synchronously claims PENDING work —
+        including UNRELATED tasks — and spawns real ``asyncio`` execution for
+        it; a caller that wraps ``submit()`` in its own atomic unit (the goal
+        heartbeat's dispatch transaction) cannot let that unit's eventual
+        rollback leave a phantom container running against a row that no
+        longer exists. ``pump=False`` callers are responsible for pumping
+        later (``pump()``/``kick()``, or simply the queue's own periodic
+        ``start_ticking`` heartbeat, which self-heals a missed pump within
+        one ``TICK_SECONDS``)."""
         task_id = str(uuid.uuid4())
         self._store.create_task(
             id=task_id,
@@ -462,7 +476,8 @@ class TaskQueue:
             title=title,
             parent_goal_id=parent_goal_id,
         )
-        self._pump()
+        if pump:
+            self._pump()
         return task_id
 
     def submit_program(
@@ -474,6 +489,7 @@ class TaskQueue:
         open_pr: bool = False,
         verify_cmd: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        pump: bool = True,
     ) -> str:
         """Submit a program the decomposer will plan into child tasks.
 
@@ -486,6 +502,14 @@ class TaskQueue:
         activity-timeline program pushed straight to main because the flags
         stopped at ``submit_program`` and never reached child ``create_task``
         calls.
+
+        ``pump=False`` (PR7 — see :meth:`submit`): create the program row
+        ONLY — no planner kickoff (no ``_planning`` bookkeeping, no
+        ``_plan_and_start`` spawn). The row lands 'planning' with zero
+        tasks, which the EXISTING reconcile-from-DB-state logic in
+        :meth:`_pump` already treats as "the planner never started (or
+        died before persisting) — kick it off" — the same recovery path a
+        crash mid-plan takes, reused here on purpose rather than duplicated.
         """
         program_id = str(uuid.uuid4())
         self._store.create_program(
@@ -493,9 +517,19 @@ class TaskQueue:
             notify_url=notify_url, open_pr=open_pr, verify_cmd=verify_cmd,
             parent_goal_id=parent_goal_id,
         )
-        self._planning.add(program_id)
-        self._spawn(self._plan_and_start(program_id, workspace_dir, goal))
+        if pump:
+            self._planning.add(program_id)
+            self._spawn(self._plan_and_start(program_id, workspace_dir, goal))
         return program_id
+
+    def pump(self) -> None:
+        """Public wrapper over the reconcile-from-DB-state core (PR7's
+        dispatch/pump split). Callers that submitted with ``pump=False``
+        invoke this AFTER their own atomic unit commits — e.g.
+        ``InProcessEngine.kick()``, called by the goal heartbeat right after
+        its dispatch transaction commits. Idempotent + cheap-idle-guarded,
+        same as every other ``_pump()`` call site."""
+        self._pump()
 
     # ---- crash recovery + heartbeat -------------------------------------
 

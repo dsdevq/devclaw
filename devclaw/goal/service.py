@@ -32,7 +32,7 @@ from .evaluator import ClaudeCaller
 from .models import Goal, GoalStatus
 from .notify import HttpNotifier, Notifier, NullNotifier
 from .store import GoalStore
-from .tick import AUTODEPLOY_ENABLED, EVAL_EVERY, VERIFY_DONE, tick_all, tick_goal
+from .tick import AUTODEPLOY_ENABLED, EVAL_EVERY, VERIFY_DONE, sweep_orphaned_refs, tick_all, tick_goal
 from .transitions import Event
 from ..loom import trace as _trace
 from ..state_store import StateStore
@@ -336,6 +336,22 @@ class GoalService:
             f"({n} goal(s))\n"
         )
         assert self._wake is not None
+        # Once-per-service-start orphan sweep (Tranche 1/PR7): re-adopts a
+        # goal's lost in-flight task/program ref (STATUS.md truncated by a
+        # crash mid-write, or leftover state from a pre-PR7 build). PR7's
+        # atomic dispatch makes losing a ref mid-flight structurally
+        # impossible on THIS build going forward, so this no longer needs to
+        # run every tick — see tick.sweep_orphaned_refs / _readopt_orphaned_ref.
+        # A sweep crash must not kill the heartbeat, same as a tick crash.
+        try:
+            swept = await sweep_orphaned_refs(self._goal_store, self._engine)
+            if swept:
+                sys.stderr.write(
+                    f"goal-layer: startup sweep re-adopted {len(swept)} orphaned "
+                    f"ref(s): {swept}\n"
+                )
+        except Exception as exc:  # noqa: BLE001 — a sweep crash must not kill the loop
+            sys.stderr.write(f"goal-layer: startup sweep crashed: {exc}\n")
         while True:
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self._cfg.tick_seconds)

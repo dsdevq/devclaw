@@ -627,16 +627,31 @@ class GoalState:
 
     def log_contains_row(self, goal_id: str, needle: str) -> bool:
         """Whether any row's ``message`` contains ``needle`` — the row-backed
-        read behind :meth:`GoalStore.log_contains` (the orphaned-program
-        readopt guard). Uses ``instr(message, ?) > 0`` rather than ``LIKE``
-        to dodge ``%``/``_`` escaping — ``needle`` here is caller-built text
-        (e.g. a program id), never a curated LIKE pattern."""
+        read behind :meth:`GoalStore.log_contains` (kept for other callers;
+        the orphan-readopt guard moved onto :meth:`has_settlement` in PR7).
+        Uses ``instr(message, ?) > 0`` rather than ``LIKE`` to dodge
+        ``%``/``_`` escaping — ``needle`` here is caller-built text (e.g. a
+        program id), never a curated LIKE pattern."""
         with self._store._lock:
             row = self._store._db.execute(
                 "SELECT 1 FROM goal_log WHERE goal_id = ? AND instr(message, ?) > 0 LIMIT 1",
                 (goal_id, needle),
             ).fetchone()
         return row is not None
+
+    def all_log_rows(self, goal_id: str) -> "list[str]":
+        """Every ``message`` for ``goal_id``, in natural (ascending) order —
+        unlike :meth:`recent_log_rows` (bounded tail), this reads the FULL
+        history. Used by :meth:`GoalStore._seed_settlements`'s one-shot scan,
+        which needs to see every historical settle line, not just the recent
+        tail, to seed ``goal_settlements`` identically to what the old
+        ``log_contains(f" {id} → ")`` guard used to answer."""
+        with self._store._lock:
+            rows = self._store._db.execute(
+                "SELECT message FROM goal_log WHERE goal_id = ? ORDER BY id ASC",
+                (goal_id,),
+            ).fetchall()
+        return [r["message"] for r in rows]
 
     # ---- goal_deliveries (grounded evidence — deliveries.md today, PR6) ----
     #
@@ -750,6 +765,55 @@ class GoalState:
                 (goal_id, kind),
             ).fetchone()
         return row["content"] if row else None
+
+    # ---- goal_settlements (settled-and-recorded truth — PR7) --------------
+    #
+    # One row per settled in-flight ref. Table exists since PR2 (created
+    # empty); PR7 is the first thing that reads/writes it. No file mirror —
+    # there's no settlements.md view, so these are plain row writes that
+    # simply join whichever transaction() (if any) is open, same as every
+    # other GoalState write.
+
+    def has_settlement(self, goal_id: str, ref_id: str) -> bool:
+        """Whether ``ref_id`` has a recorded settlement for ``goal_id`` — the
+        row-backed replacement for the old ``log_contains(f" {id} → ")``
+        string-match guard."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_settlements WHERE goal_id = ? AND ref_id = ? LIMIT 1",
+                (goal_id, ref_id),
+            ).fetchone()
+        return row is not None
+
+    def has_any_settlements(self, goal_id: str) -> bool:
+        """Whether ANY settlement row exists yet for ``goal_id`` — the
+        lazy-seed guard :meth:`GoalStore._seed_settlements` uses so the
+        historical-log scan runs at most once per goal."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_settlements WHERE goal_id = ? LIMIT 1", (goal_id,)
+            ).fetchone()
+        return row is not None
+
+    def record_settlement(
+        self, goal_id: str, ref_id: str, ref_kind: "str | None", status: "str | None",
+        settled_at_ms: int,
+    ) -> bool:
+        """INSERT OR IGNORE one settlement row. Idempotent against
+        ``UNIQUE(goal_id, ref_id)`` — a settle txn retried after a
+        TransitionConflict rollback (or the lazy-seed re-scanning a line
+        whose token collides with a real settlement already recorded) is a
+        silent no-op, same dedup shape as :meth:`append_delivery_row`.
+        Returns True iff a row was actually inserted."""
+        with self._store._lock:
+            cur = self._store._db.execute(
+                "INSERT OR IGNORE INTO goal_settlements "
+                "(goal_id, ref_id, ref_kind, status, settled_at) VALUES (?, ?, ?, ?, ?)",
+                (goal_id, ref_id, ref_kind, status, settled_at_ms),
+            )
+            inserted = cur.rowcount == 1
+            self._store._commit()
+        return inserted
 
 
 def _row_to_status(row, phase_history: "tuple[dict, ...]") -> GoalStatus:
