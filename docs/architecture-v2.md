@@ -165,19 +165,25 @@ dispatches a single task — no decomposition needed.
 
 ### 3. State store — SQLite
 
-Tracks everything DevClaw owns (`devclaw/state_store.py`):
+Tracks everything DevClaw owns (`devclaw/state_store.py`), one `devclaw.db`:
 
 ```
-programs      id, goal, status, created_at, …
-tasks         id, program_id, parent_goal_id, kind, goal, status,
-              result_json, pr_url, created_at, settled_at, …
-events        task_id, event, payload, ts   (append-only audit log)
+programs        id, goal, status, created_at, …
+tasks           id, program_id, parent_goal_id, kind, goal, status,
+                result_json, pr_url, created_at, settled_at, …
+events          task_id, event, payload, ts   (append-only audit log)
+goal_status     goal_id, phase, lifecycle, in_flight_*, state, version, …  (Tranche 1)
+goal_steering · goal_log · goal_deliveries · goal_docs · goal_phase_history  (Tranche 1)
 ```
 
-**Single-writer:** only the `TaskQueue` mutates task rows; `events` is append-only and
-the status views are projections. There is **no** `openhands_run_id` — devclaw doesn't
-track a remote run, because there is no remote run; the sandbox is ephemeral and its
-whole output is the stdout stream.
+**Single-writer per table family:** only the `TaskQueue` mutates task rows; `events` is
+append-only and the status views are projections. Goal state (Tranche 1, see
+[`architecture-layers.md`](./architecture-layers.md)) is owned by `GoalStore`, wired
+onto this SAME `StateStore` — `goal_status`'s phase/lifecycle/in_flight changes go
+through a CAS'd `GoalStore.transition()`, not a single-caller assumption, because
+`steer_goal`/`cancel_goal` can write concurrently with the heartbeat. There is **no**
+`openhands_run_id` — devclaw doesn't track a remote run, because there is no remote
+run; the sandbox is ephemeral and its whole output is the stdout stream.
 
 ### 4. Settle — completion detection + notification (in-process, no poller)
 
@@ -275,9 +281,15 @@ Two altitudes, one service:
   completion in a single async session. Unchanged.
 - **`goal`** — an open-ended *standing intent* advanced across many heartbeats,
   steerable and **direction-evaluated**, that persists until its `done_when` is
-  genuinely satisfied. Lives on disk under `DEVCLAW_GOALS_DIR`
-  (`<id>/goal.yaml · STATUS.md · log.md · inbox.md · deliveries.md`), git-synced
-  like the rest of the vault — ephemeral body, durable mind.
+  genuinely satisfied. Lives under `DEVCLAW_GOALS_DIR` (`<id>/…`), git-synced
+  like the rest of the vault — ephemeral body, durable mind. `goal.yaml` (the
+  owner-authored facts), `spec.md`, and `discovery.md` are plain files; the
+  machine state (`STATUS.md`), steering (`inbox.md`), event log (`log.md`),
+  grounded evidence (`deliveries.md`), and the decomposer/firming contracts
+  (`checklist.yaml`, `firmed-draft.yaml`) are SQLite tables (`goal_status`,
+  `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs` — Tranche 1,
+  living in the same `devclaw.db` the task queue uses) with those files
+  regenerated as read-only, rollback-legible **views** on every write.
 
 These are different time-scales/state-lifecycles; the goal layer sits *above* the
 task/program engine and dispatches into it **in-process** (`goal.engine.py`). When

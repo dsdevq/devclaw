@@ -23,7 +23,7 @@ Only layer 5 is an agent harness in the technical sense.
 |---|---|---|---|
 | 1 | **MCP surface** | `devclaw/server/` | a tool/endpoint, auth, dashboard, transport — pure protocol |
 | 2 | **GoalService + heartbeat** | `devclaw/goal/` | goal state machine, lifecycle (`investigating → firming → executing`), the ~15-min tick |
-| 3 | **Cognition callers** | `devclaw/goal/planner.py`, `evaluator.py`, `decomposer.py`, `elicitation.py`, `planner.py` | a one-shot `claude --print` prompt/parse (firming, decompose, next-action, direction eval) |
+| 3 | **Cognition callers** | `devclaw/goal/planner.py`, `evaluator.py`, `decomposer.py`, `phases/firming.py`; `devclaw/elicitation.py` | a one-shot `claude --print` prompt/parse (firming, decompose, next-action, direction eval) |
 | 4 | **TaskQueue + engine** | `devclaw/task_queue.py`, `devclaw/engine/` | dispatch, concurrency, the container launcher, the settle/gate path |
 | 5 | **Worker harness** | `openhands-runner/runner.py` (runs *inside* the sandbox) | the in-sandbox agent turn-loop, skills/hooks, verify_cmd — the only true harness |
 
@@ -48,10 +48,16 @@ spawn containers itself — it goes through the engine).
   checks run *before* any LLM call). Adding a tick-path LLM call that fires on idle
   breaks the quota guarantee (the test asserts `FakeClaude.calls == 0` on idle paths).
 - **Single writer to state.** Only the **TaskQueue** mutates task rows; `StateStore` is
-  an append-only event log, views are projections. Goal state is owned by `GoalStore`,
-  mutated only by the heartbeat, and (as of Tranche 1) lives in SQLite (`goal_status` in
-  `devclaw.db`); `STATUS.md`/`log.md`/`deliveries.md` are generated **views** — human- and
-  rollback-readable, never read back for decisions. No upstream layer caches either.
+  an append-only event log, views are projections. Goal state is owned by `GoalStore`
+  and (as of Tranche 1) lives in SQLite in the same `devclaw.db` — `goal_status`,
+  `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs`, `goal_phase_history`.
+  `STATUS.md`/`log.md`/`inbox.md`/`deliveries.md`/`checklist.yaml`/`firmed-draft.yaml`
+  are generated **views** — human- and rollback-readable, never read back for
+  decisions. Mutation is NOT heartbeat-exclusive: `steer_goal`/`cancel_goal` write from
+  the MCP-tool call path too, concurrently with the heartbeat — `GoalStore.transition()`
+  is the CAS'd choke point (`devclaw/goal/transitions.py`'s `LEGAL` table) that makes
+  that safe: a stale-snapshot write raises `TransitionConflict` and is abandoned rather
+  than silently clobbering the other writer. No upstream layer caches either.
 - **"Done" is a proposal, gated on grounded evaluation.** The planner's `done` triggers
   a read-only `review_repository` against the firmed `done_when` + `stub_acceptable`; the
   goal closes **only if the evaluator confirms `achieved`**. Never gate completion on
@@ -123,5 +129,3 @@ use). For the real pipeline (a logged-in `claude` + docker), follow
 - [`docs/architecture-layers.md`](./docs/architecture-layers.md) — the locked 5-layer model + per-layer contracts/invariants.
 - [`docs/task-execution-flow.md`](./docs/task-execution-flow.md) — the temporal trace of one task, every hop.
 - [`docs/env-vars.md`](./docs/env-vars.md) — every env var, grouped.
-</content>
-</invoke>
