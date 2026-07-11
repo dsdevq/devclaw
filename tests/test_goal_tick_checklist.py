@@ -76,6 +76,11 @@ def test_flag_items_in_flight_unknown_id_logs_and_skips(tmp_path):
     store.write_checklist("g", _example_checklist())
 
     _flag_items_in_flight(store, "g", ["ghost"])
+    # PR7: the dispatch hook's writes are now row-only (mirror=False /
+    # render_view=False) — its one production call site runs INSIDE the
+    # dispatch transaction, which flushes mirrors after commit. This test
+    # calls the helper standalone, so it flushes explicitly to check log.md.
+    store.render_mirrors("g")
 
     log = (tmp_path / "g" / "log.md").read_text()
     assert "unknown item" in log
@@ -96,21 +101,26 @@ def test_flag_items_in_flight_empty_list_noop(tmp_path):
 
 
 # ---- _settle_addressed_items (the settle hook) -----------------------------
+#
+# PR7: this is now a PURE function — (checklist, addresses, poll) ->
+# updated checklist — no store/goal_id, no write. Its production caller
+# (_resolve_polling_action) reads the checklist, calls this to COMPUTE the
+# update, and persists the result itself as a row-only write INSIDE the
+# settle transaction (so a rolled-back settle can't leave an item settled
+# for a delivery that was never actually recorded). These tests exercise
+# the pure computation directly.
 
 
 def test_settle_success_with_pr_and_gate_marks_done_with_evidence(tmp_path):
-    store = _store(tmp_path)
-    seed_goal(tmp_path, "g")
-    store.write_checklist("g", _example_checklist())
+    checklist = _example_checklist()
 
     poll = PollResult(
         terminal=True, status="done",
         detail="agent summary", pr_url="https://x/pr/1", gate_passed=True,
     )
-    _settle_addressed_items(store, "g", ["scaffold"], poll)
+    updated = _settle_addressed_items(checklist, ["scaffold"], poll)
 
-    cl = store.read_checklist("g")
-    item = next(i for i in cl.items if i.id == "scaffold")
+    item = next(i for i in updated.items if i.id == "scaffold")
     assert item.status == "done"
     assert item.evidence is not None
     # Honest-wording contract (closeloop-bench 2026-07-05): the evidence names
@@ -123,23 +133,18 @@ def test_settle_success_with_pr_and_gate_marks_done_with_evidence(tmp_path):
 
 def test_settle_success_no_gate_still_marks_done(tmp_path):
     # review_repository tasks have gate_passed=None — still a success.
-    store = _store(tmp_path)
-    seed_goal(tmp_path, "g")
-    store.write_checklist("g", _example_checklist())
+    checklist = _example_checklist()
 
     poll = PollResult(terminal=True, status="done", detail="", pr_url=None, gate_passed=None)
-    _settle_addressed_items(store, "g", ["scaffold"], poll)
+    updated = _settle_addressed_items(checklist, ["scaffold"], poll)
 
-    cl = store.read_checklist("g")
-    item = next(i for i in cl.items if i.id == "scaffold")
+    item = next(i for i in updated.items if i.id == "scaffold")
     assert item.status == "done"
     # evidence non-empty so the per-item gate has a substring to verify
     assert item.evidence == "settled (no PR or gate)"
 
 
 def test_settle_gate_failed_reverts_to_not_started(tmp_path):
-    store = _store(tmp_path)
-    seed_goal(tmp_path, "g")
     cl0 = _example_checklist()
     # simulate the dispatch hook having flipped it in_flight earlier
     cl0_in_flight = Checklist(
@@ -148,49 +153,62 @@ def test_settle_gate_failed_reverts_to_not_started(tmp_path):
             cl0.items[1],
         ],
     )
-    store.write_checklist("g", cl0_in_flight)
 
     poll = PollResult(terminal=True, status="done", pr_url="https://x/pr/1", gate_passed=False)
-    _settle_addressed_items(store, "g", ["scaffold"], poll)
+    updated = _settle_addressed_items(cl0_in_flight, ["scaffold"], poll)
 
-    cl = store.read_checklist("g")
-    item = next(i for i in cl.items if i.id == "scaffold")
+    item = next(i for i in updated.items if i.id == "scaffold")
     # back in the pick-pool — planner can re-attempt with sharper instruction
     assert item.status == "not_started"
     assert item.evidence is None
 
 
 def test_settle_task_failed_reverts_to_not_started(tmp_path):
-    store = _store(tmp_path)
-    seed_goal(tmp_path, "g")
-    store.write_checklist("g", _example_checklist())
+    checklist = _example_checklist()
 
     poll = PollResult(terminal=True, status="failed", pr_url=None, gate_passed=None)
-    _settle_addressed_items(store, "g", ["scaffold"], poll)
+    updated = _settle_addressed_items(checklist, ["scaffold"], poll)
 
-    cl = store.read_checklist("g")
-    item = next(i for i in cl.items if i.id == "scaffold")
+    item = next(i for i in updated.items if i.id == "scaffold")
     assert item.status == "not_started"
 
 
-def test_settle_addressed_items_no_checklist_noop(tmp_path):
+@pytest.mark.asyncio
+async def test_settle_with_addresses_no_checklist_does_not_raise(tmp_path):
+    """PR7 moved the "no checklist" guard from _settle_addressed_items
+    itself (deleted — the function is pure now) up to its caller,
+    _resolve_polling_action: pin the caller-level guarantee that an
+    in-flight ref carrying `addresses` still settles cleanly when the goal
+    has no checklist at all (was test_settle_addressed_items_no_checklist_noop,
+    re-pointed at the integration level PR7's refactor moved this concern to)."""
     store = _store(tmp_path)
     seed_goal(tmp_path, "g")  # no checklist written
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "do it", addresses=["scaffold"]),
+    ))
+    planner = FakeClaude(json.dumps({"decision": "sleep", "note": "ok"}), role="planner")
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", pr_url="https://x/pr/1", gate_passed=True, detail="ok",
+    ))
 
-    poll = PollResult(terminal=True, status="done", pr_url="https://x/pr/1", gate_passed=True)
-    _settle_addressed_items(store, "g", ["scaffold"], poll)  # must not raise
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+    )
+
+    assert out is Outcome.SLEPT  # settled cleanly, then the planner said sleep
+    assert store.read_checklist("g") is None  # still no checklist — no crash
 
 
 def test_settle_addressed_items_unknown_id_silently_skipped(tmp_path):
-    store = _store(tmp_path)
-    seed_goal(tmp_path, "g")
-    store.write_checklist("g", _example_checklist())
+    checklist = _example_checklist()
 
     poll = PollResult(terminal=True, status="done", pr_url="x", gate_passed=True)
-    _settle_addressed_items(store, "g", ["ghost", "scaffold"], poll)
+    updated = _settle_addressed_items(checklist, ["ghost", "scaffold"], poll)
 
-    cl = store.read_checklist("g")
-    scaffold = next(i for i in cl.items if i.id == "scaffold")
+    scaffold = next(i for i in updated.items if i.id == "scaffold")
     assert scaffold.status == "done"
 
 

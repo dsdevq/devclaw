@@ -650,18 +650,17 @@ async def _tick_goal_impl(
     if phase is Phase.POLLING_DONE_GATE:
         return await _resolve_polling_done_gate(goal_id, goal, status, ctx)
 
-    # Orphaned-program reconcile: an EXECUTING goal with no in-flight ref may
-    # have LOST that ref rather than never had one — STATUS.md is rewritten
-    # every tick, and a crash mid-write truncates it into a default status
-    # (2026-07-09: closeloop-mission-v2 waited all night on a program that had
-    # already failed). The programs table carries parent_goal_id precisely so
-    # the goal can rediscover its own latest program; if its result was never
-    # recorded in log.md, re-adopt it as in_flight and settle it THIS tick.
-    if phase is Phase.EXECUTING and status.in_flight is None:
-        readopted = _readopt_orphaned_program(goal_id, status, ctx)
-        if readopted is not None:
-            status = readopted
-            phase = _classify(status)  # → POLLING_ACTION
+    # Orphaned-ref reconcile used to run HERE, every tick (2026-07-09:
+    # closeloop-mission-v2 waited all night on a program that had already
+    # failed, because STATUS.md was truncated by a crash mid-write). PR7's
+    # atomic dispatch (task/program row + the DISPATCH transition + the log
+    # row as ONE unit) makes that class of loss structurally impossible on
+    # the in-process engine going forward — the in_flight ref can no longer
+    # commit without the row it points at (and vice versa). The remaining
+    # recovery surface — a goal whose ref was lost by an OLDER, pre-PR7
+    # build, or by something outside the dispatch path entirely (manual DB
+    # surgery, a cross-environment restore) — is handled ONCE per service
+    # start by sweep_orphaned_refs, not every tick — see GoalService._loop().
 
     finished_detail = ""
     if phase is Phase.POLLING_ACTION:
@@ -966,9 +965,28 @@ async def _open_done_gate(
             goal=_done_gate_review_brief(goal),
             open_pr=False,
         )
+        # Atomic dispatch (PR7) — same shape as _dispatch_action's; see that
+        # function's comment for the dispatch_exc/txn-nesting rationale.
+        dispatch_exc: "Exception | None" = None
         try:
-            ref = await engine.dispatch(review, goal, notify_url)
-        except Exception as exc:  # noqa: BLE001
+            with store.transaction():
+                try:
+                    ref = _run_atomic(engine.dispatch(review, goal, notify_url))
+                except Exception as exc:  # noqa: BLE001
+                    dispatch_exc = exc
+                    raise
+                ref = replace(ref, is_done_check=True)
+                store.transition(
+                    goal_id, Event.OPEN_DONE_GATE,
+                    replace(base, phase="verifying", in_flight=ref, next="verifying done"),
+                    expect=base, consume_steering=consume_steering,
+                )
+                store.append_log(goal_id, f"done proposed ({note}) → verifying via review {ref.id}", mirror=False)
+        except Exception:
+            store.discard_pending_mirrors(goal_id)
+            if dispatch_exc is None:
+                raise
+            exc = dispatch_exc
             store.append_log(goal_id, f"done-gate dispatch failed: {exc}")
             store.transition(
                 goal_id, Event.RESUME_IDLE,
@@ -977,14 +995,9 @@ async def _open_done_gate(
             )
             await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] done-gate dispatch failed: {exc}")
             return Outcome.ERROR
-        ref = replace(ref, is_done_check=True)
+        store.render_mirrors(goal_id)
+        _engine_kick(engine)
         _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""), is_done_check=True)
-        store.transition(
-            goal_id, Event.OPEN_DONE_GATE,
-            replace(base, phase="verifying", in_flight=ref, next="verifying done"),
-            expect=base, consume_steering=consume_steering,
-        )
-        store.append_log(goal_id, f"done proposed ({note}) → verifying via review {ref.id}")
         await _notify(notifier, NotifyLevel.TASK, f"🔎 [{goal_id}] looks complete — verifying against done_when")
         return Outcome.VERIFYING
     # verify disabled → artifact-only done evaluation now.
@@ -1103,22 +1116,36 @@ async def _open_investigation(
         ),
         open_pr=False,
     )
+    # Atomic dispatch (PR7) — same shape as _dispatch_action's; see that
+    # function's comment for the dispatch_exc/txn-nesting rationale.
+    dispatch_exc: "Exception | None" = None
     try:
-        ref = await engine.dispatch(review, goal, notify_url)
-    except Exception as exc:  # noqa: BLE001
+        with store.transaction():
+            try:
+                ref = _run_atomic(engine.dispatch(review, goal, notify_url))
+            except Exception as exc:  # noqa: BLE001
+                dispatch_exc = exc
+                raise
+            ref = replace(ref, is_discovery=True)
+            store.transition(
+                goal_id, Event.DISPATCH_DISCOVERY,
+                replace(status, lifecycle="investigating", phase="in_flight", in_flight=ref), expect=status,
+            )
+            store.append_log(goal_id, f"investigating → repo analysis {ref.id}", mirror=False)
+    except Exception:
+        store.discard_pending_mirrors(goal_id)
+        if dispatch_exc is None:
+            raise
+        exc = dispatch_exc
         store.append_log(goal_id, f"investigation dispatch failed ({exc}) — skipping to executing")
         store.transition(
             goal_id, Event.RESOLVE_INVESTIGATION,
             replace(status, lifecycle="executing", phase="idle"), expect=status,
         )
         return Outcome.SLEPT
-    ref = replace(ref, is_discovery=True)
+    store.render_mirrors(goal_id)
+    _engine_kick(engine)
     _trace.record_dispatch(goal_id=goal_id, tool=review.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""), is_discovery=True)
-    store.transition(
-        goal_id, Event.DISPATCH_DISCOVERY,
-        replace(status, lifecycle="investigating", phase="in_flight", in_flight=ref), expect=status,
-    )
-    store.append_log(goal_id, f"investigating → repo analysis {ref.id}")
     await _notify(
         notifier, NotifyLevel.OWNER,
         f"🔍 [{goal_id}] taking a look at what's there today — I'll come back with what it does and what 'better' could mean",
@@ -1212,7 +1239,17 @@ def _flag_items_in_flight(store: GoalStore, goal_id: str, item_ids: list[str]) -
     """When a dispatched action carries ``addresses``, mark those checklist
     items ``in_flight`` so the planner's ``ready_items`` filter excludes them
     on the next tick (no re-pick of the same item before settle). No-op when
-    no checklist exists or the action has no addresses."""
+    no checklist exists or the action has no addresses.
+
+    PR7: this now ALWAYS runs INSIDE the dispatch transaction (its one
+    production call site, in ``_dispatch_action``) — row-only writes
+    (``mirror=False`` / ``write_checklist(..., render_view=False)``) so an
+    aborted dispatch (CAS conflict, a raised ``engine.dispatch``) can't
+    leave an item flagged ``in_flight`` for work that never actually
+    dispatched (a small extra honesty win over the pre-PR7 behavior, where
+    this write was NOT part of the dispatch's atomic unit and could survive
+    a rollback). The caller's ``render_mirrors()``/``discard_pending_mirrors()``
+    flushes or drops these deferred writes after the transaction resolves."""
     if not item_ids:
         return
     current = store.read_checklist(goal_id)
@@ -1228,25 +1265,30 @@ def _flag_items_in_flight(store: GoalStore, goal_id: str, item_ids: list[str]) -
             store.append_log(
                 goal_id,
                 f"checklist warn: action addresses unknown item {item_id!r}",
+                mirror=False,
             )
-    store.write_checklist(goal_id, updated)
+    store.write_checklist(goal_id, updated, render_view=False)
 
 
 def _settle_addressed_items(
-    store: GoalStore, goal_id: str, addresses: list[str], poll: PollResult,
-) -> None:
-    """Settle the checklist items an action was addressing. Successful task
-    (poll.status == 'done' AND gate_passed in {None, True}) flips items to
-    ``done`` with grounded evidence (PR url + gate verdict); a failed task
-    flips them back to ``not_started`` so the planner can re-pick them next
-    tick (sharper instruction, different angle, or eventually block + ask).
-    The per-item gate (review_gate) verifies the diff against
-    ``evidence_target`` separately — session 4."""
-    if not addresses:
-        return
-    current = store.read_checklist(goal_id)
-    if current is None:
-        return
+    checklist: "Checklist", addresses: list[str], poll: PollResult,
+) -> "Checklist":
+    """Compute the checklist with the addressed items settled. Successful
+    task (poll.status == 'done' AND gate_passed in {None, True}) flips items
+    to ``done`` with grounded evidence (PR url + gate verdict); a failed
+    task flips them back to ``not_started`` so the planner can re-pick them
+    next tick (sharper instruction, different angle, or eventually block +
+    ask). The per-item gate (review_gate) verifies the diff against
+    ``evidence_target`` separately — session 4.
+
+    PR7: pure — returns the updated :class:`Checklist` instead of writing it.
+    The caller (``_resolve_polling_action``) reads the current checklist,
+    calls this to COMPUTE the update, and persists it as a row-only write
+    (``write_checklist(..., render_view=False)``) INSIDE the settle
+    transaction — so a rolled-back settle (CAS conflict) can't leave an
+    item settled for a delivery that was never actually recorded. The "no
+    checklist" / "addresses is empty" guards moved to the caller, which now
+    decides whether to call this at all."""
     success = poll.status == "done" and (poll.gate_passed is None or poll.gate_passed)
     if success:
         ev_parts: list[str] = []
@@ -1267,7 +1309,7 @@ def _settle_addressed_items(
         # leave evidence None — the item is back in the pick-pool, not yet proven
         evidence = None
         new_status = "not_started"
-    updated = current
+    updated = checklist
     for item_id in addresses:
         try:
             updated = _checklist.update_item(
@@ -1275,7 +1317,52 @@ def _settle_addressed_items(
             )
         except KeyError:
             continue
-    store.write_checklist(goal_id, updated)
+    return updated
+
+
+def _run_atomic(coro):
+    """Drive ``coro`` SYNCHRONOUSLY to completion, enforcing that it never
+    actually suspends. ``engine.dispatch()`` runs INSIDE an open
+    ``store.transaction()`` (see the dispatch sites below) — the transaction
+    holds the shared StateStore's lock for its whole extent, so anything that
+    genuinely awaits an I/O boundary in there would hold that lock for as
+    long as the dispatch takes, and — worse — could not be rolled back
+    cleanly if it partially ran before a later failure. ``InProcessEngine.
+    dispatch`` and ``tests.goal_fakes.FakeEngine.dispatch`` are both
+    fully synchronous under the hood (task/program creation is a plain
+    SQLite write; with PR7's ``pump=False`` split, dispatch no longer spawns
+    background execution either) — zero real awaits — so driving them with a
+    single ``.send(None)`` always completes in one step.
+
+    A coroutine that DOES suspend (a hypothetical remote/HTTP engine) raises
+    RuntimeError here instead of silently holding the transaction open across
+    a real suspend point — such an engine cannot be atomic and must not
+    pretend to be; this is the mechanical enforcement of that invariant."""
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return stop.value
+    else:
+        coro.close()
+        raise RuntimeError(
+            "engine.dispatch yielded inside the atomic dispatch transaction "
+            "— only a fully-synchronous dispatch (no real awaits) can join "
+            "the transactional unit; a remote/HTTP engine cannot be atomic "
+            "and must not be driven this way"
+        )
+
+
+def _engine_kick(engine: GoalEngine) -> None:
+    """Nudge the task queue to claim + launch the just-committed pending
+    row, if the engine exposes a ``kick()`` (the in-process engine does;
+    test doubles may not → silently no-op, same getattr/callable pattern as
+    ``_engine_pause`` and friends below). Called AFTER a dispatch
+    transaction commits — crash between commit and kick is self-healing:
+    the row is durably 'pending' either way, and the queue's own
+    ``start_ticking`` loop pumps every ``TICK_SECONDS`` regardless."""
+    fn = getattr(engine, "kick", None)
+    if callable(fn):
+        fn()
 
 
 async def _dispatch_action(
@@ -1332,9 +1419,49 @@ async def _dispatch_action(
         return await _block_on_prep_failure(
             goal_id, base, exc, store=store, notifier=notifier, summarize=summarize,
         )
+    # Atomic dispatch (PR7): task/program row creation + the DISPATCH
+    # transition + the log row, as ONE transaction. A crash or CAS conflict
+    # anywhere inside rolls the whole unit back — the single-task-orphan
+    # class (task dispatched, ref write lost) becomes structurally
+    # impossible on the in-process engine. `dispatch_exc` distinguishes
+    # "engine.dispatch itself raised" (recovered below, outside the aborted
+    # unit, exactly as today) from a TransitionConflict/IllegalTransition
+    # raised by store.transition() (propagated UNTOUCHED to tick_goal's
+    # top-level choke point, same as before this PR).
+    dispatch_exc: "Exception | None" = None
     try:
-        ref = await engine.dispatch(action, goal, notify_url)
-    except Exception as exc:  # noqa: BLE001 — record + notify, retry next cadence
+        with store.transaction():
+            try:
+                ref = _run_atomic(engine.dispatch(action, goal, notify_url))
+            except Exception as exc:  # noqa: BLE001 — caught again below, outside the txn
+                dispatch_exc = exc
+                raise
+            # Carry the action's checklist addresses onto the in-flight ref so
+            # the settle hook can update the right items without re-reading
+            # the plan.
+            if action.addresses:
+                ref = replace(ref, addresses=list(action.addresses))
+            store.transition(
+                goal_id, Event.DISPATCH_ACTION,
+                replace(
+                    base, phase="in_flight", in_flight=ref, blocked_on=None, next=action.goal,
+                    actions_dispatched=base.actions_dispatched + 1,
+                ),
+                expect=base, consume_steering=consume_steering,
+            )
+            # Checklist mode: flip addressed items to in_flight so the planner
+            # doesn't re-pick them next tick before this one settles. No-op in
+            # legacy mode. Row-only write — see _flag_items_in_flight.
+            _flag_items_in_flight(store, goal_id, list(action.addresses))
+            store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}", mirror=False)
+    except Exception:
+        store.discard_pending_mirrors(goal_id)
+        if dispatch_exc is None:
+            raise  # a real TransitionConflict/IllegalTransition — propagate untouched
+        exc = dispatch_exc
+        # engine.dispatch raised INSIDE the txn → it rolled back cleanly (no
+        # row survives). Re-derive today's error path OUTSIDE the aborted
+        # unit: a fresh, separate RESUME_IDLE write.
         store.append_log(goal_id, f"dispatch error ({action.tool}): {exc}")
         store.transition(
             goal_id, Event.RESUME_IDLE, replace(base, phase="idle", next=action.goal),
@@ -1342,23 +1469,13 @@ async def _dispatch_action(
         )
         await _notify(notifier, NotifyLevel.TASK, f"⚠️ [{goal_id}] dispatch failed: {exc}")
         return Outcome.ERROR
-    # Carry the action's checklist addresses onto the in-flight ref so the
-    # settle hook can update the right items without re-reading the plan.
-    if action.addresses:
-        ref = replace(ref, addresses=list(action.addresses))
+    # Past this point the dispatch transaction has committed. Render the
+    # deferred mirrors, THEN kick the queue to claim/launch the just-committed
+    # row (pump=False left it merely 'pending'), then trace/notify — all
+    # post-commit, per the mirror-discipline + dispatch/pump-split rules.
+    store.render_mirrors(goal_id)
+    _engine_kick(engine)
     _trace.record_dispatch(goal_id=goal_id, tool=action.tool, ref_id=ref.id, engine=getattr(engine, "kind", ""))
-    store.transition(
-        goal_id, Event.DISPATCH_ACTION,
-        replace(
-            base, phase="in_flight", in_flight=ref, blocked_on=None, next=action.goal,
-            actions_dispatched=base.actions_dispatched + 1,
-        ),
-        expect=base, consume_steering=consume_steering,
-    )
-    # Checklist mode: flip addressed items to in_flight so the planner doesn't
-    # re-pick them next tick before this one settles. No-op in legacy mode.
-    _flag_items_in_flight(store, goal_id, list(action.addresses))
-    store.append_log(goal_id, f"dispatched {action.tool}: {action.goal} → {ref.id}")
     # Notify uses the short label, not the full prompt body — the raw `action.goal`
     # is a multi-paragraph executor instruction (often 500-1500 chars) and dumping
     # it to Telegram floods the owner with prompt boilerplate. Full text stays in
@@ -1462,7 +1579,12 @@ async def _resolve_polling_discovery(
 ) -> Outcome:
     """Settle an in-flight discovery review. Still running → IN_FLIGHT. Else
     record the review outcome, clear in_flight, and synthesize the brief via
-    :func:`_resolve_discovery`."""
+    :func:`_resolve_discovery`.
+
+    PR7 "light settle": record_settlement + the log row + the DISCOVERY_SETTLED
+    transition land as ONE transaction; mirrors flush after commit. A
+    TransitionConflict rolls the settlement/log/transition back together —
+    the retry tick re-polls the same terminal ref and settles cleanly."""
     ref = status.in_flight
     try:
         poll = await ctx.engine.poll(ref)
@@ -1471,17 +1593,25 @@ async def _resolve_polling_discovery(
     if poll.running:
         ctx.store.update_status_fields(goal_id, last_tick_at=ctx.store.now_iso())
         return Outcome.IN_FLIGHT
-    ctx.store.append_log(goal_id, f"discovery review {ref.id} → {poll.status}")
     discovery_detail = poll.detail or f"review {poll.status} (no analysis captured)"
-    # Persist BEFORE the synthesis call (which may raise on a usage limit) so a
-    # later crash can't rewind to "still in-flight" and re-poll the same ref.
-    # Thread the RETURNED (fresh-versioned) status into _resolve_discovery —
-    # its own transition() calls CAS against THIS version, not a stale copy.
-    new_status = ctx.store.transition(
-        goal_id, Event.DISCOVERY_SETTLED,
-        replace(status, in_flight=None, phase="idle"),
-        expect=status,
-    )
+    try:
+        with ctx.store.transaction():
+            ctx.store.record_settlement(goal_id, ref_id=ref.id, ref_kind=ref.ref_kind, status=poll.status)
+            ctx.store.append_log(goal_id, f"discovery review {ref.id} → {poll.status}", mirror=False)
+            # Persist BEFORE the synthesis call (which may raise on a usage
+            # limit) so a later crash can't rewind to "still in-flight" and
+            # re-poll the same ref. Thread the RETURNED (fresh-versioned)
+            # status into _resolve_discovery — its own transition() calls
+            # CAS against THIS version, not a stale copy.
+            new_status = ctx.store.transition(
+                goal_id, Event.DISCOVERY_SETTLED,
+                replace(status, in_flight=None, phase="idle"),
+                expect=status,
+            )
+    except Exception:
+        ctx.store.discard_pending_mirrors(goal_id)
+        raise
+    ctx.store.render_mirrors(goal_id)
     return await _resolve_discovery(
         goal_id, goal, new_status, discovery_detail,
         store=ctx.store, research_caller=ctx.evaluator_caller, notifier=ctx.notifier,
@@ -1496,7 +1626,8 @@ async def _resolve_polling_done_gate(
 ) -> Outcome:
     """Settle an in-flight done-gate review. Still running → IN_FLIGHT. Else
     record the review outcome, clear in_flight, and judge the repo against
-    ``done_when`` via :func:`_resolve_done_gate`."""
+    ``done_when`` via :func:`_resolve_done_gate`. Same PR7 "light settle"
+    shape as :func:`_resolve_polling_discovery` — see its docstring."""
     ref = status.in_flight
     try:
         poll = await ctx.engine.poll(ref)
@@ -1505,13 +1636,20 @@ async def _resolve_polling_done_gate(
     if poll.running:
         ctx.store.update_status_fields(goal_id, last_tick_at=ctx.store.now_iso())
         return Outcome.IN_FLIGHT
-    ctx.store.append_log(goal_id, f"done-check review {ref.id} → {poll.status}")
     review_report = poll.detail or f"review {poll.status} (no report captured)"
-    new_status = ctx.store.transition(
-        goal_id, Event.DONE_GATE_SETTLED,
-        replace(status, in_flight=None, phase="idle"),
-        expect=status,
-    )
+    try:
+        with ctx.store.transaction():
+            ctx.store.record_settlement(goal_id, ref_id=ref.id, ref_kind=ref.ref_kind, status=poll.status)
+            ctx.store.append_log(goal_id, f"done-check review {ref.id} → {poll.status}", mirror=False)
+            new_status = ctx.store.transition(
+                goal_id, Event.DONE_GATE_SETTLED,
+                replace(status, in_flight=None, phase="idle"),
+                expect=status,
+            )
+    except Exception:
+        ctx.store.discard_pending_mirrors(goal_id)
+        raise
+    ctx.store.render_mirrors(goal_id)
     return await _resolve_done_gate(
         goal_id, goal, new_status, review_report,
         store=ctx.store, evaluator_caller=ctx.evaluator_caller, notifier=ctx.notifier,
@@ -1520,51 +1658,137 @@ async def _resolve_polling_done_gate(
     )
 
 
-def _readopt_orphaned_program(
-    goal_id: str, status: GoalStatus, ctx: TickContext,
-) -> "GoalStatus | None":
-    """Rediscover a program this goal dispatched whose in-flight ref was lost.
+def _readopt_orphaned_ref(
+    goal_id: str, status: GoalStatus, store: GoalStore, engine: GoalEngine,
+) -> "str | None":
+    """Rediscover + re-adopt ONE goal's lost in-flight ref — a TASK or a
+    PROGRAM this goal dispatched whose in-flight ref was lost (STATUS.md
+    truncated by a crash mid-write, a restart racing the status write).
+    Formerly the per-tick ``_readopt_orphaned_program`` (2026-07-09
+    incident); PR7 extends it to tasks and demotes it to a once-per-service-
+    start sweep (see :func:`sweep_orphaned_refs`) — atomic dispatch means a
+    ref can no longer be lost MID-FLIGHT, so a per-tick check is no longer
+    load-bearing; a startup sweep still catches refs lost by an OLDER build,
+    or a restart landing in the (now much narrower) commit-to-kick window.
 
-    Returns the new status (in_flight restored, persisted) when an orphan is
-    found, else None. "Orphan" = the goal's most recent program by
-    parent_goal_id whose settle line (``start_program <id> → <status>``) never
-    reached log.md — running OR already-terminal both qualify; the normal
-    POLLING_ACTION path then polls/settles it exactly as if the ref had never
-    been lost. Engines without the finder (fakes, remote) opt out silently."""
-    finder = getattr(ctx.engine, "latest_program_for_goal", None)
-    if finder is None:
-        return None
-    found = finder(goal_id)
-    if found is None:
-        return None
-    program_id, program_goal = found
-    if ctx.store.log_contains(goal_id, f" {program_id} → "):
-        return None  # settled and recorded — nothing lost
-    ref = InFlight("devclaw", "start_program", program_id, "program", program_goal)
-    new_status = ctx.store.transition(
-        goal_id, Event.DISPATCH_ACTION,
-        replace(status, in_flight=ref, phase="in_flight"),
-        expect=status,
-    )
-    ctx.store.append_log(
-        goal_id,
-        f"re-adopted orphaned program {program_id} — its in-flight ref was "
-        "missing from STATUS.md (lost state, e.g. a restart mid-write); "
-        "settling it now instead of waiting on a result that would never arrive",
-    )
-    return new_status
+    "Orphan" = the goal's most recent task/program by ``parent_goal_id``
+    with no recorded settlement (:meth:`GoalStore.is_settled`, PR7's
+    replacement for the old ``log_contains(f" {id} → ")`` string match) —
+    running OR already-terminal both qualify; the normal POLLING_ACTION path
+    then polls/settles it exactly as if the ref had never been lost.
+
+    Checks the TASK finder first, then the PROGRAM finder: in a healthy
+    system ``in_flight`` is a single slot, so a goal essentially never has
+    BOTH an orphaned task and an orphaned program at once. When it
+    theoretically does, task-first is a pragmatic simplification — comparing
+    ``created_at`` precisely would need both finders to expose it, for a
+    benefit that in practice never matters (the brief this PR implements
+    sanctions this choice explicitly). Engines without a finder (fakes,
+    remote) opt out silently via getattr, same as the pre-PR7 program-only
+    version.
+
+    Returns a short description of what was re-adopted (``"task <id>"`` /
+    ``"program <id>"``), or None if nothing needed re-adopting."""
+    task_finder = getattr(engine, "latest_task_for_goal", None)
+    if task_finder is not None:
+        found_task = task_finder(goal_id)
+        if found_task is not None:
+            task_id, task_goal, task_kind = found_task
+            if not store.is_settled(goal_id, task_id):
+                _readopt_ref(store, goal_id, status, ref_id=task_id, ref_kind="task", tool=task_kind, ref_goal=task_goal)
+                return f"task {task_id}"
+    program_finder = getattr(engine, "latest_program_for_goal", None)
+    if program_finder is not None:
+        found_program = program_finder(goal_id)
+        if found_program is not None:
+            program_id, program_goal = found_program
+            if not store.is_settled(goal_id, program_id):
+                _readopt_ref(store, goal_id, status, ref_id=program_id, ref_kind="program", tool="start_program", ref_goal=program_goal)
+                return f"program {program_id}"
+    return None
+
+
+def _readopt_ref(
+    store: GoalStore, goal_id: str, status: GoalStatus,
+    *, ref_id: str, ref_kind: str, tool: str, ref_goal: str,
+) -> None:
+    """Write the actual re-adoption: restore ``in_flight`` (DISPATCH_ACTION)
+    + a log line, as ONE transaction; mirrors flush after commit. A lost
+    done-check/discovery ref is deliberately re-adopted as a PLAIN action ref
+    — WITHOUT its ``is_done_check``/``is_discovery`` flag, since that flag
+    lived only on the lost ref and cannot be recovered from the task/program
+    row alone. This is conservative by construction: the settle just records
+    a delivery (instead of re-entering the done-gate/discovery resolution
+    path directly), and the planner naturally re-proposes done — or
+    investigation resumes on backlog — on its own next tick if warranted."""
+    ref = InFlight("devclaw", tool, ref_id, ref_kind, ref_goal)
+    try:
+        with store.transaction():
+            store.transition(
+                goal_id, Event.DISPATCH_ACTION,
+                replace(status, in_flight=ref, phase="in_flight"),
+                expect=status,
+            )
+            store.append_log(
+                goal_id,
+                f"re-adopted orphaned {ref_kind} {ref_id} — its in-flight ref was "
+                "missing from STATUS.md (lost state, e.g. a restart mid-write); "
+                "settling it now instead of waiting on a result that would never arrive",
+                mirror=False,
+            )
+    except Exception:
+        store.discard_pending_mirrors(goal_id)
+        raise
+    store.render_mirrors(goal_id)
+
+
+async def sweep_orphaned_refs(store: GoalStore, engine: GoalEngine) -> "dict[str, str]":
+    """Once-per-service-start sweep: for every goal, re-adopt a lost
+    in-flight ref if one is found (see :func:`_readopt_orphaned_ref`).
+    Returns ``{goal_id: description}`` for every goal that was re-adopted —
+    empty when nothing needed it.
+
+    Guard mirrors the condition the OLD per-tick readopt effectively had:
+    EXECUTING classification (terminal/investigating/firming goals, and any
+    goal that already has a fresh in_flight ref, are skipped) with no ref.
+    A single goal's bad state (a corrupt status row, a raised finder) is
+    isolated — logged where possible, never allowed to sink the whole sweep,
+    matching ``tick_all``'s per-goal isolation."""
+    result: "dict[str, str]" = {}
+    for goal_id in store.list_goal_ids():
+        try:
+            status = store.load_status(goal_id)
+            if status.in_flight is not None:
+                continue
+            if _classify(status) is not Phase.EXECUTING:
+                continue
+            outcome = _readopt_orphaned_ref(goal_id, status, store, engine)
+        except Exception as exc:  # noqa: BLE001 — one goal's trouble must not sink the sweep
+            try:
+                store.append_log(goal_id, f"startup sweep error (isolated): {exc}")
+            except Exception:  # noqa: BLE001 — even the log write must not propagate
+                pass
+            continue
+        if outcome:
+            result[goal_id] = outcome
+    return result
 
 
 async def _resolve_polling_action(
     goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
 ) -> "Union[Outcome, Tuple[GoalStatus, str]]":
     """Settle an in-flight regular action. Still running → IN_FLIGHT.
-    Otherwise: record the delivery (grounded evidence for the evaluator), update
-    the no-progress watchdog, run auto-merge if enabled, persist the cleared
-    state IMMEDIATELY (protects against the duplicate-merge loop dogfooded
-    2026-06-21), and return ``(new_status, finished_detail)`` so the EXECUTING
-    handler can plan the next action on the same tick with the just-finished
-    detail in hand."""
+    Otherwise: record the delivery (grounded evidence for the evaluator),
+    update the no-progress watchdog, and commit the settlement + delivery +
+    log + checklist rows + the ACTION_SETTLED transition as ONE transaction
+    (PR7) — protects against the duplicate-merge loop dogfooded 2026-06-21
+    AND closes a PR4-review nuance: a TransitionConflict landing in this
+    window now rolls EVERYTHING back (no partial artifacts, no duplicate log
+    line), where before only the transition itself was guarded. Auto-merge /
+    program-reconcile move to AFTER the commit — see the comment at that
+    call site for the observable-order note. Returns ``(new_status,
+    finished_detail)`` so the EXECUTING handler can plan the next action on
+    the same tick with the just-finished detail in hand."""
     ref = status.in_flight
     try:
         poll = await ctx.engine.poll(ref)
@@ -1574,6 +1798,8 @@ async def _resolve_polling_action(
         ctx.store.update_status_fields(goal_id, last_tick_at=ctx.store.now_iso())
         return Outcome.IN_FLIGHT
 
+    # ---- compute everything the settle transaction will write, BEFORE ------
+    # ---- opening it (no cognition, no I/O below — pure computation) --------
     evidence = []
     if poll.pr_url:
         evidence.append(f"PR {poll.pr_url}")
@@ -1584,23 +1810,19 @@ async def _resolve_polling_action(
         # Actions run was failing at startup.
         evidence.append("sandbox gate=passed" if poll.gate_passed else "sandbox gate=FAILED")
     ev_str = (" — " + ", ".join(evidence)) if evidence else ""
+    settle_line = f"{ref.tool} {ref.id} → {poll.status}{ev_str}"
 
-    ctx.store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
-    # ref_id=ref.id: the idempotency key (PR6). A TransitionConflict landing
-    # in this settle window can make the tick's retry re-run this same
-    # settle for the same ref — without the key, that retry appended a
-    # DUPLICATE deliveries.md section for the identical delivery (closed
-    # PR4-review nuance).
-    ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "", ref_id=ref.id)
     # Checklist mode: settle the items this action was addressing — success
     # flips them to done with grounded evidence (PR + gate), failure flips
-    # them back to not_started so the planner can re-pick them.
-    if getattr(ref, "addresses", None):
-        _settle_addressed_items(ctx.store, goal_id, list(ref.addresses), poll)
-    _trace.record_delivery(
-        goal_id=goal_id, action_label=_action_label(ref),
-        gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
-    )
+    # them back to not_started so the planner can re-pick them. Pure compute
+    # here (PR7); the caller persists the result row-only, inside the txn.
+    addresses = list(getattr(ref, "addresses", None) or [])
+    updated_checklist = None
+    if addresses:
+        current_checklist = ctx.store.read_checklist(goal_id)
+        if current_checklist is not None:
+            updated_checklist = _settle_addressed_items(current_checklist, addresses, poll)
+
     delivered = 1 if poll.status == "done" else 0
     # Any SUCCESSFUL settle hands back its dispatch-cap budget: the cap exists
     # to stop a planner that spins without producing, not to ration healthy
@@ -1621,6 +1843,51 @@ async def _resolve_polling_action(
         no_progress_notified=(False if delivered else status.no_progress_notified),
     )
 
+    # ---- the atomic settle ---------------------------------------------
+    # settlement row + delivery row + log row + checklist update + the
+    # ACTION_SETTLED transition, as ONE unit. A TransitionConflict here rolls
+    # ALL of it back — settlement, delivery, log, checklist — so the retry
+    # tick re-settles this same terminal ref identically: no partial
+    # artifacts, no duplicate log line. ref_id=ref.id on record_settlement +
+    # append_delivery is the idempotency key (PR6/PR7): a retry re-running
+    # this settle for the same ref is a no-op INSERT, not a duplicate.
+    try:
+        with ctx.store.transaction():
+            ctx.store.record_settlement(goal_id, ref_id=ref.id, ref_kind=ref.ref_kind, status=poll.status)
+            ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "", ref_id=ref.id, mirror=False)
+            ctx.store.append_log(goal_id, settle_line, mirror=False)
+            if updated_checklist is not None:
+                ctx.store.write_checklist(goal_id, updated_checklist, render_view=False)
+            # Persist IMMEDIATELY (within this same atomic unit) — the
+            # next-action planner can raise on a usage limit; if the cleared
+            # state isn't durable first the tick aborts with in_flight still
+            # pointing at the just-finished action and the next tick
+            # re-ships it (duplicate-merge loop, dogfood 2026-06-21). Thread
+            # the RETURNED (fresh-versioned) status onward — _handle_executing's
+            # `expect=` calls CAS against THIS version, not the pre-settle
+            # snapshot.
+            new_status = ctx.store.transition(goal_id, Event.ACTION_SETTLED, new_status, expect=status)
+    except Exception:
+        ctx.store.discard_pending_mirrors(goal_id)
+        raise
+    ctx.store.render_mirrors(goal_id)
+
+    _trace.record_delivery(
+        goal_id=goal_id, action_label=_action_label(ref),
+        gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
+    )
+
+    # ---- post-commit tail: auto-merge / program-reconcile (real awaits) ----
+    # Moved here (from before the status write, pre-PR7) so both now run
+    # STRICTLY AFTER the settle has committed — shrinking the 2026-06-21
+    # duplicate-merge window and killing the remaining conflict-retry
+    # artifacts. Two observable differences from pre-PR7, both intentional:
+    # (a) the "auto-merged …" / "reconcile: …" log lines now land AFTER the
+    # settle line in log.md (same content, slightly different file order);
+    # (b) a crash after commit but before the merge attempt now leaves the
+    # task settled-but-unmerged (a PR left for review — the SAFE direction:
+    # pre-PR7, a crash there lost the settle too and the whole thing re-ran).
+    #
     # Hands-off auto-merge: a delivered change whose verify gate passed is
     # merged by devclaw itself, with a plain owner ping. Best-effort + gated —
     # a failed merge just leaves the PR for review.
@@ -1643,7 +1910,7 @@ async def _resolve_polling_action(
     # per goal" guarantee on item 1). Skip auto-merge in that case — the
     # done-gate is the natural moment for a single human review of the
     # cumulative work.
-    in_checklist_dispatch = bool(getattr(ref, "addresses", None))
+    in_checklist_dispatch = bool(addresses)
     merged_now = False
     if (
         ctx.merger is not None
@@ -1695,13 +1962,6 @@ async def _resolve_polling_action(
         )
     finished_detail = f"tool={ref.tool} id={ref.id} status={poll.status}{ev_str}{pr_state}\n{poll.detail}"
 
-    # Persist IMMEDIATELY — the next-action planner can raise on a usage limit;
-    # if the cleared state isn't durable first the tick aborts with in_flight
-    # still pointing at the just-finished action and the next tick re-ships it
-    # (duplicate-merge loop, dogfood 2026-06-21). Thread the RETURNED
-    # (fresh-versioned) status onward — _handle_executing's `expect=` calls
-    # CAS against THIS version, not the pre-settle snapshot.
-    new_status = ctx.store.transition(goal_id, Event.ACTION_SETTLED, new_status, expect=status)
     return new_status, finished_detail
 
 
