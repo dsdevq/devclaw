@@ -169,7 +169,7 @@ def _enable_gate_and_fake_diff(monkeypatch):
     # the review path is reached (the test workspaces aren't real repos).
     monkeypatch.setattr(task_queue, "REVIEW_GATE_ENABLED", True)
 
-    async def fake_diff(_host_dir):
+    async def fake_diff(_host_dir, _base=""):
         return "diff --git a/f.py b/f.py\n+code"
     monkeypatch.setattr(task_queue, "_git_diff", fake_diff)
 
@@ -325,7 +325,7 @@ async def test_diff_uses_workspace_path_verbatim_not_host_translation(store, mon
     monkeypatch.setenv("DEVCLAW_HOST_PATH_PREFIX", "/srv/devclaw/workspaces")
     seen: dict = {}
 
-    async def capture_diff(path):
+    async def capture_diff(path, _base=""):
         seen["path"] = path
         return ""  # empty → guards pass; we only assert WHICH path git was given
 

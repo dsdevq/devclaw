@@ -122,12 +122,33 @@ def _verify_failure_summary(verify: dict) -> str:
     return f"{head}\n{out[-1500:]}" if out else head
 
 
-def _git_diff_sync(host_dir: str) -> str:
-    """The agent's still-uncommitted change (working tree + staged) as a unified
-    diff. Blocking subprocess.run (with a timeout) — NOT asyncio.create_subprocess_exec,
+def _git_diff_sync(host_dir: str, base: str = "") -> str:
+    """The agent's change as a unified diff. With ``base`` (the pre-run HEAD),
+    diff the working tree against that ref — which captures work the agent
+    already COMMITTED as well as staged/unstaged edits. The commit coda asks
+    the agent to commit, and in goal-branch mode those commits land directly on
+    ``goal/<id>``: judging only the uncommitted tree made a fully-committed
+    change look like a no-op to the integrity + review gates (live-found
+    2026-07-11: three bench tasks in a row got "requested changes" on a diff of
+    trend-file noise while the real work sat committed on the goal branch).
+    Without ``base`` — or when the ref is unresolvable — fall back to the
+    legacy uncommitted-only view.
+
+    Blocking subprocess.run (with a timeout) — NOT asyncio.create_subprocess_exec,
     which hangs under pytest's per-test event loops (child-watcher pitfall) and is
     overkill for a sub-second git call. Best-effort: '' on any failure (not a repo,
     git missing, timeout) so a hiccup never blocks a legitimately-good task."""
+    if base:
+        try:
+            p = subprocess.run(
+                ["git", "-C", host_dir, "diff", base],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if p.returncode == 0:
+            return p.stdout
+        # unresolvable ref — fall through to the uncommitted-only view
     out = ""
     for args in (["diff"], ["diff", "--cached"]):
         try:
@@ -142,10 +163,29 @@ def _git_diff_sync(host_dir: str) -> str:
     return out
 
 
-async def _git_diff(host_dir: str) -> str:
+async def _git_diff(host_dir: str, base: str = "") -> str:
     """Async wrapper — runs the blocking git diff in a thread so it never blocks
     the event loop or trips the asyncio-subprocess child-watcher hang."""
-    return await asyncio.to_thread(_git_diff_sync, host_dir)
+    return await asyncio.to_thread(_git_diff_sync, host_dir, base)
+
+
+def _git_head_sync(host_dir: str) -> str:
+    """Current HEAD sha, or '' when unavailable — the pre-run baseline for
+    :func:`_git_diff_sync`. Best-effort for the same reason: a baseline hiccup
+    must degrade to the legacy diff view, never block the run."""
+    try:
+        p = subprocess.run(
+            ["git", "-C", host_dir, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+async def _git_head(host_dir: str) -> str:
+    """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
+    return await asyncio.to_thread(_git_head_sync, host_dir)
 
 
 def _wip_snapshot_sync(host_dir: str, task_id: str) -> str:
@@ -936,6 +976,14 @@ class TaskQueue:
             except Exception as err:  # event writes must never crash the run
                 sys.stderr.write(f"task-queue: append_event failed task={task_id}: {err}\n")
 
+        # Baseline for the post-gate diff. The agent is asked to COMMIT its work
+        # (goal-branch mode lands commits directly on goal/<id>), so the tree can
+        # be clean by settle time — the gates must diff against the pre-run HEAD
+        # to see the change at all. Captured ONCE before the attempt loop, not
+        # per attempt: delivery ships everything ahead of this ref, so a retry's
+        # gates must judge the same cumulative span it will ship.
+        pre_run_sha = await _git_head(workspace_dir)
+
         # Retry-on-fail completes the reliability triad (verify + RETRY + human): a
         # gate-fail or a transient agent error is re-run, each time with the failure
         # fed back into the goal so the agent can self-correct, up to a bounded cap;
@@ -998,7 +1046,7 @@ class TaskQueue:
                         # doesn't exist in our mount namespace (`/srv/...`), so the
                         # diff came back empty and BOTH guards silently no-op'd in
                         # the deployed container. Use workspace_dir directly.
-                        diff = await _git_diff(workspace_dir)
+                        diff = await _git_diff(workspace_dir, pre_run_sha)
                         integrity = _integrity_failure(diff)
                         review_fb = (
                             None if integrity is not None
