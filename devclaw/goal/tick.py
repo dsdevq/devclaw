@@ -1586,7 +1586,12 @@ async def _resolve_polling_action(
     ev_str = (" — " + ", ".join(evidence)) if evidence else ""
 
     ctx.store.append_log(goal_id, f"{ref.tool} {ref.id} → {poll.status}{ev_str}")
-    ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "")
+    # ref_id=ref.id: the idempotency key (PR6). A TransitionConflict landing
+    # in this settle window can make the tick's retry re-run this same
+    # settle for the same ref — without the key, that retry appended a
+    # DUPLICATE deliveries.md section for the identical delivery (closed
+    # PR4-review nuance).
+    ctx.store.append_delivery(goal_id, ref.goal or ref.tool, poll.detail or "", ref_id=ref.id)
     # Checklist mode: settle the items this action was addressing — success
     # flips them to done with grounded evidence (PR + gate), failure flips
     # them back to not_started so the planner can re-pick them.

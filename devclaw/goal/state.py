@@ -18,9 +18,20 @@ generated full-fidelity view (the rollback path).
 source of truth for "unread" — ``GoalStore.append_steering`` /
 ``_ingest_inbox`` write rows, ``GoalStore.transition(consume_steering=...)``
 consumes them by exact id. ``inbox.md`` stays both the human-readable mirror
-and a hand-append input (lazily ingested into rows). The remaining tables
-(``goal_log`` / ``goal_deliveries`` / ``goal_settlements`` / ``goal_docs``)
-stay created-but-empty until later PRs migrate onto them.
+and a hand-append input (lazily ingested into rows).
+
+**PR6 brought ``goal_log`` / ``goal_deliveries`` / ``goal_docs`` LIVE.**
+``goal_log`` and ``goal_deliveries`` are row-backed with ``log.md`` /
+``deliveries.md`` as generated mirrors (lazily migrated, same shape as
+PR3/PR5); ``goal_deliveries`` also gained idempotent inserts keyed on a
+nullable ``ref_id`` (``UNIQUE(goal_id, ref_id)`` + INSERT OR IGNORE), closing
+a PR4-review nuance where a settle landing in a ``TransitionConflict`` retry
+window could append the same delivery twice. ``goal_docs`` now backs
+``checklist.yaml`` / ``firmed-draft.yaml`` (kinds ``checklist`` /
+``firmed_draft``) — the torn-write class T0.4 hardened the file view against
+(``tmp`` + ``os.replace``) becomes structurally impossible once a goal has a
+row, courtesy of SQLite's atomic upsert. ``goal_settlements`` stays
+created-but-empty until a later PR migrates onto it.
 """
 
 from __future__ import annotations
@@ -133,11 +144,16 @@ class GoalState:
                 );
 
                 -- Grounded record of what each action shipped (deliveries.md
-                -- today). UNIQUE(goal_id, ref_id) makes ingest idempotent.
+                -- today, PR6). ref_id is NULLABLE: NULL for legacy-ingested
+                -- sections and any plain append (unconditional INSERT); a
+                -- settle's dispatched-ref id makes the INSERT idempotent —
+                -- SQLite treats every NULL as distinct under UNIQUE, so only
+                -- non-NULL ref_ids actually dedupe via INSERT OR IGNORE (see
+                -- GoalState.append_delivery_row).
                 CREATE TABLE IF NOT EXISTS goal_deliveries (
                   id          INTEGER PRIMARY KEY AUTOINCREMENT,
                   goal_id     TEXT NOT NULL,
-                  ref_id      TEXT NOT NULL,
+                  ref_id      TEXT,
                   instruction TEXT,
                   body        TEXT,
                   created_at  INTEGER NOT NULL,
@@ -156,9 +172,15 @@ class GoalState:
                   UNIQUE(goal_id, ref_id)
                 );
 
-                -- Free-form per-goal documents keyed by kind (spec / discovery /
-                -- checklist / firmed-draft … the *.md and *.yaml artifacts
-                -- today). PRIMARY KEY(goal_id, kind) == one current doc per kind.
+                -- Free-form per-goal documents keyed by kind. PR6 lands two
+                -- kinds LIVE — "checklist" (checklist.yaml) and
+                -- "firmed_draft" (firmed-draft.yaml), the acceptance-contract
+                -- artifacts T0.4 hardened against torn writes; SQLite's atomic
+                -- upsert makes that write-tear class structurally impossible
+                -- once a goal has a row. spec.md / discovery.md stay plain
+                -- files (display/prompt inputs, not consumed-state) — a later
+                -- PR if ever. PRIMARY KEY(goal_id, kind) == one current doc
+                -- per kind.
                 CREATE TABLE IF NOT EXISTS goal_docs (
                   goal_id    TEXT NOT NULL,
                   kind       TEXT NOT NULL,
@@ -195,7 +217,48 @@ class GoalState:
                 except sqlite3.OperationalError:
                     pass  # column already exists
 
+            self._migrate_deliveries_ref_id_nullable()
             self._store._commit()
+
+    def _migrate_deliveries_ref_id_nullable(self) -> None:
+        """Forward-compat schema fix for DBs bootstrapped by PR2: this table
+        was created with ``ref_id TEXT NOT NULL`` before anything ever wrote
+        to it (``goal_deliveries`` stayed empty until PR6). PR6's idempotent
+        ``append_delivery_row`` needs ``ref_id`` NULLABLE — legacy-ingested
+        deliveries.md sections and any plain (non-idempotent) append have no
+        ref_id to key on. SQLite has no ``ALTER COLUMN`` to drop a NOT NULL
+        constraint in place, so this recreates the table with the corrected
+        schema (the standard SQLite copy/drop/rename dance) — safe because
+        the table has been unused, but written to preserve any existing rows
+        regardless. Guarded on ``PRAGMA table_info`` so it only ever runs
+        once per DB: a fresh table (created nullable by the CREATE TABLE IF
+        NOT EXISTS above) already has ``notnull=0`` and this is a no-op."""
+        with self._store._lock:
+            info = self._store._db.execute("PRAGMA table_info(goal_deliveries)").fetchall()
+            ref_id_col = next((r for r in info if r["name"] == "ref_id"), None)
+            if ref_id_col is None or not ref_id_col["notnull"]:
+                return
+            self._store._db.executescript(
+                """
+                CREATE TABLE goal_deliveries__pr6_nullable_ref_id (
+                  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                  goal_id     TEXT NOT NULL,
+                  ref_id      TEXT,
+                  instruction TEXT,
+                  body        TEXT,
+                  created_at  INTEGER NOT NULL,
+                  UNIQUE(goal_id, ref_id)
+                );
+                INSERT INTO goal_deliveries__pr6_nullable_ref_id
+                  (id, goal_id, ref_id, instruction, body, created_at)
+                  SELECT id, goal_id, ref_id, instruction, body, created_at
+                  FROM goal_deliveries;
+                DROP TABLE goal_deliveries;
+                ALTER TABLE goal_deliveries__pr6_nullable_ref_id RENAME TO goal_deliveries;
+                CREATE INDEX IF NOT EXISTS idx_goal_deliveries_goal
+                  ON goal_deliveries(goal_id, id);
+                """
+            )
 
     # ---- goal_status persistence (PR3: STATUS.md re-backed onto SQLite) ----
     #
@@ -504,6 +567,189 @@ class GoalState:
                 [(goal_id, str(e["phase"]), str(e["at"])) for e in entries],
             )
             self._store._commit()
+
+    # ---- goal_log (append-only event log — log.md today, PR6) --------------
+    #
+    # log.md is a pure OUTPUT view — unlike inbox.md, nothing hand-appends to
+    # it — so migration is a true one-shot with no ongoing ingest cursor: once
+    # ANY row exists for a goal, :meth:`GoalStore._ingest_log` never runs
+    # again for it. Rows store the MIRROR-FORMATTED line verbatim (the PR5
+    # rule — see ``append_steering``), so ``recent_log``/``log_contains``
+    # read back byte-identical text to the pre-PR6 file-tail read.
+
+    def has_log_rows(self, goal_id: str) -> bool:
+        """Whether ANY ``goal_log`` row exists yet — the lazy-migration guard
+        :meth:`GoalStore._ingest_log` uses so a legacy log.md is ingested
+        exactly once."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_log WHERE goal_id = ? LIMIT 1", (goal_id,)
+            ).fetchone()
+        return row is not None
+
+    def append_log_row(self, goal_id: str, line: str, ts_ms: int) -> None:
+        """INSERT one ``goal_log`` row. ``line`` is the FULL formatted mirror
+        line (``- [<iso>] <message>``), stored verbatim in ``message`` — the
+        same mirror-formatted-text rule PR5's steering rows follow. ``ts`` is
+        ordering-only (the ms clock; nothing parses it back out for display)."""
+        with self._store._lock:
+            self._store._db.execute(
+                "INSERT INTO goal_log (goal_id, ts, message) VALUES (?, ?, ?)",
+                (goal_id, ts_ms, line),
+            )
+            self._store._commit()
+
+    def append_log_rows(self, goal_id: str, lines: "list[str]", ts_ms: int) -> None:
+        """Bulk INSERT, in order — the one-shot lazy-migration path that
+        carries a legacy log.md's lines onto rows verbatim, in file order.
+        No-op on an empty list (skips a pointless commit)."""
+        if not lines:
+            return
+        with self._store._lock:
+            self._store._db.executemany(
+                "INSERT INTO goal_log (goal_id, ts, message) VALUES (?, ?, ?)",
+                [(goal_id, ts_ms, line) for line in lines],
+            )
+            self._store._commit()
+
+    def recent_log_rows(self, goal_id: str, n: int) -> "list[str]":
+        """The last ``n`` ``message`` values, in natural (ascending) order —
+        mirrors the pre-PR6 file read's ``lines[-n:]`` slice. Queried
+        ``ORDER BY id DESC LIMIT n`` (cheap on the goal_id+id index) then
+        reversed in Python, since SQL has no "last n in original order" in
+        one direction."""
+        with self._store._lock:
+            rows = self._store._db.execute(
+                "SELECT message FROM goal_log WHERE goal_id = ? ORDER BY id DESC LIMIT ?",
+                (goal_id, n),
+            ).fetchall()
+        return [r["message"] for r in reversed(rows)]
+
+    def log_contains_row(self, goal_id: str, needle: str) -> bool:
+        """Whether any row's ``message`` contains ``needle`` — the row-backed
+        read behind :meth:`GoalStore.log_contains` (the orphaned-program
+        readopt guard). Uses ``instr(message, ?) > 0`` rather than ``LIKE``
+        to dodge ``%``/``_`` escaping — ``needle`` here is caller-built text
+        (e.g. a program id), never a curated LIKE pattern."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_log WHERE goal_id = ? AND instr(message, ?) > 0 LIMIT 1",
+                (goal_id, needle),
+            ).fetchone()
+        return row is not None
+
+    # ---- goal_deliveries (grounded evidence — deliveries.md today, PR6) ----
+    #
+    # Same mirror-formatted-text rule as goal_log. ``ref_id`` is the
+    # idempotency key a settle passes (the in-flight ref's id): NULL means
+    # "no dedup key" (legacy-ingested sections, or any caller not passing
+    # one) and is always inserted; non-NULL goes through ``INSERT OR IGNORE``
+    # against ``UNIQUE(goal_id, ref_id)`` — closing the PR4-review nuance
+    # where a ``TransitionConflict`` landing in the settle-retry window could
+    # append the SAME delivery twice.
+
+    def has_delivery_rows(self, goal_id: str) -> bool:
+        """Whether ANY ``goal_deliveries`` row exists yet — the lazy-migration
+        guard :meth:`GoalStore._ingest_deliveries` uses."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_deliveries WHERE goal_id = ? LIMIT 1", (goal_id,)
+            ).fetchone()
+        return row is not None
+
+    def append_delivery_row(
+        self, goal_id: str, ref_id: "str | None", block: str, ts_ms: int,
+        *, instruction: str = "",
+    ) -> bool:
+        """INSERT one ``goal_deliveries`` row. ``block`` is the FULL rendered
+        mirror section (``## [<iso>] <instruction>\\n\\n<body>\\n\\n``), stored
+        verbatim in ``body`` so :meth:`GoalStore.recent_deliveries`'s
+        reconstruction is byte-identical to the pre-PR6 file-tail read.
+        ``instruction`` is denormalized into its own column for future
+        queries (never parsed back out of ``block``).
+
+        ``ref_id=None`` → a plain, unconditional INSERT (no idempotency key).
+        ``ref_id`` set → ``INSERT OR IGNORE``: a duplicate ref_id for this
+        goal is silently dropped (the retry-window fix — see the section
+        docstring above). Returns True iff a row was actually inserted, so
+        the caller (``GoalStore.append_delivery``) can skip the file mirror
+        too on the ignored path — a duplicate ref_id must never produce a
+        duplicate section in deliveries.md."""
+        with self._store._lock:
+            if ref_id is None:
+                cur = self._store._db.execute(
+                    "INSERT INTO goal_deliveries (goal_id, ref_id, instruction, body, created_at) "
+                    "VALUES (?, NULL, ?, ?, ?)",
+                    (goal_id, instruction, block, ts_ms),
+                )
+            else:
+                cur = self._store._db.execute(
+                    "INSERT OR IGNORE INTO goal_deliveries "
+                    "(goal_id, ref_id, instruction, body, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (goal_id, ref_id, instruction, block, ts_ms),
+                )
+            inserted = cur.rowcount == 1
+            self._store._commit()
+        return inserted
+
+    def recent_delivery_blocks(self, goal_id: str) -> "list[str]":
+        """Every delivery ``body`` for ``goal_id``, oldest first.
+        :meth:`GoalStore.recent_deliveries` char-tails the joined text, so it
+        needs the FULL sequence — goals carry at most a few dozen deliveries,
+        so reading them all is fine."""
+        with self._store._lock:
+            rows = self._store._db.execute(
+                "SELECT body FROM goal_deliveries WHERE goal_id = ? ORDER BY id ASC",
+                (goal_id,),
+            ).fetchall()
+        return [r["body"] for r in rows]
+
+    # ---- goal_docs (the acceptance contract — checklist/firmed-draft, PR6) -
+    #
+    # One current document per (goal_id, kind), upserted atomically — the
+    # torn-write class T0.4 hardened the FILE view against (tmp + os.replace)
+    # is structurally impossible here: a crash mid-write leaves either the OLD
+    # row or nothing touched, never a half-written one.
+
+    #: The only kinds PR6 backs with rows — spec/discovery stay plain files
+    #: (display/prompt inputs, not consumed-state).
+    DOC_KINDS = frozenset({"checklist", "firmed_draft"})
+
+    def has_doc(self, goal_id: str, kind: str) -> bool:
+        """Whether a ``goal_docs`` row exists for ``(goal_id, kind)`` — the
+        DB-row-vs-legacy-file branch :meth:`GoalStore.read_checklist` /
+        :meth:`GoalStore.read_firmed_draft` use."""
+        assert kind in self.DOC_KINDS, f"has_doc: unknown kind {kind!r}"
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_docs WHERE goal_id = ? AND kind = ? LIMIT 1",
+                (goal_id, kind),
+            ).fetchone()
+        return row is not None
+
+    def write_doc(self, goal_id: str, kind: str, content: str, ts_ms: int) -> None:
+        """Upsert the current document for ``(goal_id, kind)``."""
+        assert kind in self.DOC_KINDS, f"write_doc: unknown kind {kind!r}"
+        with self._store._lock:
+            self._store._db.execute(
+                "INSERT INTO goal_docs (goal_id, kind, content, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(goal_id, kind) DO UPDATE SET "
+                "content = excluded.content, updated_at = excluded.updated_at",
+                (goal_id, kind, content, ts_ms),
+            )
+            self._store._commit()
+
+    def read_doc(self, goal_id: str, kind: str) -> "str | None":
+        """The current document content, or None if no row exists yet
+        (legacy goal pre-migration, or a goal this doc's phase hasn't
+        reached — e.g. no decomposer run, no firming run)."""
+        assert kind in self.DOC_KINDS, f"read_doc: unknown kind {kind!r}"
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT content FROM goal_docs WHERE goal_id = ? AND kind = ?",
+                (goal_id, kind),
+            ).fetchone()
+        return row["content"] if row else None
 
 
 def _row_to_status(row, phase_history: "tuple[dict, ...]") -> GoalStatus:
