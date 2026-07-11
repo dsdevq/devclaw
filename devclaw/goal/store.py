@@ -810,6 +810,16 @@ class GoalStore:
         format — kept EXACTLY, so ``devclaw.trend_signals``' H4 signal, which
         parses that prefix straight off the file, keeps working unchanged.
 
+        The row stores the SAME formatted line as the file, not the bare
+        text: the row's ``line`` is what ``unread_steering`` feeds the
+        planner, and the planner prompt (``prompts/goal-planner.md``)
+        documents evaluator corrections as "marked [auto-eval]" — that
+        marker must survive the move to row-backed steering, byte-identical
+        to what the pre-PR5 file read produced. It also keeps machine rows
+        and hand-ingested rows consistent (both hold the inbox.md line
+        verbatim); the structured ``source`` column exists separately for
+        queries.
+
         Runs ``_ingest_inbox`` FIRST so any pre-existing hand-typed
         ``inbox.md`` lines get their own rows (and the ingest cursor catches
         up to them) BEFORE this call's own cursor math — otherwise a
@@ -842,11 +852,12 @@ class GoalStore:
         if not path.exists():
             path.write_text(f"# {goal_id} — inbox (steering)\n\n")
         ts = self._now().isoformat(timespec="seconds")
+        formatted = [f"- [{source} {ts}] {ln}" for ln in clean]
         with path.open("a") as fh:
-            for ln in clean:
-                fh.write(f"- [{source} {ts}] {ln}\n")
+            for ln in formatted:
+                fh.write(f"{ln}\n")
         with self._state.transaction():
-            self._goal_state.append_steering_rows(goal_id, clean, source=source)
+            self._goal_state.append_steering_rows(goal_id, formatted, source=source)
             self._goal_state.set_inbox_ingest_cursor(goal_id, len(self._inbox_lines(goal_id)))
 
     # ---- helpers -----------------------------------------------------------

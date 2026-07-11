@@ -86,7 +86,9 @@ async def test_steer_during_planner_await_not_lost(tmp_path):
     assert planner.calls == 1
     assert out is Outcome.CONFLICT  # the mid-await write made this tick's own CAS stale
     unread = store.unread_steering_rows("g")
-    assert [line for _, line in unread] == ["mid-await correction"]
+    # rows store the mirror-formatted line (`- [denys <ts>] …`) so the
+    # planner-visible text keeps its source marker — assert on the payload.
+    assert len(unread) == 1 and "mid-await correction" in unread[0][1]
 
     planner2 = FakeClaude(SLEEP)
     out2 = await _tick(store, "g", planner2, evaluator, engine, notifier)
@@ -110,7 +112,8 @@ def test_exact_id_consumption(tmp_path):
     store.append_steering("g", ["first", "second"], source="denys")
 
     rows = store.unread_steering_rows("g")
-    assert [line for _, line in rows] == ["first", "second"]
+    assert len(rows) == 2
+    assert "first" in rows[0][1] and "second" in rows[1][1]
     ids = [rid for rid, _ in rows]
 
     # a third steer lands AFTER the read captured its ids
@@ -127,7 +130,7 @@ def test_exact_id_consumption(tmp_path):
     )
 
     remaining = store.unread_steering_rows("g")
-    assert [line for _, line in remaining] == ["third"]
+    assert len(remaining) == 1 and "third" in remaining[0][1]
 
 
 # ---- 3. consumption is atomic with the decision write -----------------------
@@ -172,7 +175,7 @@ async def test_consumption_atomic_with_decision_write(tmp_path):
 
     assert out is Outcome.CONFLICT
     unread = store.unread_steering_rows("g")
-    assert [line for _, line in unread] == ["do the thing"]
+    assert len(unread) == 1 and "do the thing" in unread[0][1]
 
     planner2 = FakeClaude(SLEEP)
     out2 = await _tick(store, "g", planner2, evaluator, engine, notifier)
@@ -235,10 +238,10 @@ def test_mirror_no_double_ingest(tmp_path):
     store.append_steering("g", ["ship the health check"], source="denys")
 
     rows = store.unread_steering_rows("g")
-    assert [line for _, line in rows] == ["ship the health check"]
+    assert len(rows) == 1 and "ship the health check" in rows[0][1]
     # calling again must not duplicate the mirrored line
     rows_again = store.unread_steering_rows("g")
-    assert [line for _, line in rows_again] == ["ship the health check"]
+    assert [line for _, line in rows_again] == [line for _, line in rows]
 
     # a genuinely hand-typed line, appended straight to the file
     with (tmp_path / "g" / "inbox.md").open("a") as fh:
@@ -246,10 +249,12 @@ def test_mirror_no_double_ingest(tmp_path):
 
     rows_after_hand_append = store.unread_steering_rows("g")
     lines = [line for _, line in rows_after_hand_append]
-    assert lines == [
-        "ship the health check",
-        "- [denys 2026-01-02T00:00:00+00:00] hand-typed note",
-    ]
+    # machine and hand rows alike hold the inbox.md line verbatim — both keep
+    # the `- [source ts]` prefix the planner prompt's [auto-eval]-marker
+    # contract relies on.
+    assert len(lines) == 2
+    assert "ship the health check" in lines[0] and lines[0].startswith("- [denys ")
+    assert lines[1] == "- [denys 2026-01-02T00:00:00+00:00] hand-typed note"
     raw_rows = store._goal_state.unread_steering_rows("g")
     assert [r["source"] for r in raw_rows] == ["denys", "manual"]
 
@@ -274,6 +279,6 @@ def test_ingest_tolerates_cursor_past_file_length(tmp_path):
     (tmp_path / "g" / "inbox.md").write_text("# g — inbox (steering)\n\n")
 
     rows = store.unread_steering_rows("g")  # must not raise / go negative
-    assert [line for _, line in rows] == ["already ingested"]  # the original row is untouched
+    assert len(rows) == 1 and "already ingested" in rows[0][1]  # the original row is untouched
 
     assert store.load_status("g").inbox_cursor == 1  # no new lines to account for — a no-op

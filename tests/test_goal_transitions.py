@@ -302,7 +302,8 @@ async def test_steer_unblock_mid_tick_abandons_cleanly(tmp_path):
     # lines are still unconsumed. Mechanically adapted from the pre-PR5
     # `mid.inbox_cursor == 0` assertion; same intent.
     unconsumed = [line for _, line in store.unread_steering_rows("g")]
-    assert unconsumed == ["first steer", "do X instead"]
+    assert len(unconsumed) == 2
+    assert "first steer" in unconsumed[0] and "do X instead" in unconsumed[1]
 
     planner2 = FakeClaude(SLEEP)
     out2 = await _tick(store, "g", planner2, evaluator, engine, notifier)
