@@ -252,20 +252,22 @@ def test_corrupt_legacy_firmed_draft_still_blocks_loudly_and_is_never_ingested(t
     assert "firmed_draft" not in _peek_goal_docs(store, "g")
 
 
-def test_corrupt_db_row_content_still_raises_never_downgrades(tmp_path):
+def test_corrupt_db_row_content_keeps_the_t04_split(tmp_path):
     """The 'should be impossible' path: SQLite's atomic upsert means a
     goal_docs row can't be torn by a crash, but a hand-poked garbled row must
-    still fail LOUD, not silently degrade — even under on_corrupt='none',
-    which is documented as a display-grade degrade for the LEGACY-file branch
-    only, never for DB-content corruption."""
+    keep the T0.4 contract — the DEFAULT (cognition/gating) read raises
+    GoalDocCorrupt so the tick blocks loudly, while on_corrupt='none' (the
+    display paths — get_goal/tail_goal are documented as 'a dashboard read
+    must never 500 over it') degrades to None. The tick's default read is
+    the loud channel; the dashboard stays readable while the owner
+    diagnoses."""
     store = GoalStore(tmp_path, now=Clock())
     seed_goal(tmp_path, "g")
     store._goal_state.write_doc("g", "checklist", "not yaml: [garbage\n", 1)
 
     with pytest.raises(GoalDocCorrupt):
         store.read_checklist("g")
-    with pytest.raises(GoalDocCorrupt):
-        store.read_checklist("g", on_corrupt="none")  # DB corruption is never downgraded
+    assert store.read_checklist("g", on_corrupt="none") is None
 
 
 # ---- 6. log append keeps mirror + rows in lockstep -------------------------

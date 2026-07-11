@@ -730,6 +730,10 @@ class GoalStore:
             try:
                 return parse_checklist(content)
             except ChecklistParseError as exc:
+                # Honor the T0.4 split even on this should-be-impossible
+                # branch: cognition/gating raises, display degrades.
+                if on_corrupt == "none":
+                    return None
                 raise GoalDocCorrupt(goal_id, "checklist.yaml", exc) from exc
         path = self._dir(goal_id) / "checklist.yaml"
         if not path.exists():
@@ -784,6 +788,10 @@ class GoalStore:
             try:
                 return parse_firmed(content)
             except FirmedParseError as exc:
+                # Honor the T0.4 split even on this should-be-impossible
+                # branch: cognition/gating raises, display degrades.
+                if on_corrupt == "none":
+                    return None
                 raise GoalDocCorrupt(goal_id, "firmed-draft.yaml", exc) from exc
         path = self._dir(goal_id) / "firmed-draft.yaml"
         if not path.exists():
