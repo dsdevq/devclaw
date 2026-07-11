@@ -68,7 +68,8 @@ NotifierSend = Callable[[dict], None]
 
 #: Model tier for the retrospective pass. ``sonnet`` by default — judging
 #: bounded evidence against thresholds doesn't need opus.
-TREND_MODEL = os.environ.get("DEVCLAW_TREND_MODEL", "sonnet") or None
+from .model_tiers import model_for as _model_for
+TREND_MODEL = _model_for("trend")
 
 #: Kill switch for the whole discipline. Set to ``0`` to disable.
 TREND_ENABLED = os.environ.get("DEVCLAW_TREND_ENABLED", "1") != "0"

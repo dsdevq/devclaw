@@ -41,7 +41,8 @@ ClaudeCaller = Callable[[str], Awaitable[str]]
 FIRMING_ENABLED = os.environ.get("DEVCLAW_GOAL_FIRMING", "0") not in ("0", "false", "")
 
 #: firming's model tier — defaults to opus (load-bearing cognition).
-FIRMING_MODEL = os.environ.get("DEVCLAW_GOAL_FIRMING_MODEL", "opus") or None
+from ...model_tiers import model_for as _model_for
+FIRMING_MODEL = _model_for("firming")
 
 
 class FirmingError(Exception):

@@ -22,7 +22,8 @@ import os
 from .planner import ClaudeCaller
 
 #: cheap tier — owner notifications are rare, so this never touches idle quota.
-GOAL_SUMMARY_MODEL = os.environ.get("DEVCLAW_GOAL_SUMMARY_MODEL", "haiku") or None
+from ..model_tiers import model_for as _model_for
+GOAL_SUMMARY_MODEL = _model_for("summary")
 #: on by default; disable with DEVCLAW_GOAL_PLAIN_SUMMARY=0 to send raw text.
 PLAIN_SUMMARY_ENABLED = os.environ.get("DEVCLAW_GOAL_PLAIN_SUMMARY", "1") not in ("0", "false", "")
 

@@ -24,7 +24,6 @@ because nothing ever read it — the only real switch was the global env var).
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
@@ -34,10 +33,10 @@ if TYPE_CHECKING:
 Merger = Callable[[str], Awaitable[bool]]
 
 #: the devclaw-wide default when a project has no override of its own.
-AUTOMERGE_ENABLED = os.environ.get("DEVCLAW_GOAL_AUTOMERGE", "0") not in ("0", "false", "")
+AUTOMERGE_ENABLED = False
 #: the devclaw-wide default merge strategy — a project may override it.
 _VALID_STRATEGIES = ("squash", "merge", "rebase")
-DEFAULT_MERGE_STRATEGY = os.environ.get("DEVCLAW_GOAL_MERGE_STRATEGY", "squash") or "squash"
+DEFAULT_MERGE_STRATEGY = "squash"
 
 
 def resolve_automerge(

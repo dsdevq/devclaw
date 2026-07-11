@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 # durable trace in the sqlite traces table; set to "0" for tests / local runs
 # where the per-tick PersistentTracer would just be noise. Tests inject their
 # own tracer directly when they want to assert on events.
-_TRACE_PERSIST_ENABLED = os.environ.get("DEVCLAW_TRACE_PERSIST", "1") != "0"
+_TRACE_PERSIST_ENABLED = True
 
 
 _BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")
@@ -367,7 +367,7 @@ class GoalService:
 
     def _make_tracer(self, goal_id: str) -> "Optional[_trace.PersistentTracer]":
         """Per-goal-tick PersistentTracer that writes into the sqlite traces
-        table. Disabled when DEVCLAW_TRACE_PERSIST=0 (test/local convenience).
+        table. Tests flip _TRACE_PERSIST_ENABLED off when tracing is noise.
         Each tick gets a fresh ``trace_id`` so the full causal chain of one
         wakeup can be replayed via ``get_trace(goal_id)``.
 

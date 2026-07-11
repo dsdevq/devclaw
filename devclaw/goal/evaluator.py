@@ -40,7 +40,8 @@ _VALID_VERDICTS = {"on_track", "off_track", "achieved", "stalled", "needs_human"
 #: the evaluator's model tier. Judging delivered work against intent is more
 #: load-bearing than picking the next step → defaults a notch up is reasonable,
 #: but sonnet is the cost-conscious default; bump to opus per goal via env.
-GOAL_EVAL_MODEL = os.environ.get("DEVCLAW_GOAL_EVAL_MODEL", "sonnet") or None
+from ..model_tiers import model_for as _model_for
+GOAL_EVAL_MODEL = _model_for("goal_eval")
 
 
 class GoalEvalError(Exception):

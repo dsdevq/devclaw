@@ -78,9 +78,9 @@ TASK_MAX_RETRIES = int(os.environ.get("DEVCLAW_MAX_RETRIES", "1"))
 #: pass (behaviour is proven), a Claude pass READS the diff against the ticket +
 #: the quality bar and can send it back through the retry loop (request_changes)
 #: BEFORE the PR opens — closing the "green but untrustworthy" hole a spectator-PO
-#: can't see. On by default; DEVCLAW_REVIEW_GATE=0 disables it (escape hatch +
-#: quota lever, since it costs one Claude call per successful code task).
-REVIEW_GATE_ENABLED = os.environ.get("DEVCLAW_REVIEW_GATE", "1") not in ("0", "false", "False", "")
+#: can't see. On by default (it costs one Claude call per successful code
+#: task); a project may opt out via its registry `review_gate` override.
+REVIEW_GATE_ENABLED = True
 #: review applies only to code-producing kinds (a diff to read); review_repository
 #: is read-only and onboard writes only a comprehension doc.
 _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
@@ -90,16 +90,16 @@ _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
 #: named this: 2026-07-02 closeloop retry storm — 6+ duplicate dispatches racing
 #: on the same repo burned quota with zero PR output because per-task retries
 #: alone don't stop a workspace-level defect. Threshold <=0 disables.
-WORKSPACE_BREAK_THRESHOLD = int(os.environ.get("DEVCLAW_WORKSPACE_BREAK_THRESHOLD", "3"))
-WORKSPACE_BREAK_WINDOW_S = float(os.environ.get("DEVCLAW_WORKSPACE_BREAK_WINDOW_S", "900"))
-WORKSPACE_BREAK_HOLD_S = float(os.environ.get("DEVCLAW_WORKSPACE_BREAK_HOLD_S", "1800"))
+WORKSPACE_BREAK_THRESHOLD = 3
+WORKSPACE_BREAK_WINDOW_S = 900.0
+WORKSPACE_BREAK_HOLD_S = 1800.0
 #: how many usage-limit pause→requeue cycles a single task gets before it is
 #: FAILED instead of requeued again. A permanently-failing task whose error text
 #: happens to match the quota/rate regexes would otherwise loop pause→requeue→
 #: re-run forever — the workspace breaker never sees it (a paused task never
 #: becomes a `failed` row). The global pause is still set either way: the
 #: account really is limited; only the doomed task stops riding it.
-MAX_PAUSE_REQUEUES = int(os.environ.get("DEVCLAW_MAX_PAUSE_REQUEUES", "5"))
+MAX_PAUSE_REQUEUES = 5
 
 #: _run_and_settle returns this when a task was paused for a quota limit (not
 #: settled): the task is back to 'pending' and the global pause holds dispatch.

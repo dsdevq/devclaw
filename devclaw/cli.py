@@ -370,7 +370,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--notes")
     p_reg.add_argument("--automerge", choices=["on", "off"],
                         help="pin auto-merge for this project; omit to inherit "
-                             "the devclaw-wide DEVCLAW_GOAL_AUTOMERGE default")
+                             "the devclaw-wide default (off)")
     p_reg.add_argument("--merge-strategy", choices=["squash", "merge", "rebase"],
                         help="pin the gh merge strategy; omit to inherit the default")
     p_reg.add_argument("--autodeploy", choices=["on", "off"],

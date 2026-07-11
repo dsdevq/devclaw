@@ -21,7 +21,8 @@ from ..planner import PlannerError, claude_with_model, extract_json
 
 #: the judge buckets a run into a fixed vocabulary + a suggestion — bounded
 #: classification, so Haiku is the right tier. Empty → account default.
-JUDGE_MODEL = os.environ.get("DEVCLAW_JUDGE_MODEL", "haiku") or None
+from ..model_tiers import model_for as _model_for
+JUDGE_MODEL = _model_for("judge")
 #: default cognition caller for the judge, bound to the judge tier
 judge_caller = claude_with_model(JUDGE_MODEL, role="judge")
 

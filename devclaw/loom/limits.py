@@ -25,7 +25,6 @@ parsed only when the caller injects ``now_utc`` — the module stays pure.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -37,9 +36,9 @@ from enum import Enum
 # when the limit lifts, relative ("in 2 hours") or absolute ("resets 10pm") —
 # is trusted up to STATED_MAX instead: clamping it to MAX made devclaw re-probe
 # a multi-hour/day cap hourly, each probe a doomed dispatch.
-RATE_LIMIT_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_PAUSE_S", "1800"))
-RATE_LIMIT_MAX_PAUSE_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_MAX_PAUSE_S", "3600"))
-RATE_LIMIT_STATED_MAX_S = int(os.environ.get("DEVCLAW_RATE_LIMIT_STATED_MAX_S", "86400"))
+RATE_LIMIT_PAUSE_S = 1800
+RATE_LIMIT_MAX_PAUSE_S = 3600
+RATE_LIMIT_STATED_MAX_S = 86_400
 
 
 def pause_seconds(retry_after_s: int | None, *, stated: bool = False) -> int:

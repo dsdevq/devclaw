@@ -52,13 +52,14 @@ ClaudeCaller = Callable[[str], Awaitable[str]]
 #: the decomposer's model tier. Runs ONCE per goal at lifecycle transition;
 #: high-leverage (gets the structured plan right) → defaults to Opus, same as
 #: the DAG planner. Override per-goal via env when you want Sonnet's speed.
-DECOMPOSER_MODEL = os.environ.get("DEVCLAW_GOAL_DECOMPOSER_MODEL", "opus") or None
+from ..model_tiers import model_for as _model_for
+DECOMPOSER_MODEL = _model_for("decomposer")
 
 #: per-call timeout. Decomposition routinely emits multi-KB structured YAML
 #: (a whole-CRM goal measured at ~18 KB / ~2 min on opus), well past the global
 #: 90s ceiling. Override via env if the goal is unusually large/small. The
 #: global ``PLANNER_TIMEOUT_MS`` ceiling does NOT apply when this is set.
-DECOMPOSER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_GOAL_DECOMPOSER_TIMEOUT_MS", "300000"))
+DECOMPOSER_TIMEOUT_MS = 300_000
 
 
 class GoalDecomposerError(Exception):

@@ -349,14 +349,15 @@ def _wire_env(goals_dir: Path) -> None:
     os.environ["DEVCLAW_ENGINE"] = "stub"
     os.environ["DEVCLAW_GOALS_DIR"] = str(goals_dir)
     os.environ.setdefault("DEVCLAW_GOAL_PLAIN_SUMMARY", "0")  # skip the summary call for clean traces
-    # A scenario reaching 'achieved' would otherwise try a real Tailscale deploy
-    # via deploy.deploy_project — docker, port allocation, the works. Off in sandbox.
-    os.environ.setdefault("DEVCLAW_GOAL_AUTODEPLOY", "0")
 
 
 def _patch_for_sandbox() -> None:
     """Patch prepare_workspace + the goal-store clock so the sandbox is fully
     self-contained AND deterministic (timestamps don't drift across runs)."""
+    # A scenario reaching 'achieved' would otherwise try a real Tailscale deploy
+    # via deploy.deploy_project — docker, port allocation, the works. Off in sandbox.
+    import devclaw.goal.tick as _tick_mod
+    _tick_mod.AUTODEPLOY_ENABLED = False
     import devclaw.engine.workspace as _ws_mod
 
     async def _sandbox_prep(ws_dir: str, repo_url: "str | None" = None) -> str:

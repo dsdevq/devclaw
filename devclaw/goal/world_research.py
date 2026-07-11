@@ -29,7 +29,6 @@ See ~/memory/projects/devclaw/chain-map-2026-06-30.md row 9.
 
 from __future__ import annotations
 
-import os
 from typing import Awaitable, Callable
 
 from .models import Goal
@@ -38,16 +37,15 @@ ClaudeCaller = Callable[[str], Awaitable[str]]
 
 #: the world-research model tier. Runs ONCE per from-scratch goal at
 #: alignment time; high-leverage (sets the bar the rest of the chain plans
-#: against) → defaults to opus. Override per goal via env when needed.
-WORLD_RESEARCH_MODEL = os.environ.get("DEVCLAW_GOAL_WORLD_RESEARCH_MODEL", "opus") or None
+#: against) → runs at the deep tier.
+from ..model_tiers import model_for as _model_for
+WORLD_RESEARCH_MODEL = _model_for("world_research")
 
 #: per-call timeout. The brief is ~300-500 words of structured markdown,
 #: well within opus's normal generation budget but with the same kind of
 #: variance the decomposer showed — set generously and bound by the
 #: per-role timeout pattern from planner.py.
-WORLD_RESEARCH_TIMEOUT_MS = int(
-    os.environ.get("DEVCLAW_GOAL_WORLD_RESEARCH_TIMEOUT_MS", "180000")
-)
+WORLD_RESEARCH_TIMEOUT_MS = 180_000
 
 
 class WorldResearchError(RuntimeError):

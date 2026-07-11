@@ -26,14 +26,15 @@ from ..planner import PlannerError, claude_with_model, extract_json
 #: Adversarial code review is judgment-heavy — Sonnet is the right tier (matches
 #: the scope grill; heavier than the Haiku classification judge, lighter than the
 #: Opus planner). Empty → account default.
-REVIEW_MODEL = os.environ.get("DEVCLAW_REVIEW_MODEL", "sonnet") or None
+from ..model_tiers import model_for as _model_for
+REVIEW_MODEL = _model_for("review")
 #: default cognition caller for the review, bound to the review tier
 review_caller = claude_with_model(REVIEW_MODEL, role="review")
 
 #: cap the diff we send so a huge change can't blow the prompt / quota. Tail-kept
 #: would lose the header, so we head-keep (the start of the diff, where the
 #: substantive files usually are) and note the truncation.
-_MAX_DIFF_CHARS = int(os.environ.get("DEVCLAW_REVIEW_MAX_DIFF_CHARS", "60000"))
+_MAX_DIFF_CHARS = 60_000
 
 _SEVERITIES = ("blocker", "major", "minor")
 

@@ -27,7 +27,7 @@ from .state_store import TaskKind
 #: :func:`claude_with_model` when its expected output volume warrants — the
 #: decomposer is the canonical example (opus generating multi-KB YAML
 #: routinely exceeds 90s).
-PLANNER_TIMEOUT_MS = int(os.environ.get("DEVCLAW_PLANNER_TIMEOUT_MS", "90000"))
+PLANNER_TIMEOUT_MS = 90_000
 CLAUDE_BIN = os.environ.get("DEVCLAW_CLAUDE_BIN", "claude")
 MAX_TASKS_PER_PLAN = 20
 
@@ -39,7 +39,8 @@ MAX_TASKS_PER_PLAN = 20
 # is bounded classification → Haiku (set in eval_judge.py). The heavy coding path
 # (OpenHands) is tiered separately via DEVCLAW_EXEC_MODEL. An empty value →
 # the CLI's account default (no --model flag passed).
-PLANNER_MODEL = os.environ.get("DEVCLAW_PLANNER_MODEL", "opus") or None
+from .model_tiers import model_for as _model_for
+PLANNER_MODEL = _model_for("planner")
 
 VALID_KINDS: tuple[TaskKind, ...] = ("implement_feature", "fix_bug", "review_repository")
 

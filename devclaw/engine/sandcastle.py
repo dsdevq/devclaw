@@ -66,7 +66,7 @@ SANDBOX_LABEL = "devclaw.sandbox=1"
 # against a wedged docker daemon would defeat the very timeout it serves. On
 # expiry we log one line and move on: the container may leak until the next
 # startup sweep, but the orchestrator never hangs.
-TEARDOWN_TIMEOUT_S = float(os.environ.get("DEVCLAW_TEARDOWN_TIMEOUT_S", "30"))
+TEARDOWN_TIMEOUT_S = 30.0
 # Per-call cap for the synchronous docker CLI calls in the startup sweep — the
 # sweep runs before the server serves, so it must be bounded too.
 SWEEP_DOCKER_TIMEOUT_S = 10.0

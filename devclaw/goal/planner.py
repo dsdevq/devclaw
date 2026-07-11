@@ -29,7 +29,8 @@ _VALID_TOOLS = {"start_program", "implement_feature", "fix_bug", "review_reposit
 _VALID_DECISIONS = {"act", "sleep", "blocked", "done"}
 
 #: the goal planner's model tier (bounded JSON, light reasoning → sonnet)
-GOAL_PLANNER_MODEL = os.environ.get("DEVCLAW_GOAL_PLANNER_MODEL", "sonnet") or None
+from ..model_tiers import model_for as _model_for
+GOAL_PLANNER_MODEL = _model_for("goal_planner")
 
 
 class GoalPlannerError(Exception):

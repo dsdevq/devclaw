@@ -12,7 +12,6 @@ output, so MCP consumers keep working across the rewrite.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import threading
 import time
@@ -245,7 +244,7 @@ def _row_to_event(r: sqlite3.Row) -> TaskEvent:
 #: (e.g. the ``devclaw`` CLI) writing while the server holds the write lock fails
 #: instantly instead of waiting its turn. A few seconds lets contending writers
 #: queue politely. Shared default with ``project_registry`` (same db file).
-SQLITE_BUSY_TIMEOUT_MS = int(os.environ.get("DEVCLAW_SQLITE_BUSY_TIMEOUT_MS", "5000"))
+SQLITE_BUSY_TIMEOUT_MS = 5000
 
 
 class StateStore:
