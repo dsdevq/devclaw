@@ -63,10 +63,13 @@ class GoalState:
                 -- source of truth for status; STATUS.md is a generated
                 -- full-fidelity view written on every save (the rollback path).
                 -- `phase`/`lifecycle` are the current GoalStatus fields;
-                -- `state` is reserved (nullable, unused) for PR4's consolidated
-                -- enum. `version` is an optimistic-concurrency counter a later
-                -- PR bumps on each write; in_flight_* carry the durable pointer
-                -- to the goal's running task/program (in_flight_json is the
+                -- `state` (PR4) holds the consolidated devclaw.goal.transitions
+                -- .State value, stamped by GoalStore on every write (nullable
+                -- only for a pre-PR4 row that hasn't been re-saved yet).
+                -- `version` (PR4) is the optimistic-concurrency counter
+                -- GoalStore.transition() CAS's against, bumped by exactly 1 on
+                -- every write; in_flight_* carry the durable pointer to the
+                -- goal's running task/program (in_flight_json is the
                 -- authoritative serialized InFlight, ref_id/kind denormalized
                 -- for later indexing).
                 CREATE TABLE IF NOT EXISTS goal_status (
@@ -222,7 +225,16 @@ class GoalState:
         """Upsert the status row. The InFlight is serialized to in_flight_json
         (authoritative) with id/kind denormalized for later indexing; the
         phase_history tuple is NOT written here — it lives in
-        goal_phase_history (see :meth:`append_phase_history`)."""
+        goal_phase_history (see :meth:`append_phase_history`).
+
+        ``version`` is bumped by exactly 1 on EVERY write — 1 on the first
+        INSERT, ``version + 1`` on every subsequent UPDATE — the counter
+        GoalStore.transition() CAS's against and computes its return value
+        from (``fresh.version + 1``) without a re-read. ``state`` is written
+        verbatim from ``status.state``: this method is a pure DB write, not a
+        projector — the CALLER (GoalStore.save_status / .transition /
+        .force_block) is responsible for stamping the derived
+        devclaw.goal.transitions.State value onto ``status`` first."""
         in_flight_json = None
         in_flight_ref_id = None
         in_flight_kind = None
@@ -246,13 +258,15 @@ class GoalState:
             self._store._db.execute(
                 """
                 INSERT INTO goal_status (
-                  goal_id, phase, lifecycle, blocked_on, "next", last_plan_at,
-                  last_tick_at, actions_dispatched, deliveries_since_eval,
+                  goal_id, version, state, phase, lifecycle, blocked_on, "next",
+                  last_plan_at, last_tick_at, actions_dispatched, deliveries_since_eval,
                   last_eval_verdict, last_eval_at, last_eval_note, last_progress_at,
                   no_progress_notified, in_flight_ref_id, in_flight_kind,
                   in_flight_json, inbox_ingest_cursor, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(goal_id) DO UPDATE SET
+                  version               = goal_status.version + 1,
+                  state                 = excluded.state,
                   phase                 = excluded.phase,
                   lifecycle             = excluded.lifecycle,
                   blocked_on            = excluded.blocked_on,
@@ -274,6 +288,7 @@ class GoalState:
                 """,
                 (
                     goal_id,
+                    status.state,
                     status.phase,
                     status.lifecycle,
                     status.blocked_on,
@@ -293,6 +308,52 @@ class GoalState:
                     status.inbox_cursor,
                     _now_ms(),
                 ),
+            )
+            self._store._commit()
+
+    #: telemetry-only GoalStatus fields GoalStore.update_status_fields() may
+    #: touch via :meth:`update_columns` — a column-only UPDATE, never a
+    #: full-row rewrite (the mechanism that keeps a stale-snapshot bookkeeping
+    #: write from ever clobbering a concurrent phase/lifecycle/in_flight
+    #: transition). Keys are GoalStatus field names; values are the
+    #: `goal_status` column name (identical today, kept as a mapping so a
+    #: future rename only touches one side).
+    STATUS_FIELD_COLUMNS: "dict[str, str]" = {
+        "last_plan_at": "last_plan_at",
+        "last_tick_at": "last_tick_at",
+        "last_progress_at": "last_progress_at",
+        "no_progress_notified": "no_progress_notified",
+        "last_eval_verdict": "last_eval_verdict",
+        "last_eval_at": "last_eval_at",
+        "last_eval_note": "last_eval_note",
+        "deliveries_since_eval": "deliveries_since_eval",
+    }
+
+    def update_columns(self, goal_id: str, fields: dict) -> None:
+        """Column-only ``UPDATE`` for telemetry fields — the mechanism behind
+        :meth:`GoalStore.update_status_fields`. Bumps ``version`` by 1 like
+        every other write, but touches ONLY the named columns (never phase/
+        lifecycle/in_flight/blocked_on/next), so it can never be the write
+        that clobbers a concurrent state transition. Caller has already
+        validated ``fields`` keys against :data:`STATUS_FIELD_COLUMNS`; a
+        no-op (no SQL issued) on an empty dict."""
+        if not fields:
+            return
+        sets = []
+        params: list = []
+        for key, value in fields.items():
+            col = self.STATUS_FIELD_COLUMNS[key]
+            if key == "no_progress_notified":
+                value = 1 if value else 0
+            sets.append(f"{col} = ?")
+            params.append(value)
+        params.append(_now_ms())
+        params.append(goal_id)
+        with self._store._lock:
+            self._store._db.execute(
+                f"UPDATE goal_status SET {', '.join(sets)}, version = version + 1, "
+                "updated_at = ? WHERE goal_id = ?",
+                params,
             )
             self._store._commit()
 
@@ -371,4 +432,6 @@ def _row_to_status(row, phase_history: "tuple[dict, ...]") -> GoalStatus:
         last_progress_at=row["last_progress_at"] or None,
         no_progress_notified=bool(row["no_progress_notified"]),
         phase_history=phase_history,
+        state=row["state"] or None,
+        version=int(row["version"] or 0),
     )
