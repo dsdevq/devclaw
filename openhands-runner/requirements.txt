@@ -2,3 +2,11 @@
 # Bump deliberately (sandbox image must be rebuilt + pre-pulled on VPS).
 openhands-sdk==1.24.0
 openhands-tools==1.24.0
+# TRANSITIVE dep of openhands-sdk, pinned explicitly: openhands-sdk 1.24.0
+# calls conn.prompt(prompt_blocks, session_id) POSITIONALLY, and acp 0.11.0
+# flipped the signature to (session_id, prompt) — every sandbox agent turn
+# then dies with a swapped-fields PromptRequest validation error (live-found
+# 2026-07-11 by the T1 exit shakedown, L1; the unpinned dep rode into both
+# the local AND the VPS image via --no-cache rebuilds). Bump ONLY together
+# with an openhands-sdk version whose acp_agent matches the new order.
+agent-client-protocol==0.10.1
