@@ -140,7 +140,12 @@ class GoalStatus:
     last_plan_at: Optional[str] = None
     #: ISO ts of the last tick (cheap or not)
     last_tick_at: Optional[str] = None
-    #: number of inbox.md lines already consumed as steering
+    #: number of inbox.md lines already INGESTED into goal_steering rows
+    #: (Tranche 1/PR5 — was the consume cursor pre-PR5; consumption is now by
+    #: exact row id via GoalStore.transition(consume_steering=...), never by
+    #: counting lines). Kept on the dataclass for STATUS.md frontmatter
+    #: rendering / rollback fidelity; PR8 deletes the field once STATUS.md
+    #: stops needing to carry it.
     inbox_cursor: int = 0
     #: total engine actions dispatched for this goal — a runaway backstop
     actions_dispatched: int = 0

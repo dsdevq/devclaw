@@ -12,9 +12,15 @@ owning goal's state can be written in one atomic :meth:`StateStore.transaction`.
 now owns the status read/write surface (:meth:`read_status` /
 :meth:`write_status` / the phase-history methods); ``GoalStore.load_status`` /
 ``save_status`` are re-backed onto it, with ``STATUS.md`` demoted to a
-generated full-fidelity view (the rollback path). The remaining tables
-(``goal_steering`` / ``goal_log`` / ``goal_deliveries`` / ``goal_settlements``
-/ ``goal_docs``) stay created-but-empty until later PRs migrate onto them.
+generated full-fidelity view (the rollback path).
+
+**PR5 brought ``goal_steering`` LIVE.** ``consumed_at IS NULL`` is now the
+source of truth for "unread" — ``GoalStore.append_steering`` /
+``_ingest_inbox`` write rows, ``GoalStore.transition(consume_steering=...)``
+consumes them by exact id. ``inbox.md`` stays both the human-readable mirror
+and a hand-append input (lazily ingested into rows). The remaining tables
+(``goal_log`` / ``goal_deliveries`` / ``goal_settlements`` / ``goal_docs``)
+stay created-but-empty until later PRs migrate onto them.
 """
 
 from __future__ import annotations
@@ -104,8 +110,11 @@ class GoalState:
                   at         TEXT NOT NULL
                 );
 
-                -- Steering lines (inbox.md today). consumed_at NULL == unread;
-                -- a later migration stamps it when the tick ingests the line.
+                -- Steering lines (inbox.md is the human-readable mirror +
+                -- hand-append input — PR5). consumed_at NULL == unread, the
+                -- source of truth for what the planner hasn't seen yet;
+                -- GoalStore.transition(consume_steering=[...]) stamps it,
+                -- atomically with the decision the steering informed.
                 CREATE TABLE IF NOT EXISTS goal_steering (
                   id          INTEGER PRIMARY KEY AUTOINCREMENT,
                   goal_id     TEXT NOT NULL,
@@ -354,6 +363,111 @@ class GoalState:
                 f"UPDATE goal_status SET {', '.join(sets)}, version = version + 1, "
                 "updated_at = ? WHERE goal_id = ?",
                 params,
+            )
+            self._store._commit()
+
+    def set_inbox_ingest_cursor(self, goal_id: str, n: int) -> None:
+        """Column-only ``UPDATE`` of ``inbox_ingest_cursor`` — the PR5 write
+        side of the ingest boundary (how many ``inbox.md`` lines have been
+        converted into ``goal_steering`` rows, NOT how many are consumed —
+        see :meth:`GoalStore._ingest_inbox`). Bumps ``version`` by 1 like
+        every other write (the PR4 rule: every write bumps version), which is
+        WHY callers that hold an in-flight ``status`` snapshot spanning an
+        ingest must reload before using it as a later ``transition()``
+        ``expect=`` — a stale version there would self-conflict against this
+        write, not a real race. Caller ensures the row exists first (mirrors
+        :meth:`update_columns`)."""
+        with self._store._lock:
+            self._store._db.execute(
+                "UPDATE goal_status SET inbox_ingest_cursor = ?, version = version + 1, "
+                "updated_at = ? WHERE goal_id = ?",
+                (n, _now_ms(), goal_id),
+            )
+            self._store._commit()
+
+    # ---- goal_steering (steering rows — PR5 consumed-at source of truth) ---
+    #
+    # ``consumed_at IS NULL`` == unread. Rows are the source of truth for
+    # WHAT is unread; ``goal_status.inbox_ingest_cursor`` (above) is a
+    # SEPARATE, unrelated boundary — how far into ``inbox.md`` the rows
+    # extend, so a hand-typed line is only ever ingested once. Consumption
+    # (stamping ``consumed_at``) happens ONLY via :meth:`consume_steering_rows`,
+    # called from :meth:`GoalStore.transition` so it rides the SAME CAS'd
+    # transaction as the decision the steering informed.
+
+    def has_steering_rows(self, goal_id: str) -> bool:
+        """Whether ANY ``goal_steering`` row (consumed or not) exists yet —
+        the lazy-migration guard in :meth:`GoalStore._ingest_inbox`: the
+        pre-PR5 history backfill may only run ONCE, on the very first ingest
+        for a goal that predates row-backed steering. Idempotent by
+        construction — once any row exists, this returns True forever."""
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT 1 FROM goal_steering WHERE goal_id = ? LIMIT 1", (goal_id,)
+            ).fetchone()
+        return row is not None
+
+    def append_steering_rows(
+        self, goal_id: str, lines: "list[str]", *, source: str,
+        created_at_ms: "int | None" = None, consumed: bool = False,
+    ) -> "list[int]":
+        """INSERT one ``goal_steering`` row per line, in order. ``line`` is
+        stored VERBATIM — callers that ingest hand-typed ``inbox.md`` content
+        pass the raw line (which may itself carry an old ``[source ts]``
+        prefix; this method never parses it). ``consumed=True`` stamps
+        ``consumed_at = created_at`` immediately — used ONLY by the lazy
+        pre-PR5 migration to mark already-acted-on history so it's never
+        re-fed to the planner; the steering-append default (``consumed=False``)
+        leaves ``consumed_at`` NULL, per the new unread-by-row-id model.
+        Returns the inserted rowids in insertion (== id) order."""
+        if not lines:
+            return []
+        ts = created_at_ms if created_at_ms is not None else _now_ms()
+        ids: list[int] = []
+        with self._store._lock:
+            for line in lines:
+                cur = self._store._db.execute(
+                    "INSERT INTO goal_steering (goal_id, source, line, created_at, consumed_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (goal_id, source, line, ts, ts if consumed else None),
+                )
+                ids.append(cur.lastrowid)
+            self._store._commit()
+        return ids
+
+    def unread_steering_rows(self, goal_id: str) -> "list[sqlite3.Row]":
+        """Unconsumed ``goal_steering`` rows, oldest first — ``consumed_at IS
+        NULL`` is the unread marker PR5 makes the source of truth. Each row
+        carries ``id`` / ``source`` / ``line`` (plus the sqlite defaults);
+        callers needing exact-id consumption read ``row["id"]`` and thread it
+        into :meth:`GoalStore.transition`'s ``consume_steering=``."""
+        with self._store._lock:
+            rows = self._store._db.execute(
+                "SELECT id, source, line FROM goal_steering "
+                "WHERE goal_id = ? AND consumed_at IS NULL ORDER BY id ASC",
+                (goal_id,),
+            ).fetchall()
+        return rows
+
+    def consume_steering_rows(self, goal_id: str, ids: "list[int]", consumed_at_ms: int) -> None:
+        """Stamp ``consumed_at`` on EXACTLY the given row ids — the exact-id
+        consumption :meth:`GoalStore.transition`'s ``consume_steering=``
+        threads through, so a row inserted mid-plan (not among ``ids``) keeps
+        ``consumed_at`` NULL and is seen next tick — the fix for
+        "steer-during-planner-await lost" (the old count-based cursor
+        consumed EVERYTHING that existed at write time, including rows the
+        planner never saw). No-op on empty ``ids`` (also avoids an ``IN ()``
+        empty-tuple SQL error). The ``AND consumed_at IS NULL`` guard makes a
+        double-consume of the same id a no-op rather than clobbering an
+        earlier (real) consumed_at timestamp."""
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        with self._store._lock:
+            self._store._db.execute(
+                f"UPDATE goal_steering SET consumed_at = ? "
+                f"WHERE goal_id = ? AND id IN ({placeholders}) AND consumed_at IS NULL",
+                (consumed_at_ms, goal_id, *ids),
             )
             self._store._commit()
 
