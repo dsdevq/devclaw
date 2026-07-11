@@ -372,3 +372,99 @@ descoped:
     assert "shared aggregation utility" in prompt
     assert "Descoped" in prompt
     assert "per-day granularity" in prompt
+
+
+# ---- fresh-snapshot landing (post-T1/PR4 CAS regression, 2026-07-11) --------
+
+
+@pytest.mark.asyncio
+async def test_handle_answer_survives_heartbeat_telemetry_bump(store_with_goal):
+    """Regression: the heartbeat bumps a parked firming goal's version every
+    tick (the can_run=False → update_status_fields(last_tick_at=...) path in
+    tick._dispatch_phase_handler), and handle_answer's cognition awaits span
+    that window. Landing the firming result against the pre-cognition snapshot
+    made the version CAS fail on a PURE-TELEMETRY write — a spurious
+    TransitionConflict surfaced to the answer_unknowns MCP caller. _land must
+    transition from a just-loaded snapshot instead."""
+    store = store_with_goal
+    notifier = RecordingNotifier()
+    store.write_firmed_draft("g", parse_firmed(DRAFT_WITH_UNKNOWNS))
+    store.save_status(
+        "g", GoalStatus(lifecycle="firming", phase="blocked", blocked_on="1 question"),
+    )
+
+    async def bumping_firming_caller(prompt: str) -> str:
+        # a heartbeat idle-tick lands mid-cognition: telemetry-only, version+1
+        store.update_status_fields("g", last_tick_at=store.now_iso())
+        return DRAFT_FIRMED
+
+    decomposer = FakeClaude(response=DECOMPOSER_CHECKLIST_YAML, role="goal_decomposer")
+    handler = FirmingHandler(caller=bumping_firming_caller, decomposer_caller=decomposer)
+
+    result = await handler.handle_answer(
+        "g", {"cf-u1": "calendar_month"}, ctx=_ctx(store, notifier),
+    )
+
+    assert result["status"] == "firmed"
+    after = store.load_status("g")
+    assert after.lifecycle == "executing"
+    assert after.phase == "idle"
+
+
+@pytest.mark.asyncio
+async def test_handle_answer_cancel_mid_cognition_wins(store_with_goal):
+    """Regression: a cancel_goal landing during the firming cognition await
+    must WIN — _land must not resurrect the cancelled goal by transitioning it
+    back to executing (the stale-snapshot un-cancel class, firming edition).
+    The draft still lands on disk (audit trail); the status stays cancelled."""
+    from dataclasses import replace
+
+    from devclaw.goal.transitions import Event
+
+    store = store_with_goal
+    notifier = RecordingNotifier()
+    store.write_firmed_draft("g", parse_firmed(DRAFT_WITH_UNKNOWNS))
+    store.save_status(
+        "g", GoalStatus(lifecycle="firming", phase="blocked", blocked_on="1 question"),
+    )
+
+    async def cancelling_firming_caller(prompt: str) -> str:
+        # the owner cancels while firming cognition is in flight
+        s = store.load_status("g")
+        store.transition(
+            "g", Event.CANCEL, replace(s, phase="cancelled", in_flight=None), expect=s,
+        )
+        return DRAFT_FIRMED
+
+    decomposer = FakeClaude(response=DECOMPOSER_CHECKLIST_YAML, role="goal_decomposer")
+    handler = FirmingHandler(caller=cancelling_firming_caller, decomposer_caller=decomposer)
+
+    await handler.handle_answer("g", {"cf-u1": "calendar_month"}, ctx=_ctx(store, notifier))
+
+    after = store.load_status("g")
+    assert after.phase == "cancelled"          # cancel won — never resurrected
+    assert store.read_firmed_draft("g").status == "firmed"  # audit trail kept
+
+
+@pytest.mark.asyncio
+async def test_round_1_failure_fallback_survives_telemetry_bump(store_with_goal):
+    """Regression: run()'s FirmingError fallback (unparseable draft → degrade
+    to executing) also lands after a cognition await — same spurious-conflict
+    exposure as handle_answer. It must transition from a fresh snapshot."""
+    store = store_with_goal
+    notifier = RecordingNotifier()
+
+    async def bumping_bad_caller(prompt: str) -> str:
+        store.update_status_fields("g", last_tick_at=store.now_iso())
+        return "not: [valid firmed yaml"
+
+    handler = FirmingHandler(caller=bumping_bad_caller)
+    goal = store.load_goal("g")
+    status = store.load_status("g")
+
+    result = await handler.run("g", goal, status, _ctx(store, notifier))
+
+    assert result.outcome == "advanced"
+    after = store.load_status("g")
+    assert after.lifecycle == "executing"
+    assert after.phase == "idle"

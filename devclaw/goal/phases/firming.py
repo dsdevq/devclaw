@@ -53,6 +53,31 @@ class FirmingError(Exception):
         self.raw = raw
 
 
+def _load_for_transition(store: GoalStore, goal_id: str) -> "GoalStatus | None":
+    """Reload the status RIGHT BEFORE a firming transition — no awaits may sit
+    between this load and the ``store.transition()`` call that consumes it.
+
+    Firming's transitions land after long cognition awaits (the firming round
+    itself, then the decomposer), and the heartbeat bumps a parked firming
+    goal's ``version`` on every tick (the ``can_run=False`` →
+    ``update_status_fields(last_tick_at=...)`` path in
+    ``tick._dispatch_phase_handler``). Transitioning against the pre-cognition
+    snapshot therefore fails the version CAS on a PURE-TELEMETRY write —
+    surfacing a spurious ``TransitionConflict`` to the ``answer_unknowns`` MCP
+    caller for a race the owner didn't cause and can't see. Loading fresh here
+    closes that window (single event loop: nothing can interleave between a
+    sync load and a sync transition).
+
+    Returns ``None`` when the goal reached a terminal phase mid-cognition —
+    a concurrent ``cancel_goal`` must WIN, quietly: the caller records the
+    firming result and leaves the goal untouched instead of resurrecting it
+    (the stale-snapshot un-cancel class, firming edition)."""
+    fresh = store.load_status(goal_id)
+    if fresh.phase in ("done", "cancelled"):
+        return None
+    return fresh
+
+
 def _build_prompt(
     goal: Goal,
     *,
@@ -221,10 +246,20 @@ class FirmingHandler:
             store.append_log(goal_id, f"firming round 1 failed: {exc}")
             # Fall through to executing — firming is foundational but must not
             # wedge a goal forever (mirrors the discovery-synthesis degrade).
+            # Transition from a JUST-loaded snapshot, not the pre-cognition
+            # `status` (see _load_for_transition — a heartbeat telemetry bump
+            # during the failed cognition await must not conflict this write).
+            fresh = _load_for_transition(store, goal_id)
+            if fresh is None:
+                store.append_log(
+                    goal_id,
+                    "firming fallback skipped — goal reached a terminal phase mid-firming",
+                )
+                return PhaseResult(outcome="slept", note="goal terminal; firming abandoned")
             store.transition(
                 goal_id, Event.FIRMING_ADVANCE,
-                replace(status, lifecycle="executing", phase="idle"),
-                expect=status,
+                replace(fresh, lifecycle="executing", phase="idle"),
+                expect=fresh,
             )
             await ctx.notifier.send(
                 f"⚠️ [{goal_id}] firming failed ({exc}) — proceeding without it"
@@ -232,7 +267,7 @@ class FirmingHandler:
             return PhaseResult(outcome="advanced", note="firming failed; falling back")
 
         store.write_firmed_draft(goal_id, draft)
-        return await self._land(goal_id, draft, status, ctx, round_=1)
+        return await self._land(goal_id, draft, ctx, round_=1)
 
     async def handle_answer(
         self,
@@ -249,18 +284,16 @@ class FirmingHandler:
         Returns a dict with ``status`` ('firmed' | 'needs_more_answers'),
         ``unknowns`` (populated when more answers are needed), and ``round``.
 
-        ``status`` is loaded fresh at the top of this method, but the firming
-        cognition call (``_firm_once``) awaits in between that load and the
-        eventual ``store.transition()`` in ``_land`` — if a concurrent
-        cancel/steer lands during that window, the transition CAS fails and
-        ``TransitionConflict`` propagates uncaught to the ``answer_unknowns``
-        MCP caller. Acceptable: this is an owner-invoked, on-demand call, not
-        a heartbeat tick — there's no choke-point catch to swallow it, and a
-        visible error here is the right signal (retry answering)."""
+        The firming cognition awaits span minutes, and the heartbeat bumps a
+        parked firming goal's version every tick — so ``_land`` transitions
+        from a snapshot loaded RIGHT before the write (see
+        :func:`_load_for_transition`), never from a pre-cognition one. A goal
+        cancelled mid-cognition stays cancelled (the draft is still written —
+        audit trail — but no transition fires); the returned dict then
+        reflects the draft, not the goal's phase."""
         store = ctx.store
         caller = self._caller or self._resolve_caller()
         goal = store.load_goal(goal_id)
-        status = store.load_status(goal_id)
         prior = store.read_firmed_draft(goal_id)
         if prior is None:
             raise FirmingError(
@@ -284,7 +317,7 @@ class FirmingHandler:
             raise
 
         store.write_firmed_draft(goal_id, draft)
-        await self._land(goal_id, draft, status, ctx, round_=next_round)
+        await self._land(goal_id, draft, ctx, round_=next_round)
         return {
             "goal_id": goal_id,
             "status": "firmed" if draft.status == "firmed" else "needs_more_answers",
@@ -352,7 +385,6 @@ class FirmingHandler:
         self,
         goal_id: str,
         draft: FirmedGoal,
-        status: GoalStatus,
         ctx: "TickContext",
         *,
         round_: int,
@@ -361,16 +393,31 @@ class FirmingHandler:
         on whether the new draft is firmed or still needs answers. When firmed,
         also fires the decomposer against the firmed goal BEFORE transitioning
         to executing — closes the gap where the firmed goal would otherwise
-        reach executing with no checklist (silent regression to backlog mode)."""
+        reach executing with no checklist (silent regression to backlog mode).
+
+        Both transitions run against a JUST-loaded snapshot (see
+        :func:`_load_for_transition`) — the cognition awaits that precede this
+        method (the firming round, then the decomposer below) are exactly the
+        windows a heartbeat telemetry bump or a concurrent cancel lands in. A
+        terminal goal short-circuits: the draft stays on disk (the audit
+        trail), the status is left untouched."""
         store = ctx.store
         if draft.status == "firmed":
             goal = store.load_goal(goal_id)
             decompose_note = await self._fire_decomposer(goal_id, goal, draft, store)
+            fresh = _load_for_transition(store, goal_id)
+            if fresh is None:
+                store.append_log(
+                    goal_id,
+                    f"firming round {round_} firmed, but the goal reached a "
+                    "terminal phase mid-firming — leaving it untouched",
+                )
+                return PhaseResult(outcome="slept", note="goal terminal; firming result recorded only")
             store.transition(
                 goal_id, Event.FIRMING_ADVANCE,
-                replace(status, lifecycle="executing", phase="idle",
+                replace(fresh, lifecycle="executing", phase="idle",
                         blocked_on=None, next="firming done → executing"),
-                expect=status,
+                expect=fresh,
             )
             store.append_log(
                 goal_id,
@@ -390,11 +437,19 @@ class FirmingHandler:
         blocker_msg = (
             f"{n} question{'s' if n != 1 else ''} — reply in OpenClaw"
         )
+        fresh = _load_for_transition(store, goal_id)
+        if fresh is None:
+            store.append_log(
+                goal_id,
+                f"firming round {round_} surfaced {n} unknown(s), but the goal "
+                "reached a terminal phase mid-firming — leaving it untouched",
+            )
+            return PhaseResult(outcome="slept", note="goal terminal; firming result recorded only")
         store.transition(
             goal_id, Event.FIRMING_NEEDS_ANSWERS,
-            replace(status, lifecycle="firming", phase="blocked",
+            replace(fresh, lifecycle="firming", phase="blocked",
                     blocked_on=blocker_msg, next=""),
-            expect=status,
+            expect=fresh,
         )
         store.append_log(
             goal_id, f"firming round {round_} → needs_owner_answers ({n} unknown(s))",
