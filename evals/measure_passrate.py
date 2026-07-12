@@ -113,33 +113,59 @@ BASKET = [
 ]
 
 
+def _load_basket(path: str) -> list[dict]:
+    """Load a config-driven ticket basket from a JSON file: a list of tickets,
+    each ``{id, kind, goal, repo_url?, verify_cmd?, project?, pin_sha?}``. Lets one
+    run span multiple projects (the v0.1 proof: 10 real tickets across >=2 repos).
+    ``repo_url``/``verify_cmd`` omitted → fall back to the MEASURE_* env globals."""
+    data = json.loads(Path(path).expanduser().read_text())
+    if not isinstance(data, list) or not data:
+        raise SystemExit(f"--basket {path}: expected a non-empty JSON list of tickets")
+    seen: set[str] = set()
+    for i, t in enumerate(data):
+        missing = [k for k in ("id", "kind", "goal") if not t.get(k)]
+        if missing:
+            raise SystemExit(f"--basket ticket #{i} missing required field(s): {missing}")
+        if t["kind"] not in ("implement_feature", "fix_bug"):
+            raise SystemExit(f"--basket ticket {t['id']!r}: kind must be implement_feature|fix_bug")
+        if t["id"] in seen:
+            raise SystemExit(f"--basket duplicate ticket id: {t['id']!r}")
+        seen.add(t["id"])
+    return data
+
+
 async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
     ws = WORKROOT / task["id"]
     if ws.exists():
         shutil.rmtree(ws)
     ws.parent.mkdir(parents=True, exist_ok=True)
-    pin_note = f" (pinned to {PIN_SHA[:8]})" if PIN_SHA else ""
-    print(f"\n=== [{task['id']}] cloning {REPO_URL} → {ws}{pin_note}", flush=True)
+    # Per-ticket overrides (config-driven --basket) fall back to the env globals,
+    # so the built-in single-repo lifekit basket behaves EXACTLY as before.
+    repo = task.get("repo_url") or REPO_URL
+    verify = task.get("verify_cmd") or VERIFY_CMD
+    pin = task.get("pin_sha") or PIN_SHA
+    pin_note = f" (pinned to {pin[:8]})" if pin else ""
+    print(f"\n=== [{task['id']}] cloning {repo} → {ws}{pin_note}", flush=True)
     # Drop --depth 1 when pinning so we can checkout the historical SHA.
-    clone_cmd = ["git", "clone", REPO_URL, str(ws)] if PIN_SHA else \
-                ["git", "clone", "--depth", "1", REPO_URL, str(ws)]
+    clone_cmd = ["git", "clone", repo, str(ws)] if pin else \
+                ["git", "clone", "--depth", "1", repo, str(ws)]
     clone = subprocess.run(clone_cmd, capture_output=True, text=True)
     if clone.returncode != 0:
         return {"id": task["id"], "status": "clone-failed", "error": clone.stderr[-500:]}
 
-    if PIN_SHA:
+    if pin:
         co = subprocess.run(
-            ["git", "-C", str(ws), "checkout", "-q", PIN_SHA],
+            ["git", "-C", str(ws), "checkout", "-q", pin],
             capture_output=True, text=True,
         )
         if co.returncode != 0:
             return {"id": task["id"], "status": "pin-failed", "error": co.stderr[-500:]}
 
     t0 = time.time()
-    print(f"=== [{task['id']}] submitting {task['kind']} (gate=`{VERIFY_CMD}`, open_pr)", flush=True)
+    print(f"=== [{task['id']}] submitting {task['kind']} (gate=`{verify}`, open_pr)", flush=True)
     tid = queue.submit(
         kind=task["kind"], workspace_dir=str(ws), goal=task["goal"],
-        verify_cmd=VERIFY_CMD, deliver=True,
+        verify_cmd=verify, deliver=True,
     )
     await queue.drain()
     wall = round(time.time() - t0, 1)
@@ -149,6 +175,8 @@ async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
     verify = result.get("verify") or {}
     rec = {
         "id": task["id"],
+        "project": task.get("project") or repo.rsplit("/", 1)[-1].removesuffix(".git"),
+        "repo": repo,
         "kind": task["kind"],
         "task_id": tid,
         "status": row.status if row else "?",
@@ -165,16 +193,27 @@ async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=(
+        "Dispatch a basket of real tickets through the REAL pipeline, each delivered "
+        "as a PR. Built-in basket = 5 lifekit-dashboard tickets; --basket <file.json> "
+        "supplies your own (the v0.1 proof: 10 real tickets across >=2 projects)."
+    ))
     parser.add_argument("--only", help="Comma-separated subset of basket IDs to run (default: all)")
+    parser.add_argument("--basket", help=(
+        "Path to a JSON file: a list of {id, kind, goal, repo_url?, verify_cmd?, "
+        "project?, pin_sha?}. Per-ticket repo_url/verify_cmd let one run span "
+        "multiple projects. Overrides the built-in lifekit basket."
+    ))
     args = parser.parse_args()
-    basket = BASKET
+    basket = _load_basket(args.basket) if args.basket else BASKET
     if args.only:
         wanted = {x.strip() for x in args.only.split(",") if x.strip()}
-        basket = [t for t in BASKET if t["id"] in wanted]
-        unknown = wanted - {t["id"] for t in BASKET}
+        # Filter the RESOLVED basket (built-in or --basket), not the hardcoded
+        # BASKET — otherwise --only + --basket can never intersect.
+        unknown = wanted - {t["id"] for t in basket}
         if unknown:
             raise SystemExit(f"unknown basket IDs: {sorted(unknown)}")
+        basket = [t for t in basket if t["id"] in wanted]
         if not basket:
             raise SystemExit("--only matched no basket tasks")
 
@@ -206,11 +245,18 @@ async def main() -> None:
     report.write_text(json.dumps(summary, indent=2))
 
     print("\n" + "=" * 60)
-    print(f"PASS-RATE: {len(done)}/{len(records)} = {rate}")
+    print(f"GATE PASS-RATE: {len(done)}/{len(records)} = {rate}   "
+          f"(dispatch+gate only — NOT the v0.1 metric)")
     for r in records:
-        print(f"  {r['id']:<24} {r['status']:<10} verify={r['verify_passed']} pr={r.get('pr_url')}")
+        print(f"  {r['id']:<22} {r.get('project','?'):<20} {r['status']:<10} "
+              f"verify={r['verify_passed']} pr={r.get('pr_url')}")
     print(f"PRs opened: {summary['prs']}")
     print(f"report: {report}")
+    print(
+        "\nv0.1 SCORING IS A HUMAN VERDICT (issue #178): review each PR above and record\n"
+        "merged-WITHOUT-rework/10 + a harness|model|spec bucket per miss. A green gate\n"
+        "here is not 'merged without rework' — that judgment is yours, at the boundary."
+    )
     store.close()
 
 

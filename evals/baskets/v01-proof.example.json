@@ -1,0 +1,18 @@
+[
+  {
+    "id": "example-1",
+    "project": "lifekit-dashboard",
+    "repo_url": "https://github.com/dsdevq/lifekit-dashboard.git",
+    "kind": "implement_feature",
+    "verify_cmd": "cd backend && dotnet test",
+    "goal": "<a REAL, bounded, machine-verifiable ticket from this project's backlog — tell the engineer to add focused tests and not weaken the suite so the gate is meaningful>"
+  },
+  {
+    "id": "example-2",
+    "project": "<second registered project>",
+    "repo_url": "https://github.com/dsdevq/<repo>.git",
+    "kind": "fix_bug",
+    "verify_cmd": "<this project's real test command>",
+    "goal": "<a REAL bounded bug from this project's backlog>"
+  }
+]
