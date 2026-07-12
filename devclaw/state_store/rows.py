@@ -73,6 +73,14 @@ class Task:
     #: (the workspace breaker only counts *failed* rows, and a paused task
     #: never becomes one).
     pause_count: int = 0
+    #: True when this task is *generated scaffolding* (L3, #222) — set from the
+    #: decomposer-tagged ChecklistItem.scaffold via the goal dispatch path. It
+    #: makes the queue skip ONLY the adversarial review gate (a huge generated
+    #: diff crashes it and shouldn't be diff-reviewed anyway). The verify/build
+    #: gate + test-integrity scan STILL run — a scaffold task that doesn't build
+    #: or that guts tests still fails. Defaulted so existing rows/tests are
+    #: unaffected.
+    scaffold: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -97,6 +105,7 @@ class Task:
             "title": self.title,
             "parentGoalId": self.parent_goal_id,
             "pauseCount": self.pause_count,
+            "scaffold": self.scaffold,
         }
 
 
@@ -198,6 +207,9 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         ),
         pause_count=(
             r["pause_count"] if "pause_count" in r.keys() and r["pause_count"] is not None else 0
+        ),
+        scaffold=(
+            bool(r["scaffold"]) if "scaffold" in r.keys() and r["scaffold"] is not None else False
         ),
     )
 

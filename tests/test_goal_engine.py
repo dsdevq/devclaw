@@ -78,6 +78,37 @@ async def test_dispatch_review_is_readonly(wired):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_threads_scaffold_flag_to_task_row(wired):
+    """L3 (#222): a scaffold Action lands a task row with scaffold=True so the
+    queue can skip the adversarial review gate for it."""
+    engine, queue, store = wired
+    action = Action(
+        engine="devclaw", tool="implement_feature",
+        goal="Scaffold an Angular workspace", open_pr=False, scaffold=True,
+    )
+    ref = await engine.dispatch(action, _goal(), notify_url="")
+    assert store.get_task(ref.id).scaffold is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_default_action_is_not_scaffold(wired):
+    engine, queue, store = wired
+    action = Action(engine="devclaw", tool="implement_feature", goal="add /health", open_pr=False)
+    ref = await engine.dispatch(action, _goal(), notify_url="")
+    assert store.get_task(ref.id).scaffold is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_review_is_never_scaffold(wired):
+    """A read-only review_repository has no diff to review — even a mis-set
+    scaffold flag on the Action is forced off on the row."""
+    engine, queue, store = wired
+    action = Action(engine="devclaw", tool="review_repository", goal="assess", scaffold=True)
+    ref = await engine.dispatch(action, _goal(), notify_url="")
+    assert store.get_task(ref.id).scaffold is False
+
+
+@pytest.mark.asyncio
 async def test_dispatch_program_then_poll(wired, tmp_path):
     engine, queue, store = wired
     # open_pr=True → the program's children inherit deliver=True, so they need a

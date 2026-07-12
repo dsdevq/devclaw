@@ -466,3 +466,104 @@ async def test_review_skipped_for_non_code_kind(store, monkeypatch):
     tid = q.submit(kind="review_repository", workspace_dir="/ws", goal="g", verify_cmd="pytest")
     await q.drain()
     assert called["n"] == 0
+
+
+# ==================== scaffold tasks (L3, #222) ======================
+# A scaffold task (generated boilerplate, e.g. `ng new` / `dotnet new`) skips
+# ONLY the adversarial review gate. The verify/build gate + test-integrity scan
+# STILL run — so an over-tagged real code task is at worst "unreviewed but must
+# still build + pass tests", never "ships broken or untested."
+
+
+def _failing_gate_runner(calls: list):
+    """Agent ok, but the verify/build gate FAILS every time — the structural
+    check a scaffold item must still satisfy (does it build?)."""
+    async def runner(req: EngineRequest):
+        calls.append(req.goal)
+        gate = {"ran": True, "cmd": "dotnet build", "passed": False, "exit_code": 1,
+                "timed_out": False, "output": "error CS1002: ; expected"}
+        return {"status": "ok", "workspaceDir": req.workspace_dir, "verify": gate}
+    return runner
+
+
+async def test_scaffold_task_skips_adversarial_review(store, monkeypatch):
+    """A scaffold task with a PASSING gate ships done WITHOUT ever invoking the
+    reviewer — the review gate is the only thing scaffold bypasses, and here it
+    is bypassed even though the reviewer would have requested changes."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    called = {"n": 0}
+
+    async def reviewer(*, goal, kind, diff):
+        called["n"] += 1  # if ever called it would block — proves the skip
+        return {"verdict": "request_changes", "summary": "x", "issues": [], "blocking": [
+            {"severity": "major", "location": "a", "problem": "b", "fix": "c"}]}
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=reviewer)
+    tid = q.submit(
+        kind="implement_feature", workspace_dir="/ws",
+        goal="Scaffold an xUnit test project", verify_cmd="dotnet build",
+        scaffold=True,
+    )
+    await q.drain()
+    assert store.get_task(tid).status == "done"
+    assert called["n"] == 0  # reviewer NEVER invoked for a scaffold task
+    assert store.get_task(tid).scaffold is True  # flag persisted on the row
+
+
+async def test_scaffold_task_still_fails_failing_verify_gate(store, monkeypatch):
+    """THE SAFETY PROPERTY: scaffold skips review but NOT the verify gate. A
+    scaffold task whose build gate fails still fails — the flag never rescues a
+    change that doesn't compile, and the reviewer is never reached either."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    called = {"n": 0}
+
+    async def reviewer(*, goal, kind, diff):
+        called["n"] += 1
+        return {"verdict": "approve", "summary": "", "issues": [], "blocking": []}
+
+    q = TaskQueue(store, runner=_failing_gate_runner([]), reviewer=reviewer)
+    tid = q.submit(
+        kind="implement_feature", workspace_dir="/ws",
+        goal="Scaffold an Angular workspace", verify_cmd="dotnet build",
+        scaffold=True,
+    )
+    await q.drain()
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "verify gate failed" in (t.error or "")  # the build gate stopped it
+    assert called["n"] == 0  # never even reached the review gate
+
+
+async def test_scaffold_task_still_runs_test_integrity(store, monkeypatch):
+    """A scaffold task does NOT bypass the test-integrity scan either: a diff
+    that deletes a test fails the task (retries exhausted → failed), and the
+    reviewer is still never invoked."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    called = {"n": 0}
+
+    async def reviewer(*, goal, kind, diff):
+        called["n"] += 1
+        return {"verdict": "approve", "summary": "", "issues": [], "blocking": []}
+
+    # Override the autouse benign diff with one that removes a test declaration.
+    async def gutting_diff(_host_dir, _base=""):
+        return (
+            "diff --git a/tests/test_foo.py b/tests/test_foo.py\n"
+            "--- a/tests/test_foo.py\n"
+            "+++ b/tests/test_foo.py\n"
+            "@@ -1,2 +1,0 @@\n"
+            "-def test_it_works():\n"
+            "-    assert True\n"
+        )
+    monkeypatch.setattr(task_queue, "_git_diff", gutting_diff)
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=reviewer)
+    tid = q.submit(
+        kind="implement_feature", workspace_dir="/ws",
+        goal="Scaffold a test project", verify_cmd="pytest", scaffold=True,
+    )
+    await q.drain()
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "test-integrity" in (t.error or "")  # integrity scan still enforced
+    assert called["n"] == 0  # review skipped, but integrity was not

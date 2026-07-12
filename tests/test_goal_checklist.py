@@ -6,6 +6,7 @@ import pytest
 
 from devclaw.goal.checklist import (
     ChecklistParseError,
+    addresses_are_scaffold,
     dump_checklist,
     extract_yaml,
     parse_checklist,
@@ -384,3 +385,126 @@ def test_update_item_preserves_milestone():
     )
     cl2 = update_item(cl, "a", status="done", evidence="src/A.cs:12")
     assert cl2.items[0].milestone == "M1 — Skeleton"
+
+
+# ---- scaffold field (L3, #222) ---------------------------------------------
+# A generated-scaffolding item (`ng new` / `dotnet new` output) is tagged so the
+# dispatch path can skip the adversarial review gate — verified structurally
+# instead. The parser must read it; round-trip must preserve it; the derivation
+# helper must be conservative (never drag a real item out of review).
+
+
+_WITH_SCAFFOLD = """\
+checklist:
+  - id: scaffold-workspace
+    requirement: Run `ng new crm-web` and commit the generated workspace.
+    evidence_target: frontend/crm-web/angular.json
+    addresses_files: [frontend/crm-web/angular.json]
+    depends_on: []
+    status: not_started
+    evidence: null
+    scaffold: true
+  - id: contacts-list
+    requirement: Implement the contacts list component.
+    evidence_target: frontend/crm-web/src/app/contacts/contacts.component.ts
+    addresses_files: [frontend/crm-web/src/app/contacts/contacts.component.ts]
+    depends_on: [scaffold-workspace]
+    status: not_started
+    evidence: null
+open_questions: []
+notes: []
+"""
+
+
+def test_scaffold_parses_when_true():
+    cl = parse_checklist(_WITH_SCAFFOLD)
+    assert cl.items[0].scaffold is True
+    # a normal implementation item stays non-scaffold
+    assert cl.items[1].scaffold is False
+
+
+def test_scaffold_omitted_yields_false():
+    cl = parse_checklist(_GOOD)
+    for item in cl.items:
+        assert item.scaffold is False
+
+
+def test_scaffold_accepts_string_true():
+    raw = _WITH_SCAFFOLD.replace("scaffold: true", 'scaffold: "yes"')
+    cl = parse_checklist(raw)
+    assert cl.items[0].scaffold is True
+
+
+def test_scaffold_junk_value_is_false():
+    """A non-boolean, non-truthy value defaults to False — the conservative
+    read (an item is scaffold ONLY when the decomposer clearly says so)."""
+    raw = _WITH_SCAFFOLD.replace("scaffold: true", "scaffold: maybe")
+    cl = parse_checklist(raw)
+    assert cl.items[0].scaffold is False
+
+
+def test_dump_round_trip_preserves_scaffold():
+    cl = parse_checklist(_WITH_SCAFFOLD)
+    cl2 = parse_checklist(dump_checklist(cl))
+    assert cl == cl2
+    assert cl2.items[0].scaffold is True
+
+
+def test_dump_omits_scaffold_when_false():
+    cl = Checklist(items=[
+        ChecklistItem(id="a", requirement="r", evidence_target="t"),
+    ])
+    out = dump_checklist(cl)
+    assert "scaffold" not in out
+
+
+def test_update_item_preserves_scaffold():
+    """The settle hook flipping status/evidence must not blow away scaffold."""
+    cl = _cl(
+        ChecklistItem(id="a", requirement="r", evidence_target="t", scaffold=True),
+    )
+    cl2 = update_item(cl, "a", status="done", evidence="src/A.cs:12")
+    assert cl2.items[0].scaffold is True
+
+
+# ---- addresses_are_scaffold (the dispatch-time derivation) ------------------
+
+
+def _scaffold_cl() -> Checklist:
+    return _cl(
+        ChecklistItem(id="scaf", requirement="r", evidence_target="t", scaffold=True),
+        ChecklistItem(id="scaf2", requirement="r", evidence_target="t", scaffold=True),
+        ChecklistItem(id="logic", requirement="r", evidence_target="t"),
+    )
+
+
+def test_addresses_are_scaffold_true_when_all_scaffold():
+    cl = _scaffold_cl()
+    assert addresses_are_scaffold(cl, ["scaf"]) is True
+    assert addresses_are_scaffold(cl, ["scaf", "scaf2"]) is True
+
+
+def test_addresses_are_scaffold_false_for_logic_item():
+    cl = _scaffold_cl()
+    assert addresses_are_scaffold(cl, ["logic"]) is False
+
+
+def test_addresses_are_scaffold_false_for_mixed_action():
+    """A mixed action (a scaffold item AND a real code item) is NOT scaffold —
+    it must go through review. This is the over-tag guard: one scaffold item
+    can't drag a logic item out of the review gate."""
+    cl = _scaffold_cl()
+    assert addresses_are_scaffold(cl, ["scaf", "logic"]) is False
+
+
+def test_addresses_are_scaffold_false_when_no_checklist_or_no_addresses():
+    cl = _scaffold_cl()
+    assert addresses_are_scaffold(None, ["scaf"]) is False
+    assert addresses_are_scaffold(cl, []) is False
+
+
+def test_addresses_are_scaffold_false_when_ids_unknown():
+    """An action citing only unknown ids resolves to zero items → not scaffold
+    (fail-safe: never skip review on an unresolvable reference)."""
+    cl = _scaffold_cl()
+    assert addresses_are_scaffold(cl, ["ghost"]) is False

@@ -568,6 +568,109 @@ async def test_done_gate_review_uses_goal_branch_when_checklist_exists(tmp_path)
     assert "goal/g" in calls
 
 
+# ---- scaffold flag derivation at dispatch (L3, #222) -----------------------
+
+
+def _scaffold_checklist() -> Checklist:
+    """Same shape as _example_checklist but the scaffold item is TAGGED
+    scaffold=True (as the decomposer would for `dotnet new`)."""
+    return Checklist(items=[
+        ChecklistItem(
+            id="scaffold", requirement="Run `dotnet new` for the csproj.",
+            evidence_target="backend/src/Foo.csproj",
+            addresses_files=["backend/src/Foo.csproj"], scaffold=True,
+        ),
+        ChecklistItem(
+            id="wire-x", requirement="Wire the X tool.",
+            evidence_target="backend/src/Tools/X.cs",
+            addresses_files=["backend/src/Tools/X.cs"], depends_on=["scaffold"],
+        ),
+    ])
+
+
+_ACT_ADDR_LOGIC = json.dumps({
+    "decision": "act", "note": "wire it",
+    "actions": [{
+        "tool": "implement_feature",
+        "goal": "Wire the X tool at backend/src/Tools/X.cs",
+        "open_pr": True,
+        "addresses": ["wire-x"],
+    }],
+})
+
+
+@pytest.mark.asyncio
+async def test_dispatch_derives_scaffold_flag_from_addressed_item(tmp_path):
+    """An action addressing a scaffold-tagged item dispatches with the Action's
+    scaffold flag DERIVED True — mechanism, not the planner LLM. The queue then
+    reads that flag off the task row to skip the adversarial review gate."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.write_checklist("g", _scaffold_checklist())
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    planner = FakeClaude(_ACT_WITH_ADDRESSES, role="planner")  # addresses ["scaffold"]
+    engine = FakeEngine()
+
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+    )
+
+    assert out is Outcome.DISPATCHED
+    dispatched_action, _goal, _nu = engine.dispatched[0]
+    assert dispatched_action.scaffold is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_does_not_scaffold_a_logic_item(tmp_path):
+    """The over-tag guard at the dispatch seam: an action addressing a NON-
+    scaffold item dispatches with scaffold=False, so real logic still gets
+    reviewed even though a scaffold item exists elsewhere in the checklist."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.write_checklist("g", _scaffold_checklist())
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    planner = FakeClaude(_ACT_ADDR_LOGIC, role="planner")  # addresses ["wire-x"]
+    engine = FakeEngine()
+
+    await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+    )
+
+    dispatched_action, _goal, _nu = engine.dispatched[0]
+    assert dispatched_action.scaffold is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_no_scaffold_in_backlog_mode(tmp_path):
+    """A legacy backlog-mode goal (no checklist) dispatches non-scaffold — the
+    derivation is a no-op without a checklist to read the tag from."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")  # no checklist
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    legacy_act = json.dumps({
+        "decision": "act", "note": "do it",
+        "actions": [{"tool": "implement_feature", "goal": "do something", "open_pr": True}],
+    })
+    planner = FakeClaude(legacy_act, role="planner")
+    engine = FakeEngine()
+
+    await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+    )
+
+    dispatched_action, _goal, _nu = engine.dispatched[0]
+    assert dispatched_action.scaffold is False
+
+
 @pytest.mark.asyncio
 async def test_settled_addressed_action_gate_failed_reverts_to_not_started(tmp_path):
     store = _store(tmp_path)

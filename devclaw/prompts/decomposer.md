@@ -79,6 +79,10 @@ agent ran out of attention. Each item declares:
   - optionally `note`: a one-liner of context the executor needs
     (e.g. *"the existing `BankSyncService.ListAccounts` returns
     `Account` — map to a `GetAccountsResponse` DTO"*).
+  - optionally `scaffold`: `true` ONLY when this item is *generated
+    scaffolding* — a boilerplate-setup step whose entire diff is tool
+    output, not hand-authored logic (see the dedicated rule below). Omit
+    the key (defaults false) on every normal implementation item.
 
 **4. Mark dependencies HONESTLY.** Only declare `depends_on` when the
 later item genuinely cannot start until the earlier finishes (it imports
@@ -132,6 +136,42 @@ default escape hatch).
 in `done_when` that you couldn't decide from the digest goes here — the
 owner answers before execution starts.
 
+**9. Tag GENERATED-SCAFFOLDING items with `scaffold: true`.** A few items
+are not hand-authored code at all — they are *generator output*: running a
+project generator and committing whatever it emits. Those items are verified
+STRUCTURALLY (does the thing build? do the expected files exist?) and are
+sent through devclaw's build/verify gate + test-integrity scan like every
+other item — but they SKIP the adversarial line-by-line code review, because
+a generated diff is thousands of boilerplate lines that both crash the
+reviewer and carry nothing meaningful to review. Set `scaffold: true` on an
+item ONLY when its whole diff is generator output, e.g.:
+
+  - `ng new <workspace>` / `ng generate application|library` — an Angular
+    workspace or app/lib skeleton;
+  - `dotnet new <template>` (`sln`, `webapi`, `classlib`, `xunit`, …) — a
+    .NET project/solution/test-project skeleton;
+  - `npm create vite@latest` / `create-react-app` / `npx nest new` and
+    equivalents — a JS/TS app skeleton;
+  - `django-admin startproject` / `rails new` and equivalents.
+
+Tag **CONSERVATIVELY — when in doubt, leave it off.** The flag only ever
+REMOVES a safety check (the review gate), never adds one, so the failure that
+matters is a FALSE POSITIVE: an item you tag `scaffold` that actually contains
+real logic ships unreviewed. So:
+
+  - the item's `requirement` must be purely "run the generator and commit its
+    output" — NOT "scaffold the API AND add the health endpoint" (that is two
+    items; the health endpoint is real code and must be reviewed);
+  - once you hand-edit a generated file (add a route, wire a service, write a
+    real test body), that work is a SEPARATE, non-scaffold item that
+    `depends_on` the scaffold item — never fold it into the scaffold item;
+  - configuration/wiring you author yourself (a hand-written `Program.cs`,
+    a `docker-compose.yml`, an `appsettings.json` you fill in) is NOT
+    scaffolding — omit the flag;
+  - a real test that asserts behaviour is NOT scaffolding even if it lives in
+    a generated test project — the `dotnet new xunit` skeleton is scaffold;
+    the `ContactServiceTests` you write against it is a normal item.
+
 ## Anti-patterns — reject these in your own output
 
 - **Vague items.** *"Implement the MCP server"* is not an item — it's a
@@ -153,6 +193,11 @@ owner answers before execution starts.
   the repo has no service to read from, say so in `open_questions` —
   don't quietly fabricate a checklist item that implies the work is
   trivial.
+- **Over-tagging `scaffold`.** `scaffold: true` on anything but a pure
+  generator-output item is a correctness bug: it drops that item's real
+  logic out of code review. A generated skeleton is scaffold; the first
+  route, service, or test body you author on top of it is not. When unsure,
+  omit the flag — the item just gets reviewed like everything else.
 
 ## Output
 
@@ -173,6 +218,8 @@ checklist:
     model_tier: <haiku|sonnet|opus, optional>
     note: <optional one-liner of context>
     milestone: <one of the spec's milestone headings, e.g. "M1 — Skeleton">
+    scaffold: <true ONLY for a pure generator-output item, e.g. `ng new` /
+      `dotnet new`; omit otherwise — see procedure step 9>
   - ...
 open_questions:
   - <question for the owner, only if needed; empty list ok>
