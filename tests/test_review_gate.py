@@ -51,6 +51,91 @@ def test_clip_diff_truncates_oversized(monkeypatch):
     assert len(out) < 200 and "truncated" in out
 
 
+# ------------------ generated/lock/vendored filtering (L2) ------------------
+#
+# On closeloop-bench a scaffold step (`ng new` / `dotnet new`) produces a huge,
+# mostly-generated diff; sending the whole thing to the review model is pointless
+# and, when oversized, makes the model return non-JSON → the gate crashes. L2
+# filters generated/lock/vendored blocks out BEFORE clipping so the reviewer sees
+# only hand-written source (and the diff shrinks below the size ceiling).
+
+def _lock_block(n: int = 400) -> str:
+    """A big package-lock.json block — exactly the generated churn a scaffold emits."""
+    body = "".join(f'+    "dep{i}": "1.0.0",\n' for i in range(n))
+    return (
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "index 111..222 100644\n"
+        "--- a/package-lock.json\n"
+        "+++ b/package-lock.json\n"
+        "@@ -1,0 +1,%d @@\n%s" % (n, body)
+    )
+
+
+_SRC_BLOCK = (
+    "diff --git a/src/app.ts b/src/app.ts\n"
+    "index aaa..bbb 100644\n"
+    "--- a/src/app.ts\n"
+    "+++ b/src/app.ts\n"
+    "@@ -1 +1,2 @@\n"
+    " const x = 1;\n"
+    "+const y = 2;\n"
+)
+
+
+def test_filter_strips_lockfile_keeps_source():
+    """A big lockfile block alongside a small source change: the prompt the review
+    model sees carries ONLY the source change — the generated churn is filtered
+    out before clipping, so it can't drown the review or blow the size ceiling."""
+    diff = _lock_block(400) + _SRC_BLOCK
+    p = build_review_prompt(goal="Add y", kind="implement_feature", diff=diff)
+    assert "src/app.ts" in p and "const y = 2" in p          # source survives
+    assert "package-lock.json" not in p and "dep200" not in p  # lockfile gone
+
+
+async def test_review_diff_treats_pure_generated_diff_as_empty():
+    """A diff that is ENTIRELY generated/lock/vendored files has nothing
+    hand-written to review — review_diff approves/skips WITHOUT calling the model
+    (same as the empty-diff case), so a scaffold's pure lockfile churn can't crash
+    the gate or waste a review pass."""
+    called = {"n": 0}
+
+    async def caller(_prompt):
+        called["n"] += 1
+        return '{"verdict":"request_changes","summary":"x","issues":[]}'
+
+    v = await review_gate.review_diff(
+        goal="scaffold", kind="implement_feature",
+        diff=_lock_block(400), claude_caller=caller,
+    )
+    assert v["verdict"] == "approve" and v["blocking"] == []
+    assert called["n"] == 0  # model never invoked — nothing hand-written to review
+
+
+def test_filter_leaves_normal_source_diff_unchanged():
+    """Behaviour-preserving for real work: an all-source diff (incl. hand-edited
+    config like package.json) is returned byte-for-byte unchanged — the filter
+    only strips well-known generated artifacts, never normal source or config."""
+    diff = (
+        "diff --git a/src/a.ts b/src/a.ts\n"
+        "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n"
+        "diff --git a/package.json b/package.json\n"
+        "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-\"v\": 1\n+\"v\": 2\n"
+    )
+    assert review_gate.filter_reviewable_diff(diff) == diff
+
+
+def test_filter_strips_vendored_dir_blocks():
+    """A path under a generated/vendored directory (node_modules/, dist/, bin/,
+    obj/, .next/, vendor/) is stripped; the sibling source block is kept."""
+    diff = (
+        "diff --git a/node_modules/left-pad/index.js b/node_modules/left-pad/index.js\n"
+        "--- a/node_modules/left-pad/index.js\n+++ b/node_modules/left-pad/index.js\n"
+        "@@ -1 +1 @@\n-a\n+b\n" + _SRC_BLOCK
+    )
+    out = review_gate.filter_reviewable_diff(diff)
+    assert "node_modules" not in out and "src/app.ts" in out
+
+
 def test_validate_request_changes_with_blocking_issue():
     v = validate_review({
         "verdict": "request_changes",

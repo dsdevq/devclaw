@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Awaitable, Callable, Optional
 
 from ..planner import PlannerError, claude_with_model, extract_json
@@ -53,6 +54,116 @@ def _clip_diff(diff: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Generated / lock / vendored filtering.
+#
+# On closeloop-bench, a "scaffold" step (`ng new`, `dotnet new`) produces a huge,
+# mostly-*generated* diff (lockfiles + boilerplate). Sending that whole thing to
+# the review model is pointless (a human never wrote it) and dangerous (an
+# oversized diff makes the model return non-JSON → the gate crashes). So BEFORE
+# clipping/sending we drop whole-file blocks for WELL-KNOWN generated artifacts,
+# leaving the reviewer only the hand-written source. Conservative on purpose:
+# when in doubt we KEEP the block (better to over-review than skip real code), so
+# hand-edited config — package.json, angular.json, *.csproj, tsconfig.json — is
+# never stripped.
+# ---------------------------------------------------------------------------
+
+#: Path segments whose contents are machine-produced build output / vendored deps
+#: — anything *under* one of these directories is generated, not hand-written.
+_GENERATED_DIRS = frozenset(
+    {"node_modules", "dist", "build", "bin", "obj", ".next", "vendor"}
+)
+#: Exact filenames that are always machine-generated lockfiles (the ones whose
+#: extension isn't a giveaway; the ``*.lock`` suffix rule covers the rest).
+_GENERATED_FILES = frozenset(
+    {
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "Cargo.lock",
+        "poetry.lock",
+        "composer.lock",
+        "Gemfile.lock",
+    }
+)
+#: Filename suffixes that mark a generated/minified/lock artifact.
+_GENERATED_SUFFIXES = (".lock", ".min.js", ".min.css")
+
+_DIFF_GIT_RE = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+
+
+def _is_generated_path(path: str) -> bool:
+    """True iff ``path`` is a WELL-KNOWN generated/lock/vendored artifact a human
+    never hand-edits. Conservative — only the patterns above match; everything
+    else (incl. package.json, angular.json, *.csproj, tsconfig.json) is treated
+    as hand-written and KEPT."""
+    path = path.strip()
+    if not path or path == "/dev/null":
+        return False
+    parts = path.split("/")
+    if any(seg in _GENERATED_DIRS for seg in parts):
+        return True
+    name = parts[-1]
+    if name in _GENERATED_FILES:
+        return True
+    return name.endswith(_GENERATED_SUFFIXES)
+
+
+def _block_paths(block: str) -> list[str]:
+    """Every file path a single ``diff --git`` block references — both sides of
+    the header plus the ``--- a/`` / ``+++ b/`` lines. We drop a block only when
+    *every* path it names is generated, so a mixed or ambiguous block is kept."""
+    paths: list[str] = []
+    for line in block.splitlines():
+        if line.startswith("diff --git "):
+            m = _DIFF_GIT_RE.match(line)
+            if m:
+                paths.append(m.group(1))
+                paths.append(m.group(2))
+        elif line.startswith("--- a/"):
+            paths.append(line[len("--- a/"):])
+        elif line.startswith("+++ b/"):
+            paths.append(line[len("+++ b/"):])
+    return paths
+
+
+def filter_reviewable_diff(diff: str) -> str:
+    """Strip whole-file blocks for well-known generated/lock/vendored files from a
+    unified git diff, leaving only hand-written source for the reviewer. Blocks
+    are split on ``diff --git`` headers; a block is dropped only when every path
+    it names is generated (see ``_is_generated_path``) — when in doubt it's KEPT.
+    Any preamble before the first ``diff --git`` is preserved. A diff with no
+    ``diff --git`` header (or an already-clean one) is returned unchanged."""
+    if "diff --git " not in diff:
+        return diff
+
+    blocks: list[list[str]] = []
+    preamble: list[str] = []
+    current: Optional[list[str]] = None
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if current is not None:
+                blocks.append(current)
+            current = [line]
+        elif current is None:
+            preamble.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        blocks.append(current)
+
+    kept: list[str] = list(preamble)
+    for block in blocks:
+        text = "".join(block)
+        paths = _block_paths(text)
+        # Drop only when we resolved at least one path AND all of them are
+        # generated; otherwise keep (unresolved path → keep, real source → keep).
+        if paths and all(_is_generated_path(p) for p in paths):
+            continue
+        kept.append(text)
+    return "".join(kept)
+
+
 def build_review_prompt(*, goal: str, kind: str, diff: str) -> str:
     from ..prompts import load_prompt
 
@@ -60,7 +171,7 @@ def build_review_prompt(*, goal: str, kind: str, diff: str) -> str:
         [
             load_prompt("review-gate"),
             f"TICKET ({kind}):\n{goal}",
-            f"DIFF UNDER REVIEW:\n{_clip_diff(diff)}",
+            f"DIFF UNDER REVIEW:\n{_clip_diff(filter_reviewable_diff(diff))}",
         ]
     )
 
@@ -135,6 +246,17 @@ async def review_diff(
     """Review one diff into a validated verdict dict. ``claude_caller`` is injected
     so tests can stub the subprocess. Raises PlannerError if the model returns
     unparseable/invalid JSON (the caller decides whether to fail open)."""
+    # Nothing hand-written to review (a pure generated/lock/vendored diff, e.g. a
+    # scaffold step's lockfile churn) → approve/skip gracefully rather than send
+    # the model an empty diff. Same effect as the empty-diff short-circuit upstream.
+    if not filter_reviewable_diff(diff).strip():
+        return {
+            "verdict": "approve",
+            "summary": "no hand-written changes to review "
+            "(diff is entirely generated/lock/vendored files)",
+            "issues": [],
+            "blocking": [],
+        }
     prompt = build_review_prompt(goal=goal, kind=kind, diff=diff)
     raw = await claude_caller(prompt)
     try:
