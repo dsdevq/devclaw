@@ -95,7 +95,7 @@ devclaw/
 │   ├── tick.py         #   one heartbeat: check → plan → evaluate → dispatch → done-gate
 │   ├── planner.py      #   next-action cognition (one claude --print per tick past the gate)
 │   ├── evaluator.py    #   direction evaluation, grounded in deliveries.md
-│   ├── store.py        #   GoalStore — goal.yaml (facts) + SQLite status/steering/log/deliveries/docs
+│   ├── store/          #   GoalStore — goal.yaml (facts) + SQLite status/steering/log/deliveries/docs (base · status · content)
 │   ├── engine.py       #   in-process dispatch into the task queue
 │   ├── research.py · merge.py · notify.py · summary.py · models.py
 ├── engine/             # everything that EXECUTES the work:
