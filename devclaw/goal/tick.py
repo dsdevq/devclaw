@@ -40,6 +40,7 @@ from . import remote_checks as _remote_checks
 from . import research as _research
 from . import world_research as _world_research
 from . import summary as _goal_summary
+from . import delivery_strategy as _delivery
 from .engine import GoalEngine, GoalEngineError
 from .models import Action, Checklist, EvalResult, Goal, GoalStatus, InFlight, PollResult
 from .notify import Notifier
@@ -877,8 +878,8 @@ async def _resolve_done_gate(
         # Only checklist-mode goals accumulate work on a shared goal branch
         # whose check surface is meaningful at close time; legacy per-action
         # PRs were already merged (or reviewed) one by one.
-        if store.read_checklist(goal_id) is not None:
-            branch = f"goal/{goal_id}"
+        branch = _delivery.resolve_strategy(store, goal_id).goal_branch(goal_id)
+        if branch is not None:
             try:
                 rc = await remote_checker(goal.repo_url, branch)
             except Exception as exc:  # noqa: BLE001 — checker trouble must not wedge the gate
@@ -992,7 +993,7 @@ async def _open_done_gate(
         # In checklist mode the done-gate reviewer needs to see the goal's
         # accumulated work — read the goal branch, not the default branch
         # (otherwise it judges done_when against an empty diff).
-        done_gate_branch = f"goal/{goal_id}" if store.read_checklist(goal_id) else None
+        done_gate_branch = _delivery.resolve_strategy(store, goal_id).goal_branch(goal_id)
         try:
             await prepare_ws(goal.workspace_dir, goal.repo_url, done_gate_branch, goal.skills_required)
         except WorkspaceError as exc:
@@ -1455,8 +1456,8 @@ async def _dispatch_action(
     # ``review_repository`` actions always run on the default branch — they
     # don't write — even when a checklist exists.
     branch_for_dispatch: str | None = None
-    if action.tool != "review_repository" and store.read_checklist(goal_id):
-        branch_for_dispatch = f"goal/{goal_id}"
+    if action.tool != "review_repository":
+        branch_for_dispatch = _delivery.resolve_strategy(store, goal_id).goal_branch(goal_id)
     try:
         await prepare_ws(goal.workspace_dir, goal.repo_url, branch_for_dispatch, goal.skills_required)
     except WorkspaceError as exc:
