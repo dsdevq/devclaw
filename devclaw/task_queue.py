@@ -392,14 +392,6 @@ class TaskQueue:
             f"holding dispatch {WORKSPACE_BREAK_HOLD_S:.0f}s\n"
         )
 
-    def steer_program(self, program_id: str, message: str) -> list[str]:
-        """Fold a steering message into a running program's not-yet-started tasks
-        (the agent reads it when it picks them up). Running/done tasks are left
-        alone. Returns the ids of the pending tasks updated. Single-writer: task
-        mutation goes through the queue."""
-        note = f"\n\n[STEER UPDATE]: {message}"
-        return self._store.append_note_to_pending_tasks(program_id, note)
-
     # ---- cancellation (deliberate abort) --------------------------------
 
     def _abort_live_task(self, task_id: str) -> None:

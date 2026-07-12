@@ -99,12 +99,6 @@ SANDBOX_CLAUDE_ALLOWLIST: tuple[str, ...] = tuple(
 ) or _DEFAULT_CLAUDE_ALLOWLIST
 
 
-class SandcastleRunnerError(Exception):
-    def __init__(self, message: str, trace: str | None = None) -> None:
-        super().__init__(message)
-        self.trace = trace
-
-
 def _strip_api_keys(env: dict[str, str]) -> dict[str, str]:
     clean = dict(env)
     clean.pop("ANTHROPIC_API_KEY", None)

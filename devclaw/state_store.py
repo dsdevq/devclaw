@@ -492,14 +492,6 @@ class StateStore:
             )
             self._commit()
 
-    def set_pr_url(self, task_id: str, pr_url: Optional[str]) -> None:
-        """Record the delivered PR URL (or None for a local-only branch)."""
-        with self._lock:
-            self._db.execute(
-                "UPDATE tasks SET pr_url = ? WHERE id = ?", (pr_url, task_id)
-            )
-            self._commit()
-
     def mark_running(self, task_id: str) -> None:
         with self._lock:
             self._db.execute(
@@ -1261,27 +1253,6 @@ class StateStore:
         """The trend detector's last-seen SHA for one workspace, or ``None``
         if unset (first observation — bookmark-aware signals seed-and-skip)."""
         return self.get_meta(f"trend_bookmark:{workspace_dir}")
-
-    def append_note_to_pending_tasks(self, program_id: str, note: str) -> list[str]:
-        """Append a steering note to every PENDING task of a program — work not
-        yet started. Running/done tasks are left untouched (already handed to the
-        engine). Returns the affected task ids."""
-        with self._lock:
-            ids = [
-                r["id"]
-                for r in self._db.execute(
-                    "SELECT id FROM tasks WHERE program_id = ? AND status = 'pending'",
-                    (program_id,),
-                ).fetchall()
-            ]
-            if ids:
-                self._db.execute(
-                    "UPDATE tasks SET goal = goal || ? "
-                    "WHERE program_id = ? AND status = 'pending'",
-                    (note, program_id),
-                )
-                self._commit()
-        return ids
 
     def close(self) -> None:
         with self._lock:
