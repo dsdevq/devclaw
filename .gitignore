@@ -52,3 +52,7 @@ evals/runs/
 # (compose/devclaw-mcp/Dockerfile), not vendored. hatchling force-includes it
 # into the wheel via `tool.hatch.build.targets.wheel.artifacts` in pyproject.
 devclaw/server/console/dist/
+
+# Real proof baskets may reference private-product internals — keep only the template
+evals/baskets/*.json
+!evals/baskets/*.example.json
