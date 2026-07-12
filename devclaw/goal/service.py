@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 import sys
 import uuid
 from dataclasses import dataclass, replace
@@ -49,24 +48,6 @@ if TYPE_CHECKING:
 # where the per-tick PersistentTracer would just be noise. Tests inject their
 # own tracer directly when they want to assert on events.
 _TRACE_PERSIST_ENABLED = True
-
-
-_BARE_TOOL_RE = re.compile(r"^[^\s/\\]+$")
-
-
-def _bare_verify_cmd_warning(cmd: str) -> Optional[str]:
-    """DEPRECATED — kept temporarily for external callers / back-compat.
-    The check moved into :mod:`devclaw.goal.admission` as one of several
-    structured conditions ``verify_goal`` returns. New code should call
-    ``verify_goal`` directly and route on the ``bare_verify_cmd`` code."""
-    stripped = cmd.strip()
-    if stripped and _BARE_TOOL_RE.match(stripped):
-        return (
-            f"verify_cmd {stripped!r} looks like a bare tool name — it may fail if "
-            f"'{stripped}' is not on PATH inside the sandbox. "
-            f"Consider 'python -m {stripped}' or a full path instead."
-        )
-    return None
 
 
 @dataclass(frozen=True)

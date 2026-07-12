@@ -92,7 +92,7 @@ devclaw/
 ├── quality/         gates past green tests — pre-PR adversarial review, eval_judge, evals
 ├── loom/            engine-agnostic substrate — limits, test_integrity, trace
 ├── prompts/         every system prompt as a .md file (load_prompt(slug))
-├── planner.py · cognition.py · state_store.py · task_queue.py · project_registry.py · cli.py · …
+├── planner.py · cognition.py · state_store/ · task_queue.py · project_registry.py · cli.py · …
 openhands-runner/runner.py   OpenHands SDK inside the sandbox — line-delimited JSON on stdout
 .sandcastle/Dockerfile       per-task sandbox image
 docs/                        architecture + flows + env + runbooks (start at docs/INDEX.md)

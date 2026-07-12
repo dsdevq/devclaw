@@ -95,7 +95,7 @@ devclaw/
 │   ├── tick.py         #   one heartbeat: check → plan → evaluate → dispatch → done-gate
 │   ├── planner.py      #   next-action cognition (one claude --print per tick past the gate)
 │   ├── evaluator.py    #   direction evaluation, grounded in deliveries.md
-│   ├── store.py        #   GoalStore — goal.yaml (facts) + SQLite status/steering/log/deliveries/docs
+│   ├── store/          #   GoalStore — goal.yaml (facts) + SQLite status/steering/log/deliveries/docs (base · status · content)
 │   ├── engine.py       #   in-process dispatch into the task queue
 │   ├── research.py · merge.py · notify.py · summary.py · models.py
 ├── engine/             # everything that EXECUTES the work:
@@ -122,7 +122,7 @@ devclaw/
 ├── planner.py          # spec / program planner (claude --print) → task DAG
 ├── cognition.py        # the LLM seam — Cognition protocol + Claude/Stub impls
 ├── elicitation.py      # scope-grill cognition (called via the scope_grill MCP tool)
-├── state_store.py      # SQLite: programs, tasks, append-only events
+├── state_store/       # SQLite: programs, tasks, append-only events (rows · control · core)
 ├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
 ├── project_registry.py # control plane: repos → driving goals → live status rollup
 └── cli.py              # devclaw projects … (terminal face of the control plane)
