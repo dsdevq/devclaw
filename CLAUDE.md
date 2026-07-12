@@ -69,6 +69,13 @@ Recent work made the loop fail **loud, not silent**. Match it when you add code:
 
 - **Verification fails CLOSED.** A quality-gate crash is **not** an approval — an
   exception in the gate settles the task failed (#186).
+- **An unreviewable change fails closed *and fast*, not forever.** When the review gate
+  can't produce a verdict at all (a crash / non-JSON response on an oversized diff), the
+  task fails **closed** (never ships — #186 holds) but **without an agent retry**:
+  re-running reproduces the same diff and re-crashes the gate identically, so the retry
+  is futile and only burns the budget + the goal-level re-dispatch loop. The failure
+  carries an actionable reason (split the diff / review by hand). A crash is still not an
+  approval; it's just not an infinite loop either (L1 fix, closeloop-bench scaffold wedge).
 - **Broken delivery fails; never "done without a PR."** A delivery that can't push/PR
   settles the task `failed`, not a silent success (#183).
 - **Lost/corrupt state blocks legibly.** A missing in-flight ref or corrupt contract
