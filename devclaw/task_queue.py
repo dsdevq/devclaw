@@ -38,8 +38,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
-import httpx
-
 from .delivery import deliver_change, delivery_failed
 from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
@@ -49,10 +47,11 @@ from .quality import format_feedback, review_diff
 from .engine.sandcastle import run_sandcastle, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
-# Leaf concern split out of this module. The git ``_sync`` helpers are re-exported
+# Leaf concerns split out of this module. The git ``_sync`` helpers are re-exported
 # here because tests import them from ``task_queue`` and patch ``_wip_snapshot_sync``
 # on this namespace; the async wrappers below look them up as module globals.
 from .task_git import _git_diff_sync, _git_head_sync, _wip_snapshot_sync  # noqa: F401
+from .task_notify import _NotifyMixin
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
 MAX_CONCURRENT_PER_PROGRAM = int(os.environ.get("DEVCLAW_MAX_CONCURRENT_PER_PROGRAM", "2"))
@@ -166,7 +165,7 @@ def _integrity_failure(diff: str) -> Optional[str]:
     )
 
 
-class TaskQueue:
+class TaskQueue(_NotifyMixin):
     @staticmethod
     def _derive_engine_kind(runner: "RunnerFn") -> str:
         """Map a runner function to a short label for the trace ("stub" /
@@ -1077,67 +1076,5 @@ class TaskQueue:
         return None
 
     # ---- notify ---------------------------------------------------------
-
-    async def _notify_task(self, task: Task) -> None:
-        if not task.notify_url:
-            return
-        payload = {
-            "task_id": task.id,
-            "status": task.status,
-            "kind": task.kind,
-            "workspace_dir": task.workspace_dir,
-            "goal": task.goal,
-            "result_json": task.result_json,
-            "error": task.error,
-            "pr_url": task.pr_url,
-            "terminated_at": task.completed_at,
-        }
-        await self._post_with_retries(task.notify_url, payload, f"task={task.id}")
-
-    async def _notify_program(self, program: Program, tasks: list[Task]) -> None:
-        if not program.notify_url:
-            return
-        payload = {
-            "program_id": program.id,
-            "status": program.status,
-            "goal": program.goal,
-            "workspace_dir": program.workspace_dir,
-            "error": program.error,
-            "terminated_at": program.completed_at,
-            "tasks": [
-                {
-                    "task_id": t.id,
-                    "kind": t.kind,
-                    "status": t.status,
-                    "goal": t.goal,
-                    "depends_on": t.depends_on,
-                    "result_json": t.result_json,
-                    "error": t.error,
-                }
-                for t in tasks
-            ],
-        }
-        await self._post_with_retries(program.notify_url, payload, f"program={program.id}")
-
-    async def _post_with_retries(self, url: str, payload: dict, tag: str) -> None:
-        async with httpx.AsyncClient() as client:
-            for attempt in range(len(NOTIFY_BACKOFF_MS)):
-                try:
-                    res = await client.post(url, json=payload, timeout=10.0)
-                    if res.is_success:
-                        sys.stderr.write(
-                            f"notify ok {tag} url={url} status={res.status_code} attempt={attempt + 1}\n"
-                        )
-                        return
-                    sys.stderr.write(
-                        f"notify non-2xx {tag} url={url} status={res.status_code} attempt={attempt + 1}\n"
-                    )
-                except Exception as err:
-                    sys.stderr.write(
-                        f'notify error {tag} url={url} err="{err}" attempt={attempt + 1}\n'
-                    )
-                if attempt < len(NOTIFY_BACKOFF_MS) - 1:
-                    await asyncio.sleep(NOTIFY_BACKOFF_MS[attempt] / 1000)
-        sys.stderr.write(
-            f"notify WARN giving up {tag} url={url} after {len(NOTIFY_BACKOFF_MS)} attempts\n"
-        )
+    # _notify_task / _notify_program / _post_with_retries live in
+    # devclaw.task_notify._NotifyMixin (mixed into this class above).
