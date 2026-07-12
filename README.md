@@ -122,7 +122,7 @@ devclaw/
 ├── planner.py          # spec / program planner (claude --print) → task DAG
 ├── cognition.py        # the LLM seam — Cognition protocol + Claude/Stub impls
 ├── elicitation.py      # scope-grill cognition (called via the scope_grill MCP tool)
-├── state_store.py      # SQLite: programs, tasks, append-only events
+├── state_store/       # SQLite: programs, tasks, append-only events (rows · control · core)
 ├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
 ├── project_registry.py # control plane: repos → driving goals → live status rollup
 └── cli.py              # devclaw projects … (terminal face of the control plane)

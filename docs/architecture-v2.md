@@ -165,7 +165,7 @@ dispatches a single task — no decomposition needed.
 
 ### 3. State store — SQLite
 
-Tracks everything DevClaw owns (`devclaw/state_store.py`), one `devclaw.db`:
+Tracks everything DevClaw owns (`devclaw/state_store/`), one `devclaw.db`:
 
 ```
 programs        id, goal, status, created_at, …
