@@ -86,6 +86,14 @@ REVIEW_GATE_ENABLED = True
 #: review applies only to code-producing kinds (a diff to read); review_repository
 #: is read-only and onboard writes only a comprehension doc.
 _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
+
+#: Stable marker prefixed on the feedback string when the review gate CRASHED —
+#: it couldn't produce a verdict at all (e.g. an oversized/unparseable diff makes
+#: the review model return non-JSON). The retry loop treats this differently from
+#: a genuine ``request_changes``: a crash is not a defect the agent can fix by
+#: re-running (the same diff re-crashes the gate identically), so it fails FAST
+#: instead of burning the retry budget and then the goal-level re-dispatch loop.
+_REVIEW_CRASH_MARKER = "review gate crashed (failing closed):"
 #: per-workspace circuit-breaker: N task failures on the same workspace_dir
 #: within WINDOW_S trips a hold for HOLD_S. Sibling of the global quota pause but
 #: scoped, so one broken workspace doesn't starve the others. Trigger event that
@@ -1020,6 +1028,22 @@ class TaskQueue(_NotifyMixin):
                     f"~{backoff}s, requeued (not failed)\n"
                 )
                 return _PAUSED
+            # A review-gate CRASH (the reviewer couldn't produce a verdict — an
+            # oversized/unparseable diff makes the review model return non-JSON) is
+            # NOT a defect the agent can fix by retrying: re-running produces the
+            # same diff and re-crashes the gate identically, burning the retry budget
+            # and then the goal-level re-dispatch loop. Fail FAST + fail CLOSED (never
+            # ship unreviewed) with an actionable reason, instead of looping. Quota-
+            # shaped reviewer crashes are handled above (they PAUSE, not fail).
+            if last_failure.startswith(_REVIEW_CRASH_MARKER):
+                self._store.mark_failed(
+                    task_id,
+                    f"{last_failure} Not auto-retried: a diff too large or "
+                    "unreviewable for the gate must be split into smaller commits or "
+                    "reviewed by a human — retrying re-crashes the gate identically.",
+                )
+                self._check_and_trip_breaker(workspace_dir, task_id)
+                return None
             if attempt < attempts - 1:
                 sys.stderr.write(
                     f"task-queue: task {task_id} attempt {attempt + 1}/{attempts} failed; "
@@ -1061,9 +1085,9 @@ class TaskQueue(_NotifyMixin):
         try:
             review = await self._reviewer(goal=goal, kind=kind, diff=diff)
         except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
-            sys.stderr.write(f"task-queue: review gate crashed (failing closed): {err}\n")
+            sys.stderr.write(f"task-queue: {_REVIEW_CRASH_MARKER} {err}\n")
             return (
-                f"review gate crashed (failing closed): "
+                f"{_REVIEW_CRASH_MARKER} "
                 f"{err.__class__.__name__}: {err}. The diff was never reviewed, "
                 "so it must not ship on the gate's silence."
             )

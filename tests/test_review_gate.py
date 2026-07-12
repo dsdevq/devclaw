@@ -239,12 +239,16 @@ async def test_approve_ships_first_try(store, monkeypatch):
     assert len(calls) == 1  # a clean review doesn't trigger a needless retry
 
 
-async def test_review_crash_fails_closed(store, monkeypatch):
-    """A reviewer CRASH is not an approval (T0.2): the crash text feeds the
-    retry loop like a request_changes, and with retries exhausted the task
-    FAILS — it must never ship unreviewed on the gate's silence. (The old
-    behavior shipped it with one stderr line nobody reads.)"""
-    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+async def test_review_crash_fails_fast_closed(store, monkeypatch):
+    """A reviewer CRASH is not an approval (T0.2) and the task must FAIL CLOSED —
+    never ship unreviewed on the gate's silence. L1: a crash is also not a defect
+    the agent can fix, so it fails FAST — no agent retry — because retrying just
+    re-runs the agent, reproduces the same diff, and re-crashes the gate
+    identically (the closeloop-bench scaffold wedge). The old behavior fed the
+    crash into the retry loop like a request_changes and burned the whole retry
+    budget. The failure message must be actionable (split the diff / review by
+    hand), not a bare 'gate crashed'."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 3)  # generous budget, must NOT be used
     calls: list = []
 
     async def boom(*, goal, kind, diff):
@@ -254,9 +258,10 @@ async def test_review_crash_fails_closed(store, monkeypatch):
     tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
     await q.drain()
     t = store.get_task(tid)
-    assert t.status == "failed"
+    assert t.status == "failed"  # still fail-closed — never ships unreviewed
     assert "review gate crashed" in (t.error or "") and "reviewer exploded" in (t.error or "")
-    assert len(calls) == 2  # crash fed back like request_changes → one retry, then escalate
+    assert "Not auto-retried" in (t.error or "")  # actionable, not a bare crash
+    assert len(calls) == 1  # L1: fast-fail — the crash is NOT fed back into an agent retry
 
 
 async def test_review_quota_crash_pauses_instead_of_failing(store, monkeypatch):
