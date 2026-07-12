@@ -14,7 +14,7 @@ import pytest
 from devclaw import task_queue
 from devclaw import quality as review_gate
 from devclaw.engine import EngineRequest
-from devclaw.planner import PlannerError
+from devclaw.planner import PLANNER_TIMEOUT_MS, PlannerError
 from devclaw.quality import (
     build_review_prompt,
     format_feedback,
@@ -124,6 +124,30 @@ async def test_review_diff_raises_on_unparseable():
         await review_gate.review_diff(
             goal="g", kind="implement_feature", diff="d", claude_caller=caller
         )
+
+
+async def test_review_caller_carries_timeout_above_the_90s_ceiling(monkeypatch):
+    """Regression: the review reads a diff up to 60 KB and reasons over the whole
+    thing on Sonnet — it was the one large-input cognition role left on the global
+    90s ceiling (PLANNER_TIMEOUT_MS), so a big benchmark diff timed out, failed the
+    gate closed, burned the retry budget, and escalated to the owner. The review
+    role must carry an explicit timeout above that ceiling (like decomposer/grill
+    already do) AND actually thread it through to the cognition call — not just
+    define a constant nobody passes."""
+    assert review_gate.REVIEW_TIMEOUT_MS > PLANNER_TIMEOUT_MS
+
+    seen = {}
+
+    class _RecordingCognition:
+        async def __call__(self, prompt, *, role="unknown", model=None, timeout_ms=None):
+            seen["timeout_ms"] = timeout_ms
+            return "{}"
+
+    import devclaw.cognition as cognition
+    monkeypatch.setattr(cognition, "get_cognition", lambda: _RecordingCognition())
+
+    await review_gate.review_caller("review this diff")
+    assert seen["timeout_ms"] == review_gate.REVIEW_TIMEOUT_MS
 
 
 # ========================= queue integration =========================

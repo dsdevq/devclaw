@@ -28,8 +28,14 @@ from ..planner import PlannerError, claude_with_model, extract_json
 #: Opus planner). Empty → account default.
 from ..model_tiers import model_for as _model_for
 REVIEW_MODEL = _model_for("review")
-#: default cognition caller for the review, bound to the review tier
-review_caller = claude_with_model(REVIEW_MODEL, role="review")
+#: per-call timeout. The review reads a diff up to _MAX_DIFF_CHARS (60 KB) and
+#: reasons over the whole thing on Sonnet — it was the one large-input cognition
+#: role still on the global 90s ceiling, so a big diff timed out, failed the gate
+#: closed, burned the retry budget, and escalated to the owner. Match the other
+#: large-output sonnet role (grill = 180s) rather than the 90s PLANNER_TIMEOUT_MS.
+REVIEW_TIMEOUT_MS = 180_000
+#: default cognition caller for the review, bound to the review tier + timeout
+review_caller = claude_with_model(REVIEW_MODEL, role="review", timeout_ms=REVIEW_TIMEOUT_MS)
 
 #: cap the diff we send so a huge change can't blow the prompt / quota. Tail-kept
 #: would lose the header, so we head-keep (the start of the diff, where the
