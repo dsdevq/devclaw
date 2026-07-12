@@ -117,3 +117,30 @@ A change isn't production-ready until L1-L4 are green on the branch and L7 (one 
 ## What's missing on purpose
 
 There's no harness for the build-from-scratch interview flow — the spec-kit elicitation (`build_project` / `answer_question` / `approve_spec`) and its `evals/run.py` golden-project harness were removed as drift (vault explicitly rejected the multi-pass spec-kit flow). Scope alignment now lives on the OpenClaw waiter via the `scope_grill` MCP tool; build-from-scratch is expressed as a normal goal with `done_when` (and an optional pre-grilled `spec`). Measure it through the durable goal layer instead.
+
+## Running the v0.1 proof (issue #178)
+
+v0.1's promise is measured, not built: **10 real tickets across ≥2 registered projects →
+score merged-WITHOUT-rework/10, pass bar ≥6/10 with ≤2 harness-bucket failures.** The
+dispatch half reuses `measure_passrate.py` (L4); the *verdict* half is yours — that's the
+whole point (merged-without-rework is a human judgment at the boundary, not a gate the
+harness can pass itself).
+
+1. **Prereq — deploy main to the VPS** and build the sandbox image(s) for each project's
+   toolchain (see `docs/live-shakedown.md` §1). The proof must run the *shipped* code.
+2. **Pick 10 real tickets** from ≥2 projects' actual backlogs (not synthetic). Put them in a
+   basket file — copy `evals/baskets/v01-proof.example.json`, one entry per ticket with its
+   own `repo_url` + `verify_cmd` (so one run spans multiple projects). Tell each engineer to
+   add focused tests and not weaken the suite, so the gate is meaningful.
+3. **Dispatch them** (sequential, quota-safe; each is cloned fresh + delivered as a PR):
+   ```bash
+   DEVCLAW_SANDBOX_IMAGE=<img> DEVCLAW_EXEC_MODEL=<model> \
+     .venv/bin/python evals/measure_passrate.py --basket evals/baskets/v01-proof.json
+   ```
+   Optional control run for the trend-detector value question: prepend `DEVCLAW_TREND_ENABLED=0`.
+4. **Render the verdict** — review each PR on GitHub and fill the #178 scorecard:
+   merged-without-rework/10 + a `harness | model | spec` bucket per miss. *A green gate is
+   not "merged without rework."* The tool prints this reminder at the end.
+
+The JSON report (`evals/runs/passrate-*.json`) captures PRs + gate results per ticket; the
+merged-without-rework column and the buckets are the human layer on top.
