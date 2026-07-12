@@ -132,7 +132,8 @@ class StateStore(ControlPlaneMixin):
                   pr_url          TEXT,
                   title           TEXT,
                   parent_goal_id  TEXT,
-                  pause_count     INTEGER NOT NULL DEFAULT 0
+                  pause_count     INTEGER NOT NULL DEFAULT 0,
+                  scaffold        INTEGER NOT NULL DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS programs (
@@ -212,6 +213,10 @@ class StateStore(ControlPlaneMixin):
                 # Usage-limit requeue counter (2026-07-10) — bounds the
                 # pause→requeue→re-run loop (see Task.pause_count).
                 "ALTER TABLE tasks ADD COLUMN pause_count INTEGER NOT NULL DEFAULT 0",
+                # Generated-scaffolding flag (L3, #222) — a scaffold task skips
+                # ONLY the adversarial review gate (verify gate + test-integrity
+                # still run). Defaulted so pre-existing rows read as non-scaffold.
+                "ALTER TABLE tasks ADD COLUMN scaffold INTEGER NOT NULL DEFAULT 0",
             ):
                 try:
                     self._db.execute(sql)
@@ -255,14 +260,15 @@ class StateStore(ControlPlaneMixin):
         deliver: bool = False,
         title: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        scaffold: bool = False,
     ) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT INTO tasks
                      (id, kind, status, workspace_dir, goal, notify_url, created_at,
                       program_id, depends_on, order_idx, milestone, verify_cmd, deliver,
-                      title, parent_goal_id)
-                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      title, parent_goal_id, scaffold)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     kind,
@@ -278,6 +284,7 @@ class StateStore(ControlPlaneMixin):
                     1 if deliver else 0,
                     title,
                     parent_goal_id,
+                    1 if scaffold else 0,
                 ),
             )
             self._commit()

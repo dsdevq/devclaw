@@ -95,6 +95,10 @@ class InProcessEngine:
                 deliver=False if is_review else action.open_pr,
                 title=None if is_review else action.title,
                 parent_goal_id=goal.id,
+                # L3 (#222): a pure-scaffolding item skips the adversarial review
+                # gate (verified structurally by the build gate instead). Never
+                # for a read-only review_repository — it has no diff to review.
+                scaffold=False if is_review else action.scaffold,
                 pump=False,
             )
             return InFlight("devclaw", action.tool, task_id, "task", action.goal)

@@ -207,6 +207,13 @@ class Action:
     #: Optional: when None, delivery falls back to the engineer's own commit
     #: subject, then the diff-grounded _pr_title(goal, kind) heuristic.
     title: Optional[str] = None
+    #: True when the checklist item(s) this action serves are all generated
+    #: scaffolding (see :attr:`ChecklistItem.scaffold`). DERIVED mechanically at
+    #: dispatch from the addressed items (not chosen by the per-tick planner LLM),
+    #: then threaded onto the task row so the queue skips the adversarial review
+    #: gate for it. Default False. SAFETY: skips review ONLY — the verify gate +
+    #: test-integrity still run (enforced in task_queue._run_and_settle).
+    scaffold: bool = False
 
 
 @dataclass(frozen=True)
@@ -268,6 +275,19 @@ class ChecklistItem:
     #: entirely, and legacy decomposer output that pre-dated this field
     #: still parses cleanly without it.
     milestone: Optional[str] = None
+    #: True when this item is *generated scaffolding* — a boilerplate-setup step
+    #: whose diff is generator output (``ng new``, ``dotnet new``, a workspace /
+    #: test-project skeleton), not hand-authored logic. The decomposer tags it
+    #: (L3, issue #222) so the dispatch path can skip the ADVERSARIAL CODE-REVIEW
+    #: gate for it — an oversized generated diff crashes that reviewer and, more
+    #: fundamentally, scaffolding is a different operation than implementing logic
+    #: and is verified STRUCTURALLY (does it build?) not by reading the diff.
+    #: SAFETY: this flag ONLY skips adversarial review. A scaffold item MUST still
+    #: pass the verify_cmd/build gate + the test-integrity scan, so an over-tagged
+    #: real code task is at worst "unreviewed but still must build + pass tests" —
+    #: never "ships broken or untested." Tag CONSERVATIVELY: only clear generator-
+    #: output steps. Default False = a normal, fully-reviewed item.
+    scaffold: bool = False
 
 
 @dataclass(frozen=True)

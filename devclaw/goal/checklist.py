@@ -128,7 +128,20 @@ def _parse_item(raw: object) -> ChecklistItem | None:
         model_tier=tier,
         note=str(raw.get("note", "")).strip(),
         milestone=milestone,
+        scaffold=_parse_bool(raw.get("scaffold")),
     )
+
+
+def _parse_bool(raw: object) -> bool:
+    """Tolerant truthy read for a YAML boolean field. Accepts a real bool,
+    or the strings ``true``/``yes``/``1`` (case-insensitive). Anything else —
+    including a missing key — is False (the conservative default: an item is
+    only scaffold when the decomposer explicitly says so)."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("true", "yes", "1")
+    return False
 
 
 def _dedup_keep_first(seq: list[str]) -> list[str]:
@@ -190,6 +203,7 @@ def validate_checklist(parsed: object) -> Checklist:
                 model_tier=item.model_tier,
                 note=item.note,
                 milestone=item.milestone,
+                scaffold=item.scaffold,
             )
         )
 
@@ -234,6 +248,8 @@ def dump_checklist(checklist: Checklist) -> str:
             d["note"] = item.note
         if item.milestone:
             d["milestone"] = item.milestone
+        if item.scaffold:
+            d["scaffold"] = True
         return d
 
     payload: dict[str, object] = {
@@ -288,8 +304,32 @@ def update_item(
                 model_tier=item.model_tier,
                 note=item.note,
                 milestone=item.milestone,
+                scaffold=item.scaffold,
             )
         )
     if not found:
         raise KeyError(f"no checklist item with id {item_id!r}")
     return Checklist(items=updated, open_questions=checklist.open_questions, notes=checklist.notes)
+
+
+def addresses_are_scaffold(
+    checklist: Checklist | None, addresses: list[str]
+) -> bool:
+    """True iff an action addressing ``addresses`` is a pure-scaffolding
+    dispatch — used at dispatch to decide whether the resulting task skips the
+    adversarial review gate (L3, #222). Deliberately CONSERVATIVE, so an
+    over-tagged item can't drag a real code item out of review:
+
+    - no checklist / no addresses → False (legacy backlog mode, or a free-form
+      action the decomposer never tagged);
+    - True only when the addressed ids resolve to ≥1 real checklist item AND
+      EVERY resolved item has ``scaffold=True``. A mixed action (one scaffold +
+      one logic item) is NOT scaffold — it goes through review.
+
+    Mechanism, not cognition: the scaffold decision was made ONCE by the
+    decomposer; this just propagates it. The per-tick planner never sets it."""
+    if checklist is None or not addresses:
+        return False
+    by_id = {i.id: i for i in checklist.items}
+    resolved = [by_id[a] for a in addresses if a in by_id]
+    return bool(resolved) and all(i.scaffold for i in resolved)

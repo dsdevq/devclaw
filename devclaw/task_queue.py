@@ -388,6 +388,7 @@ class TaskQueue(_NotifyMixin):
         deliver: bool = False,
         title: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        scaffold: bool = False,
         pump: bool = True,
     ) -> str:
         """Create a task row (status 'pending') and, by default, immediately
@@ -414,6 +415,7 @@ class TaskQueue(_NotifyMixin):
             deliver=deliver,
             title=title,
             parent_goal_id=parent_goal_id,
+            scaffold=scaffold,
         )
         if pump:
             self._pump()
@@ -841,6 +843,11 @@ class TaskQueue(_NotifyMixin):
         row = self._store.get_task(task_id)
         program_id = row.program_id if row else None
         verify_cmd = row.verify_cmd if row else None
+        # L3 (#222): a scaffold task skips ONLY the adversarial review gate below.
+        # The verify gate (checked first) and test-integrity scan are NOT gated on
+        # this flag — they run for scaffold and non-scaffold tasks alike, so an
+        # over-tagged real code task still fails if it doesn't build or guts tests.
+        scaffold = bool(row.scaffold) if row else False
 
         # Resumed-after-interruption brief. ``pause_count > 0`` means a previous
         # attempt of THIS task was cut off by a usage limit and requeued — the
@@ -949,7 +956,9 @@ class TaskQueue(_NotifyMixin):
                         integrity = _integrity_failure(diff)
                         review_fb = (
                             None if integrity is not None
-                            else await self._review_failure(kind, goal, diff, workspace_dir)
+                            else await self._review_failure(
+                                kind, goal, diff, workspace_dir, scaffold=scaffold
+                            )
                         )
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
@@ -1043,18 +1052,35 @@ class TaskQueue(_NotifyMixin):
         )
 
     async def _review_failure(
-        self, kind: TaskKind, goal: str, diff: str, workspace_dir: str
+        self, kind: TaskKind, goal: str, diff: str, workspace_dir: str,
+        *, scaffold: bool = False,
     ) -> Optional[str]:
         """Run the pre-PR adversarial review gate on the change's diff. Returns the
         request-changes feedback (→ fed back into the retry loop like a gate fail),
         or None to let the task ship. Fails open ONLY for the by-design cases —
-        a disabled gate, a non-code kind, an empty diff. A reviewer CRASH fails
-        CLOSED: a crash is not an approval, and the old failing-open path meant
-        any internal reviewer error shipped the change unreviewed with a line on
-        stderr nobody reads. A quota/rate-limit crash text is classified by the
-        caller's quota guard and PAUSES (requeue + resume) instead of failing —
-        the correct semantics for "the reviewer couldn't run right now"."""
+        a disabled gate, a non-code kind, a SCAFFOLD task, an empty diff. A
+        reviewer CRASH fails CLOSED: a crash is not an approval, and the old
+        failing-open path meant any internal reviewer error shipped the change
+        unreviewed with a line on stderr nobody reads. A quota/rate-limit crash
+        text is classified by the caller's quota guard and PAUSES (requeue +
+        resume) instead of failing — the correct semantics for "the reviewer
+        couldn't run right now".
+
+        SCAFFOLD (L3, #222): a generated-scaffolding task (``ng new`` /
+        ``dotnet new`` boilerplate) skips this ADVERSARIAL gate — its diff is
+        generator output, not hand-authored logic, and an oversized generated
+        diff crashes the review model. This is safe because it's a NARROW bypass:
+        the caller has ALREADY passed the change through the verify/build gate and
+        the test-integrity scan before reaching here, and neither of those is
+        gated on ``scaffold``. So even a MIS-tagged real code task is at worst
+        "unreviewed but still must build + pass tests", never "ships broken"."""
         if not self._review_gate_enabled(workspace_dir) or kind not in _REVIEWABLE_KINDS:
+            return None
+        if scaffold:
+            sys.stderr.write(
+                "task-queue: scaffold task — skipping adversarial review gate "
+                "(verify gate + test-integrity already enforced)\n"
+            )
             return None
         if not diff.strip():
             return None

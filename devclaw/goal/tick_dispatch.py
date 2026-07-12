@@ -112,6 +112,18 @@ async def _dispatch_action(
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review", summarize=summarize)
         return Outcome.BLOCKED
+    # L3 (#222): derive the scaffold flag MECHANICALLY from the addressed
+    # checklist items — the decomposer already made this call conservatively at
+    # decompose time; here we just propagate it onto the Action → task row so the
+    # queue skips the ADVERSARIAL REVIEW gate for a pure-scaffolding dispatch
+    # (generated boilerplate, e.g. `ng new` / `dotnet new`, crashes that reviewer
+    # and shouldn't be diff-reviewed anyway). The per-tick planner LLM never sets
+    # this — only the decomposer can — which caps the over-tag blast radius. The
+    # verify gate + test-integrity are UNAFFECTED and still run in the queue.
+    if not action.scaffold:  # honour an already-set flag; else derive
+        action = replace(
+            action, scaffold=_checklist.addresses_are_scaffold(checklist, action.addresses)
+        )
     # Give the engine a pristine checkout. Legacy mode resets to origin/<default>
     # for per-action freshness; checklist mode (Pillar 1) checks out the goal's
     # ``goal/<id>`` branch instead so each item's commits STACK on the prior
