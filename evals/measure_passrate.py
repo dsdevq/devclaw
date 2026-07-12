@@ -208,10 +208,12 @@ async def main() -> None:
     basket = _load_basket(args.basket) if args.basket else BASKET
     if args.only:
         wanted = {x.strip() for x in args.only.split(",") if x.strip()}
-        basket = [t for t in BASKET if t["id"] in wanted]
-        unknown = wanted - {t["id"] for t in BASKET}
+        # Filter the RESOLVED basket (built-in or --basket), not the hardcoded
+        # BASKET — otherwise --only + --basket can never intersect.
+        unknown = wanted - {t["id"] for t in basket}
         if unknown:
             raise SystemExit(f"unknown basket IDs: {sorted(unknown)}")
+        basket = [t for t in basket if t["id"] in wanted]
         if not basket:
             raise SystemExit("--only matched no basket tasks")
 
