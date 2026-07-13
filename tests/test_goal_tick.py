@@ -2346,6 +2346,42 @@ def test_blocked_kind_cleared_on_unblock(tmp_path):
         db.close()
 
 
+def test_resume_goal_restores_the_autoheal_budget(tmp_path):
+    """resume_goal is the OTHER human unblock verb — it must restore the
+    mechanical auto-heal budget exactly like steer_goal does: a parked goal
+    (heal_attempts past the cap, a prep backoff window still pending) that a
+    human resumes gets heal_attempts=0 and next_heal_at=None, so a future
+    mechanical block starts with the full budget instead of inheriting the
+    exhausted one."""
+    from devclaw.goal.service import GoalConfig, GoalService
+    from devclaw.state_store import StateStore
+    from devclaw.task_queue import TaskQueue
+
+    goals_dir = tmp_path / "goals"
+    seed_goal(goals_dir, "g")
+
+    db = StateStore(str(tmp_path / "state.db"))
+    try:
+        cfg = GoalConfig(goals_dir=goals_dir, notify_url="", tick_seconds=900, eval_every=99, verify_done=False)
+        svc = GoalService(TaskQueue(db), db, config=cfg)
+        svc._goal_store.save_status(
+            "g", GoalStatus(phase="blocked", blocked_on="clone failed: repo not found",
+                            blocked_kind="mechanical:prep", actions_dispatched=3,
+                            heal_attempts=6, next_heal_at="2099-01-01T00:00:00"),
+        )
+
+        out = svc.resume_goal("g")
+        assert out["resumed"] is True
+
+        saved = svc._goal_store.load_status("g")
+        assert saved.phase == "idle"
+        assert saved.blocked_kind == ""
+        assert saved.heal_attempts == 0
+        assert saved.next_heal_at is None
+    finally:
+        db.close()
+
+
 # ---- corrupt-doc auto-heal (F8): mechanical recheck, damped, human-capped ----
 # The tick's contract-file probe re-parses the docs every tick anyway — on a
 # fixed doc that success IS the heal signal (zero LLM, zero subprocess). The
