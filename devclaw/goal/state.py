@@ -733,9 +733,13 @@ class GoalState:
     # is structurally impossible here: a crash mid-write leaves either the OLD
     # row or nothing touched, never a half-written one.
 
-    #: The only kinds PR6 backs with rows — spec/discovery stay plain files
-    #: (display/prompt inputs, not consumed-state).
-    DOC_KINDS = frozenset({"checklist", "firmed_draft"})
+    #: The kinds backed with rows. ``checklist``/``firmed_draft`` (PR6) are the
+    #: acceptance contract; ``repo_analysis`` (triage F2) is the raw
+    #: review_repository output persisted at discovery settle — row-only, no
+    #: file view (up to ~200KB of machine-read ground truth for the
+    #: decomposer, not a human-skimmable artifact). spec/discovery stay plain
+    #: files (display/prompt inputs, not consumed-state).
+    DOC_KINDS = frozenset({"checklist", "firmed_draft", "repo_analysis"})
 
     def has_doc(self, goal_id: str, kind: str) -> bool:
         """Whether a ``goal_docs`` row exists for ``(goal_id, kind)`` — the

@@ -410,12 +410,21 @@ class FirmingHandler:
         extras = _firmed_extras_block(draft)
         if extras:
             brief = (brief + "\n" + extras) if brief else extras
+        # The decomposer prompt commands "the repo digest IS YOUR GROUND
+        # TRUTH" — feed it the raw repo analysis persisted at discovery
+        # settle (triage F2: this path used to drop it entirely, leaving the
+        # command unsatisfiable), plus the mechanical workspace snapshot so
+        # repo identity is grounded even when the analysis is thin/absent.
+        repo_digest = store.read_repo_analysis(goal_id) or ""
+        repo_context = await _collect_repo_context(goal.workspace_dir)
         try:
             caller = self._decomposer_caller or self._resolve_decomposer_caller()
             checklist = await _decomposer.decompose(
                 derived_goal,
                 claude_caller=caller,
                 discovery_brief=brief,
+                repo_digest=repo_digest,
+                repo_context=repo_context,
             )
         except _decomposer.GoalDecomposerError as exc:
             store.append_log(

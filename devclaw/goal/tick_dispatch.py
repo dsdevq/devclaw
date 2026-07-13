@@ -399,6 +399,17 @@ async def _resolve_discovery(
     optionally run the decomposer to emit a structured per-tool checklist
     (Pillar 1), then transition to executing. Synthesis and decomposition are
     each non-fatal — a failure in either falls back to backlog-driven mode."""
+    # Persist the RAW analysis FIRST — the prose brief below is deliberately
+    # tight and skimmable, and record_settlement keeps only ref/kind/status,
+    # so without this row the review_repository output (the decomposer's
+    # ground truth, up to ~200KB) is unrecoverable by the time the
+    # firming-path decomposer runs (triage F2). Best-effort like the
+    # synthesis below: a persist hiccup degrades with a log line, never
+    # wedges a settle that already committed.
+    try:
+        store.write_repo_analysis(goal_id, repo_analysis)
+    except Exception as exc:  # noqa: BLE001 — grounding must not wedge the goal
+        store.append_log(goal_id, f"repo-analysis persist failed ({exc}) — proceeding")
     # Ground the synthesis in the ACTUAL goal workspace: on a failed/empty
     # review, `repo_analysis` degrades to a placeholder ("review failed (no
     # analysis captured)") and host-side claude — which inherits devclaw's own
@@ -429,6 +440,11 @@ async def _resolve_discovery(
 
     decompose_ok = False
     if decompose_enabled and goal.done_when and not _FIRMING_ENABLED_FOR_DECOMPOSE:
+        # Mechanical repo identity rides along with the digest — the digest is
+        # the agent's prose, the snapshot is git's own facts (remote/branch/
+        # key-file probes). Best-effort, never raises (see _collect_repo_context).
+        from .phases.firming import _collect_repo_context as _repo_ctx
+
         caller = decomposer_caller or research_caller
         try:
             cl = await _decomposer.decompose(
@@ -436,6 +452,7 @@ async def _resolve_discovery(
                 claude_caller=caller,
                 discovery_brief=brief,
                 repo_digest=repo_analysis,
+                repo_context=await _repo_ctx(goal.workspace_dir),
             )
             store.write_checklist(goal_id, cl)
             store.append_log(

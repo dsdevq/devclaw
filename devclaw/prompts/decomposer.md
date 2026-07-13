@@ -26,6 +26,19 @@ service Y") trace directly to the absence of this layer.
    module list, AGENTS.md / README, public-API surface of relevant
    services, schema highlights. THIS IS YOUR GROUND TRUTH for what's
    already there and what can be wired vs what needs to be stubbed.
+6. **REPOSITORY CONTEXT** — a mechanical snapshot of the actual
+   workspace (git remote/branch/head, key-file presence probes, tracked
+   top-level layout). Grounds repo IDENTITY — which repo, which stack —
+   even when the digest is thin.
+
+Ground every repo fact in what you are given. When the `repo_digest` is
+absent or thin, cite only paths that appear in REPOSITORY CONTEXT and
+raise `open_questions` instead of inventing file paths, symbols, or a
+stack — NEVER infer the stack from the host process you run in, your
+working directory, or the goal text alone. A `scaffold: true` tag is
+only valid when the digest/context shows the scaffold does NOT already
+exist: tagging scaffold for a skeleton the workspace already contains
+strips the review gate off a diff that is actually hand-authored change.
 
 ## PROCEDURE — follow in order, do NOT skip
 

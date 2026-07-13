@@ -280,6 +280,27 @@ class GoalContentMixin:
         path = self._dir(goal_id) / "discovery.md"
         return path.read_text() if path.exists() else ""
 
+    # ---- repo analysis (raw review_repository output) ----------------------
+    # goal_docs kind "repo_analysis" — row-only, no .md view: this is the
+    # decomposer's machine-read ground truth (up to ~200KB — see
+    # engine._TASK_DETAIL_SUMMARY_KEEP), not a human-skimmable artifact; the
+    # skimmable synthesis is discovery.md.
+
+    def write_repo_analysis(self, goal_id: str, analysis: str) -> None:
+        """Persist the RAW repo analysis from the discovery review — written
+        at discovery settle, alongside the prose brief. The brief is
+        deliberately tight and skimmable (research-discovery.md) and
+        ``record_settlement`` keeps only ref/kind/status, so without this row
+        the review_repository output is unrecoverable by the time the
+        firming-path decomposer needs the ground truth its prompt demands.
+        Overwritten if investigation re-runs."""
+        self._goal_state.write_doc(goal_id, "repo_analysis", analysis, _now_ms())
+
+    def read_repo_analysis(self, goal_id: str) -> str:
+        """The raw repo analysis, or '' when no discovery review has settled
+        (legacy goals, from-scratch goals that world-research instead)."""
+        return self._goal_state.read_doc(goal_id, "repo_analysis") or ""
+
     # ---- checklist (decomposer output — the durable structured plan) ------
     # PR6: goal_docs (kind "checklist") is the source of truth; checklist.yaml
     # is a generated view, same shape as STATUS.md/log.md/deliveries.md.
