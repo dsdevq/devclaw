@@ -53,6 +53,16 @@ Rules:
   closes — so propose it as soon as the work looks complete; don't keep
   dispatching busy-work to be safe.
 
+Ground every repository fact in what you are given. When a `## Repository
+context` section is present, it is the source of truth for repo identity,
+layout, and whether a file or directory exists. Repository facts — the stack,
+the layout, the test runner, file paths — come ONLY from the repository
+context, discovery brief, checklist, and history sections of this input. If a
+fact is not in them, treat it as unknown rather than inferring it from the
+host environment, your own working directory, or any repository you have seen
+before. Your action's `goal` instruction must never name a language,
+framework, or toolchain that the repository context contradicts.
+
 Respond with STRICT JSON ONLY — no prose, no markdown fences. Schema:
 
 {{

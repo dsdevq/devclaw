@@ -99,6 +99,33 @@ async def test_dispatch_default_action_is_not_scaffold(wired):
 
 
 @pytest.mark.asyncio
+async def test_planner_verify_cmd_no_longer_overrides_firmed_gate(wired):
+    """F5 (mechanical hole): ``validate()`` used to accept an undocumented
+    "verify_cmd" in the planner's JSON — a field the prompt schema never even
+    offered — and dispatch then honored it over the FIRMED command
+    (``action.verify_cmd or goal.verify_cmd``): an ungrounded guess mechanically
+    replacing the repo-true gate. The field is now ignored, gracefully: the
+    response still validates (never an error), and the dispatched task row
+    carries the firmed command."""
+    from devclaw.goal.planner import validate
+
+    engine, queue, store = wired
+    res = validate({
+        "decision": "act",
+        "note": "n",
+        "actions": [{
+            "tool": "implement_feature", "goal": "add /health",
+            "open_pr": False, "verify_cmd": "pytest",   # the ungrounded guess
+        }],
+    })
+    assert res.decision == "act"          # still validates — no error
+    action = res.actions[0]
+    assert action.verify_cmd is None      # the guess was not honored
+    ref = await engine.dispatch(action, _goal(), notify_url="")
+    assert store.get_task(ref.id).verify_cmd == "pytest -q"  # the firmed gate
+
+
+@pytest.mark.asyncio
 async def test_dispatch_review_is_never_scaffold(wired):
     """A read-only review_repository has no diff to review — even a mis-set
     scaffold flag on the Action is forced off on the row."""

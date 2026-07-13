@@ -22,6 +22,38 @@ def test_build_prompt_omits_discovery_section_when_absent():
     assert "Discovery brief" not in p
 
 
+# ---- live workspace grounding (triage F5) ----------------------------------
+
+
+def test_goal_planner_prompt_carries_anti_inference_guard():
+    """F5: the system prompt must forbid inferring repo facts (stack, layout,
+    test runner, file paths) from anywhere but the grounded input sections —
+    the host environment, the cwd host-side claude inherits from devclaw, and
+    remembered repos are all off limits. Same shape as review-gate.md's guard
+    (#227)."""
+    p = build_prompt(_goal(), GoalStatus(), "", "", "")
+    assert "Ground every repository fact in what you are given" in p
+    assert "treat it as unknown" in p
+    assert "your own working directory" in p
+    assert "must never name a language" in p
+
+
+def test_build_prompt_renders_repo_context_section_when_present():
+    p = build_prompt(
+        _goal(), GoalStatus(), "", "", "",
+        repo_context="git_remote_origin: https://x/y.git\nglobal.json: file",
+    )
+    assert "Repository context (facts from the actual workspace" in p
+    assert "git_remote_origin: https://x/y.git" in p
+
+
+def test_build_prompt_omits_repo_context_section_when_empty():
+    # "" (collector hiccup / best-effort degrade) skips the section — the
+    # anti-inference guard in the system prompt still applies.
+    p = build_prompt(_goal(), GoalStatus(), "", "", "", repo_context="")
+    assert "facts from the actual workspace" not in p
+
+
 # ---- trend signals (trend-PR3) --------------------------------------------
 
 

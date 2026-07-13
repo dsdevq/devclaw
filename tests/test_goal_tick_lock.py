@@ -93,7 +93,11 @@ async def test_same_goal_ticks_serialize(tmp_path):
     # cadence="0s": tick2 must run REAL cognition (not just idle at zero cost)
     # for planner.calls == 2 to actually prove serialized-but-not-skipped —
     # last_plan_at is always in the past by the time tick2 gets to plan.
-    seed_goal(tmp_path, "g", cadence="0s")
+    # workspace_dir must NOT exist: the plan-time workspace snapshot (triage
+    # F5) then resolves synchronously (one stat, no executor hop), so the
+    # bare `sleep(0)` pumps below deterministically park tick1 AT cognition —
+    # the default /repos/demo could exist on a dev host and thread-hop.
+    seed_goal(tmp_path, "g", cadence="0s", workspace_dir=str(tmp_path / "no-such-ws"))
     store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
 
     release = asyncio.Event()
@@ -131,8 +135,11 @@ async def test_different_goals_do_not_serialize(tmp_path):
     concurrently must both reach cognition in parallel; one goal's tick must
     never wait behind another goal's in-flight planner call."""
     store = _store(tmp_path, Clock())
-    seed_goal(tmp_path, "g1")
-    seed_goal(tmp_path, "g2")
+    # Absent workspace_dir for the same reason as test_same_goal_ticks_serialize:
+    # keep the path to cognition free of the snapshot's executor hop so the
+    # bare-pump assertions below stay deterministic.
+    seed_goal(tmp_path, "g1", workspace_dir=str(tmp_path / "no-such-ws-1"))
+    seed_goal(tmp_path, "g2", workspace_dir=str(tmp_path / "no-such-ws-2"))
     store.save_status("g1", GoalStatus(phase="idle", lifecycle="executing"))
     store.save_status("g2", GoalStatus(phase="idle", lifecycle="executing"))
 
