@@ -691,9 +691,13 @@ class GoalService:
         # A TransitionConflict propagates as a visible MCP error, exactly like
         # steer_goal — practically unreachable since nothing awaits between
         # the load above and this write.
+        # heal_attempts=0 / next_heal_at=None: same as steer_goal — a HUMAN
+        # lifting the block vouches for the goal, so the mechanical auto-heal
+        # budget (and any prep-backoff window) is restored in full.
         self._goal_store.transition(
             goal_id, Event.UNBLOCK,
-            replace(s, phase="idle", blocked_on="", actions_dispatched=0, last_plan_at=None),
+            replace(s, phase="idle", blocked_on="", actions_dispatched=0, last_plan_at=None,
+                    heal_attempts=0, next_heal_at=None),
             expect=s,
         )
         self._goal_store.append_log(
