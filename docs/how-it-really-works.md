@@ -131,7 +131,12 @@ append-only event log and its views are projections. Goal state is owned by
   delivery fails, never "done without a PR" (#183); lost/corrupt state blocks legibly
   with an owner ping (#185/#188); a usage-limit hit *pauses-and-resumes* (one
   account-wide `paused_until` gates both queue and heartbeat; zero tokens while
-  paused; auto-resumes when the cap resets — #189/#190/#191).
+  paused; auto-resumes when the cap resets — #189/#190/#191). Blocks carry a
+  structured `blocked_kind`; a `mechanical:corrupt_doc` block **auto-heals** once the
+  contract file parses again (the tick's contract probe is the recheck — zero LLM),
+  damped by a persisted per-goal `heal_attempts` cap of 3, past which the goal parks
+  for a human with one plain ping. `needs_answer`, `bug`, `mechanical:lost_ref`, and
+  `mechanical:dispatch_cap` blocks stay human-gated on purpose.
 
 ## The code map (post-consolidation)
 

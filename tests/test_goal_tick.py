@@ -2079,7 +2079,9 @@ async def test_blocked_kind_stamped_per_block_site(tmp_path):
 def test_blocked_kind_cleared_on_unblock(tmp_path):
     """steer_goal lifts the block → blocked_kind returns to "" (enforced at
     the store's write choke point: any write landing on a non-blocked phase
-    clears the kind, so no unblock path can leak a stale classification)."""
+    clears the kind, so no unblock path can leak a stale classification) and
+    heal_attempts returns to 0 (a HUMAN lifting the block restores the full
+    mechanical auto-heal budget)."""
     from devclaw.goal.service import GoalConfig, GoalService
     from devclaw.state_store import StateStore
     from devclaw.task_queue import TaskQueue
@@ -2093,7 +2095,8 @@ def test_blocked_kind_cleared_on_unblock(tmp_path):
         svc = GoalService(TaskQueue(db), db, config=cfg)
         svc._goal_store.save_status(
             "g", GoalStatus(phase="blocked", blocked_on="cap hit",
-                            blocked_kind="mechanical:dispatch_cap", actions_dispatched=5),
+                            blocked_kind="mechanical:dispatch_cap", actions_dispatched=5,
+                            heal_attempts=2),
         )
         assert svc._goal_store.load_status("g").blocked_kind == "mechanical:dispatch_cap"
 
@@ -2102,5 +2105,163 @@ def test_blocked_kind_cleared_on_unblock(tmp_path):
         saved = svc._goal_store.load_status("g")
         assert saved.phase == "idle"
         assert saved.blocked_kind == ""
+        assert saved.heal_attempts == 0
     finally:
         db.close()
+
+
+# ---- corrupt-doc auto-heal (F8): mechanical recheck, damped, human-capped ----
+# The tick's contract-file probe re-parses the docs every tick anyway — on a
+# fixed doc that success IS the heal signal (zero LLM, zero subprocess). The
+# persisted heal_attempts budget stops a FLAPPING file from turning the
+# zero-token blocked steady-state into a plan + ping per cycle; only
+# mechanical:corrupt_doc heals — needs_answer/bug/lost_ref/dispatch_cap stay
+# human-gated.
+
+#: a checklist.yaml body that parses cleanly (validate_checklist rejects an
+#: empty list, so the minimal "fixed" doc carries one valid item).
+GOOD_CHECKLIST = (
+    "checklist:\n"
+    "  - id: i-1\n"
+    "    requirement: do the thing\n"
+    "    evidence_target: tests pass\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_corrupt_doc_block_autoheals_when_doc_parses_again(tmp_path):
+    """Torn checklist → BLOCKED (one ping, zero cognition). Fix the file → the
+    very next tick auto-unblocks mechanically (log line, NO ping, heal 1/3)
+    and proceeds to plan — the ensuing plan is the intended cost of a real
+    heal. A later productive settle earns the heal budget back."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    (tmp_path / "g" / "checklist.yaml").write_text("not yaml: [garbage\n")
+    planner, evaluator, engine, notifier = FakeClaude(ACT_FEATURE), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    assert await _tick(store, "g", planner, evaluator, engine, notifier) is Outcome.BLOCKED
+    assert await _tick(store, "g", planner, evaluator, engine, notifier) is Outcome.IDLE
+    assert planner.calls == 0 and evaluator.calls == 0  # zero cognition while torn
+    assert len(notifier.sent) == 1                       # the block ping only
+
+    (tmp_path / "g" / "checklist.yaml").write_text(GOOD_CHECKLIST)
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED                     # tick proceeded to plan + dispatch
+    assert planner.calls == 1
+    s = store.load_status("g")
+    assert s.phase == "in_flight" and s.blocked_kind == ""
+    assert s.heal_attempts == 1
+    assert "auto-resumed: contract file parses again (heal 1/3)" in store.recent_log("g")
+    assert len(notifier.sent) == 1                       # a heal logs; it never pings
+
+    # A productive settle (same signal as the dispatch-cap refund) earns the
+    # auto-heal budget back — the goal is demonstrably stable again.
+    engine.poll_result = PollResult(terminal=True, status="done", detail="ok", gate_passed=True)
+    await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert store.load_status("g").heal_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_corrupt_doc_flapping_capped_after_three_heals(tmp_path):
+    """tear/fix ×3 heals fine; the 4th fix does NOT heal — the goal parks
+    blocked with exactly one plain gave-up ping, and every further tick is
+    zero-cognition idle. (tear/fix via the goal_docs row — after the first
+    heal the checklist is DB-backed, the file is just a view.)"""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    sleeper = FakeClaude(json.dumps({"decision": "sleep", "note": "wait"}))
+    evaluator, engine, notifier = FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    def tear():
+        store._goal_state.write_doc("g", "checklist", "not yaml: [garbage", 1)
+
+    def fix():
+        store._goal_state.write_doc("g", "checklist", GOOD_CHECKLIST, 1)
+
+    for n in (1, 2, 3):
+        tear()
+        assert await _tick(store, "g", sleeper, evaluator, engine, notifier) is Outcome.BLOCKED
+        fix()
+        assert await _tick(store, "g", sleeper, evaluator, engine, notifier) is Outcome.SLEPT
+        assert store.load_status("g").heal_attempts == n
+    assert sleeper.calls == 3  # exactly one plan per real heal
+
+    # 4th flap: budget spent — the fix must NOT heal.
+    tear()
+    assert await _tick(store, "g", sleeper, evaluator, engine, notifier) is Outcome.BLOCKED
+    fix()
+    out = await _tick(store, "g", sleeper, evaluator, engine, notifier)
+
+    assert out is Outcome.IDLE
+    s = store.load_status("g")
+    assert s.phase == "blocked" and s.blocked_kind == "mechanical:corrupt_doc"
+    assert sleeper.calls == 3                                  # the gave-up tick spent zero cognition
+    assert len([m for m in notifier.sent if "gave up" in m]) == 1
+
+    # Parked: further ticks are zero-cognition, zero-ping idle.
+    pings = len(notifier.sent)
+    for _ in range(3):
+        assert await _tick(store, "g", sleeper, evaluator, engine, notifier) is Outcome.IDLE
+    assert sleeper.calls == 3 and evaluator.calls == 0
+    assert len(notifier.sent) == pings                         # exactly one gave-up ping, ever
+    assert store.load_status("g").phase == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_autoheal_never_fires_on_needs_answer_or_bug_blocks(tmp_path):
+    """A healthy store (the contract probe passes) must NOT unblock a
+    needs_answer block (the owner has a question to answer) or a bug block
+    (the force_block escape hatch) — auto-heal is corrupt_doc-only."""
+    store = _store(tmp_path, Clock())
+    evaluator, engine, notifier = FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    # needs_answer — driven by a real planner "blocked" decision.
+    seed_goal(tmp_path, "gq")
+    ask = FakeClaude(json.dumps({"decision": "blocked", "question": "which auth provider?"}))
+    assert await _tick(store, "gq", ask, evaluator, engine, notifier) is Outcome.BLOCKED
+    pings = len(notifier.sent)
+    planner = FakeClaude(ACT)
+    assert await _tick(store, "gq", planner, evaluator, engine, notifier) is Outcome.IDLE
+    sq = store.load_status("gq")
+    assert sq.phase == "blocked" and sq.blocked_kind == "needs_answer"
+    assert sq.heal_attempts == 0                          # never even attempted
+    assert planner.calls == 0 and len(notifier.sent) == pings
+
+    # bug — the force_block illegal-transition escape hatch.
+    seed_goal(tmp_path, "gb")
+    assert store.force_block("gb", "illegal state transition: …") is True
+    assert await _tick(store, "gb", planner, evaluator, engine, notifier) is Outcome.IDLE
+    sb = store.load_status("gb")
+    assert sb.phase == "blocked" and sb.blocked_kind == "bug"
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == pings                    # no heal chatter either
+
+
+@pytest.mark.asyncio
+async def test_lost_ref_block_stays_human_gated(tmp_path):
+    """mechanical:lost_ref never auto-heals: _block_on_lost_ref destroys the
+    in_flight ref at block time (the id survives only in blocked_on prose), so
+    there is nothing mechanical left to recheck — the block is deliberately
+    human-gated even though the store itself is perfectly healthy."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="in_flight",
+        in_flight=InFlight("devclaw", "implement_feature", "t_gone", "task", "add /health"),
+    ))
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+    engine = FakeEngine(poll_exc=GoalEngineError("unknown task_id: t_gone"))
+
+    assert await _tick(store, "g", planner, evaluator, engine, notifier) is Outcome.BLOCKED
+    assert store.load_status("g").blocked_kind == "mechanical:lost_ref"
+    pings = len(notifier.sent)
+
+    # Healthy store, many ticks: stays blocked, zero cognition, no auto-unblock.
+    for _ in range(3):
+        assert await _tick(store, "g", planner, evaluator, engine, notifier) is Outcome.IDLE
+    s = store.load_status("g")
+    assert s.phase == "blocked" and s.blocked_kind == "mechanical:lost_ref"
+    assert s.heal_attempts == 0
+    assert planner.calls == 0 and evaluator.calls == 0
+    assert len(notifier.sent) == pings

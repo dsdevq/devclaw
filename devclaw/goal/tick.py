@@ -74,6 +74,8 @@ from .tick_context import (  # noqa: F401 (re-exported)
     _tick_lock,
 )
 from .tick_guards import (  # noqa: F401 (re-exported)
+    CORRUPT_DOC_HEAL_CAP,
+    _autoheal_corrupt_doc,
     _block_on_corrupt_doc,
     _block_on_lost_ref,
     _block_on_prep_failure,
@@ -289,6 +291,23 @@ async def _tick_goal_impl(
             goal_id, status, exc,
             store=store, notifier=notifier, summarize=summary_caller,
         )
+
+    # Corrupt-doc auto-heal (F8): the probe above IS the recheck — it just
+    # re-parsed the contract docs, at zero cost, before any cognition. If this
+    # goal is blocked on mechanical:corrupt_doc, the condition it blocked on no
+    # longer holds: lift the block mechanically (no LLM — the mirror of the
+    # quota pause's timestamp-compare auto-resume in tick_all), damped by the
+    # persisted per-goal heal budget so a flapping file can't turn the
+    # zero-token blocked steady-state into a plan + ping per cycle. A refused
+    # heal (budget spent) leaves the blocked status untouched and the tick
+    # idles below at zero cognition, same as any blocked tick.
+    if status.phase == "blocked" and status.blocked_kind == "mechanical:corrupt_doc":
+        healed = await _autoheal_corrupt_doc(
+            goal_id, status, store=store, notifier=notifier,
+        )
+        if healed is not None:
+            status = healed
+            phase = _classify(status)
 
     # Zero-token no-progress watchdog: pure timestamp math; fires one owner ping
     # if an executing goal hasn't shipped in too long. Mutates status; never
