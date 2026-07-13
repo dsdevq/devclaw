@@ -147,6 +147,8 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 | `start_program(workspace_dir, goal, …)` | Decompose a large goal into a task DAG and run it |
 | `get_program(program_id)` / `list_programs()` | Program status + task DAG |
 | `get_status(task_id)` / `list_tasks(...)` / `get_events(...)` | Task history + replayable event feed (live SSE over HTTP) |
+| `get_scorecard_metrics(window_hours?)` | Rolling scorecard over the last N hours (default 1 week): merge rate, evaluator-verdict distribution, steer rate, first-pass hit rate, workspace breaks — a cheap SQLite read, callable from Telegram/dashboards |
+| `review_trends(scope?)` | Tail of the cross-session trend detector's `trends.md` — `harness_self` (devclaw's own self-observability) or a workspace path for that project's trends |
 | `cancel_task(task_id)` / `cancel_program(program_id)` | Abort in-flight work — tears down the sandbox |
 
 Async by default: a tool call returns a `task_id` immediately and the work runs in the background. Pass a `notify_url` to get a callback on completion/block instead of polling.
@@ -157,6 +159,7 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 
 | Tool | Does |
 |---|---|
+| `scope_grill(idea, transcript?)` | One turn of the pre-goal scope interview with the waiter: given a rough idea + the transcript so far, returns the next question (with a reasoned default) or the final agreed spec — the input `create_goal` deserves |
 | `create_goal(goal_id, objective, workspace_dir, done_when, backlog, …)` | Register a durable goal DevClaw drives over time |
 | `verify_goal(objective, workspace_dir, …)` | Pre-flight check — same admission validations as `create_goal`, no side effects; previews reject/warn conditions |
 | `get_goal(goal_id)` | Objective, phase, what's in flight, the latest direction verdict, recent log |
@@ -165,6 +168,7 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 | `resume_goal(goal_id)` | Recovery verb: unblock a blocked goal whose blocker was cleared out-of-band and re-plan on the next tick — same contract, no steering recorded (direction changes go through `steer_goal`) |
 | `evaluate_goal(goal_id)` | Force an on-demand, artifact-grounded direction evaluation now (not just on the periodic cadence) |
 | `tail_goal(goal_id, …)` | Deep read-only feed: deliveries tail (what each action actually shipped) + recent events |
+| `get_trace(goal_id, since_id?, limit?, kind?)` | Durable trace feed for a goal — every cognition call, dispatch, settle as replayable events (the audit trail under `tail_goal`'s narrative) |
 | `answer_unknowns(goal_id, answers)` | Owner's answers to the firming phase's named unknowns (`{unknown_id: answer_text}`, must cover every open one) — advances firming toward `executing` |
 | `cancel_goal(goal_id)` | Permanently stop a goal — terminal `cancelled`, tears down any in-flight action |
 
@@ -182,6 +186,18 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 5. **Done-gate** — the planner's `done` is only a *proposal*; it triggers a read-only `review_repository` against the firmed `done_when` + `stub_acceptable`, and the goal closes **only if the evaluator confirms `achieved`** from that review. "Done" is gated on grounded evaluation, not on counting PRs.
 
 The zero-token idle guard is load-bearing: an idle goal and an in-flight-still-running goal cost **0 `claude` calls** (the heartbeat is mechanism; cognition runs only when there's real work).
+
+### Dry-run cognition (debug — pure, no side effects)
+
+Each runs ONE cognition pass exactly as the goal layer would — same prompts, same
+parsers — but files nothing, dispatches nothing, and touches no goal state. For
+previewing what the loop *would* think before committing a goal.
+
+| Tool | Does |
+|---|---|
+| `dry_world_research(objective, …)` | The from-scratch world-research pass on a raw objective |
+| `dry_decompose(objective, …)` | The checklist decomposition for an objective (+ optional discovery brief / repo digest) |
+| `dry_evaluate(objective, done_when, review_report, …)` | The direction/done evaluator against a supplied review report |
 
 ### The project registry (control plane)
 
