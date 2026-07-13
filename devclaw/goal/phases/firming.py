@@ -20,6 +20,7 @@ unknowns wrong wastes downstream cost and owner attention. See
 
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import replace
 from typing import TYPE_CHECKING, Awaitable, Callable
@@ -29,6 +30,11 @@ from ..models import Goal, GoalStatus
 from ..store import GoalStore
 from ..transitions import Event
 from . import PhaseResult
+
+# The same workspace-snapshot collector the review gate uses (#227) — imported
+# as a module global so tests patch it HERE (mirrors task_queue's re-export of
+# the git _sync helpers).
+from ...task_git import _review_repo_context_sync  # noqa: F401
 
 if TYPE_CHECKING:
     from ..tick import TickContext
@@ -79,6 +85,22 @@ def _load_for_transition(store: GoalStore, goal_id: str) -> "GoalStatus | None":
     return fresh
 
 
+async def _collect_repo_context(workspace_dir: str) -> str:
+    """Best-effort snapshot of the goal's ACTUAL workspace — the mechanical
+    facts (remote, branch, head, key-file probes, tracked top-level layout)
+    that ground firming's contract-writing. Same thread-offload shape as
+    ``task_queue._review_repo_context``; looks up
+    :func:`_review_repo_context_sync` as a module global so tests patch it
+    here. NEVER raises — a git hiccup degrades to '' (the prompt section is
+    simply omitted) rather than costing a firming round."""
+    if not workspace_dir:
+        return ""
+    try:
+        return await asyncio.to_thread(_review_repo_context_sync, workspace_dir)
+    except Exception:  # noqa: BLE001 — grounding is best-effort by contract
+        return ""
+
+
 def _build_prompt(
     goal: Goal,
     *,
@@ -87,9 +109,17 @@ def _build_prompt(
     prior_draft: str,
     owner_answers: str,
     round_: int,
+    repo_context: str | None = None,
 ) -> str:
     from ...prompts import load_prompt
 
+    context_block = ""
+    if repo_context and repo_context.strip():
+        context_block = (
+            "## REPOSITORY CONTEXT (facts from the goal workspace — the source "
+            "of truth for repo identity, branch, and which files/dirs exist)\n\n"
+            + repo_context.strip()
+        )
     return load_prompt(
         "firming",
         objective=goal.objective,
@@ -98,6 +128,7 @@ def _build_prompt(
         round=round_,
         spec=spec or "(no spec — waiter scope-grill did not run)",
         discovery_brief=discovery_brief or "(no discovery brief yet)",
+        repo_context_block=context_block,
         prior_draft=prior_draft or "(none — round 1)",
         owner_answers=owner_answers or "(none — round 1)",
     )
@@ -150,6 +181,7 @@ async def _firm_once(
     owner_answers: dict[str, str] | None,
     round_: int,
     caller: ClaudeCaller,
+    repo_context: str = "",
 ) -> FirmedGoal:
     """Run one firming cognition pass — round 1 (no prior draft, no answers) or
     round N (prior + answers). Raises :class:`FirmingError` on parse failure."""
@@ -160,6 +192,7 @@ async def _firm_once(
         prior_draft=_render_prior_draft(prior_draft),
         owner_answers=_render_answers(owner_answers),
         round_=round_,
+        repo_context=repo_context,
     )
     raw = await caller(prompt)
     try:
@@ -233,6 +266,12 @@ class FirmingHandler:
         store = ctx.store
         caller = self._caller or self._resolve_caller()
 
+        # Ground the contract-writing in the ACTUAL workspace. On the degrade
+        # paths (empty review detail, discovery-synthesis failure) the
+        # discovery brief is empty and this snapshot is the prompt's ONLY repo
+        # channel — without it, a fabricated `verify_cmd: pytest -q` on a .NET
+        # repo becomes the winning gate via load_effective_goal (triage F1).
+        repo_context = await _collect_repo_context(goal.workspace_dir)
         try:
             draft = await _firm_once(
                 goal,
@@ -242,6 +281,7 @@ class FirmingHandler:
                 owner_answers=None,
                 round_=1,
                 caller=caller,
+                repo_context=repo_context,
             )
         except FirmingError as exc:
             store.append_log(goal_id, f"firming round 1 failed: {exc}")
@@ -303,6 +343,10 @@ class FirmingHandler:
             )
 
         next_round = prior.round + 1
+        # Same workspace grounding as round 1 — the answer round is the one
+        # that typically WRITES the final contract, so it needs the snapshot
+        # at least as much (see run()).
+        repo_context = await _collect_repo_context(goal.workspace_dir)
         try:
             draft = await _firm_once(
                 goal,
@@ -312,6 +356,7 @@ class FirmingHandler:
                 owner_answers=answers,
                 round_=next_round,
                 caller=caller,
+                repo_context=repo_context,
             )
         except FirmingError as exc:
             store.append_log(goal_id, f"firming round {next_round} failed: {exc}")

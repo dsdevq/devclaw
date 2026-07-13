@@ -24,11 +24,16 @@ answers a second time.
    for owner intent.
 4. **`discovery_brief`** — what the repo does today + gap-to-good. Your
    ground truth for "what's already there".
-5. **`prior_draft`** — your previous round's `firmed-draft.yaml`, if
+5. **REPOSITORY CONTEXT** — a mechanical snapshot of the actual
+   workspace (git remote/branch/head, key-file presence probes, tracked
+   top-level layout). This is the repo digest step 3 refers to; together
+   with the discovery brief it is your ONLY source of repo facts. May be
+   absent when the workspace could not be read.
+6. **`prior_draft`** — your previous round's `firmed-draft.yaml`, if
    any. Round 1 has none; round N has the prior draft + answers.
-6. **`owner_answers`** — round-N only; a mapping `unknown_id -> answer`
+7. **`owner_answers`** — round-N only; a mapping `unknown_id -> answer`
    the owner gave to the prior draft's `unknowns[]`.
-7. **`round`** — integer (1 = greenfield, 2+ = with-answers).
+8. **`round`** — integer (1 = greenfield, 2+ = with-answers).
 
 ## PROCEDURE — follow in order, do NOT skip
 
@@ -45,7 +50,8 @@ the done-gate evaluator can look for. If you cannot name a specific
 verifier, write `(to be determined by decomposer)` and mark the
 related unknown.
 
-**3. Extract conventions from the discovery brief and repo digest.**
+**3. Extract conventions from the discovery brief and the REPOSITORY
+CONTEXT section.**
 What patterns does the repo already follow that this goal MUST align
 with? Examples: CQRS via `IQueryHandler<TQuery,TResult>`, EF Core
 code-first migrations under `Modules/*/Migrations/`, native per-account
@@ -93,6 +99,19 @@ decomposer must not plan items for these.
 `success_criteria` entry has a non-trivial `verifiable_by`, set
 `status: firmed`. Otherwise keep `needs_owner_answers` and surface the
 gap as a fresh unknown.
+
+## Grounding — repo facts come only from your inputs
+
+Ground every repo fact in what you are given. Repo facts may come ONLY
+from the discovery brief or the REPOSITORY CONTEXT section — never from
+your priors, the host process or working directory you happen to run in,
+or any repository you have seen before. `verify_cmd` and every
+`verifiable_by` hint may only name files, tools, or directories present
+in one of those two inputs. If neither carries the fact you need, emit
+an `unknowns[]` entry instead of guessing — a fabricated gate (e.g.
+`verify_cmd: pytest -q` on a repo whose context shows `global.json` and
+no `pyproject.toml`) becomes the goal's WINNING gate downstream and
+poisons every dispatched task.
 
 ## Anti-patterns — reject these in your own output
 
@@ -168,8 +187,9 @@ If the existing `verify_cmd` already covers your criteria, OMIT the field
 change it when the contract genuinely requires a different gate.
 
 Format rules: a single shell line (use `&&` to chain), exact paths/working
-dirs as they exist in the workspace, no environment variables the agent
-might not have. The host runs it through `bash -c`.
+dirs as they exist in the workspace (as evidenced by the discovery brief
+or REPOSITORY CONTEXT — see the Grounding rule above), no environment
+variables the agent might not have. The host runs it through `bash -c`.
 
 ---
 
@@ -193,6 +213,8 @@ round: {round}
 ## Discovery brief
 
 {discovery_brief}
+
+{repo_context_block}
 
 ## Prior draft (round N>1 only)
 
