@@ -18,7 +18,9 @@ from devclaw.goal.engine import GoalEngineError
 from devclaw.goal.models import GoalStatus, InFlight, PollResult
 from devclaw.goal.store import GoalStore
 from devclaw.goal.tick import Outcome, sweep_orphaned_refs, tick_all, tick_goal
-from tests.goal_fakes import Clock, FakeClaude, FakeEngine, RecordingNotifier, fake_prepare, seed_goal
+from tests.goal_fakes import (
+    Clock, FakeClaude, FakeEngine, RecordingNotifier, fake_prepare, seed_goal, seed_marker_repo,
+)
 
 ACT = json.dumps(
     {"decision": "act", "note": "ship next", "actions": [{"tool": "start_program", "goal": "build /health"}]}
@@ -688,6 +690,86 @@ async def test_done_gate_disabled_uses_artifact_eval(tmp_path):
     assert store.load_status("g").phase == "done"
 
 
+@pytest.mark.asyncio
+async def test_done_gate_prompt_carries_repo_context_on_artifact_only_path(tmp_path, monkeypatch):
+    """verify_done=False runs the SAME terminal close with review_report="" —
+    the evaluator prompt used to contain ZERO first-hand repo facts, and the
+    owner was told "(verified)" anyway. Now the prompt carries a grounded
+    snapshot of the ACTUAL workspace and the notification says what really
+    happened (triage F3, the evaluator sibling of #227)."""
+    from devclaw.goal import tick as tick_mod
+
+    async def _no_deploy(workspace_dir, slug):
+        raise RuntimeError("no deploys under test")
+
+    monkeypatch.setattr(tick_mod._deploy, "deploy_project", _no_deploy)
+    repo = seed_marker_repo(tmp_path)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    planner = FakeClaude(json.dumps({"decision": "done", "note": "done"}))
+    evaluator = FakeClaude(json.dumps({
+        "verdict": "achieved",
+        "rationale": "deliveries show done_when met",
+        "clauses": [
+            {"clause": "/health returns 200", "satisfied": True,
+             "evidence": "PR #1 added src/Health.cs:12 + HealthTests.cs:8"},
+            {"clause": "/health is tested", "satisfied": True,
+             "evidence": "HealthTests.cs:8 Health_Returns200 passing"},
+        ],
+    }))
+    engine, notifier = FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, verify_done=False)
+
+    assert out is Outcome.DONE
+    prompt = evaluator.last_prompt
+    assert "## Repository context" in prompt
+    assert "global.json: file" in prompt          # a real probe line from the ACTUAL workspace
+    assert "pyproject.toml: missing" in prompt    # ...which is not the control-plane repo
+    done_msgs = [m for m in notifier.sent if "goal complete" in m]
+    assert done_msgs, notifier.sent
+    assert all("artifact-only close" in m for m in done_msgs)
+    assert not any("(verified)" in m for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_done_gate_verified_wording_kept_when_review_grounded(tmp_path, monkeypatch):
+    """The DEFAULT done-gate is untouched: when a real repo review grounded the
+    close, the owner notification still says "(verified)" — the honest-labeling
+    fix only relabels the artifact-only fallthrough."""
+    from devclaw.goal import tick as tick_mod
+
+    async def _no_deploy(workspace_dir, slug):
+        raise RuntimeError("no deploys under test")
+
+    monkeypatch.setattr(tick_mod._deploy, "deploy_project", _no_deploy)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(
+        phase="verifying",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "verify", is_done_check=True),
+    ))
+    planner = FakeClaude(ACT)  # must NOT be called
+    evaluator = FakeClaude(json.dumps({
+        "verdict": "achieved",
+        "rationale": "/health exists and is tested",
+        "clauses": [
+            {"clause": "/health returns 200", "satisfied": True,
+             "evidence": "src/Health.cs:12 returns OK; HealthTests.cs:8 asserts 200"},
+            {"clause": "/health is tested", "satisfied": True,
+             "evidence": "HealthTests.cs:8 Health_Returns200"},
+        ],
+    }))
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="repo has /health + test"))
+    notifier = RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DONE
+    assert any("goal complete (verified)" in m for m in notifier.sent)
+    assert not any("artifact-only" in m for m in notifier.sent)
+
+
 # ---- periodic direction evaluation -----------------------------------------
 
 
@@ -719,6 +801,32 @@ async def test_midflight_eval_fires_on_delivery_cadence_and_steers(tmp_path):
     # planner still ran afterward (momentum)
     assert planner.calls == 1
     assert out is Outcome.DISPATCHED
+
+
+@pytest.mark.asyncio
+async def test_midflight_eval_prompt_carries_repo_context(tmp_path):
+    """The default-config mid-flight direction eval gets the same workspace
+    grounding as the done-gate — its "corrections" are written into steering,
+    and a wrong-stack inference there burns real tasks or falsely blocks the
+    goal (triage F3 gap 2)."""
+    repo = seed_marker_repo(tmp_path)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    store.save_status("g", GoalStatus(
+        phase="in_flight", deliveries_since_eval=2,
+        in_flight=InFlight("devclaw", "implement_feature", "t1", "task", "add /health"),
+    ))
+    planner = FakeClaude(ACT_FEATURE)
+    evaluator = FakeClaude(json.dumps({"verdict": "on_track", "rationale": "progressing"}))
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="shipped"))
+    notifier = RecordingNotifier()
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, eval_every=3)
+
+    assert evaluator.calls == 1
+    prompt = evaluator.last_prompt
+    assert "## Repository context" in prompt
+    assert "global.json: file" in prompt   # first-hand facts from the ACTUAL workspace
 
 
 @pytest.mark.asyncio

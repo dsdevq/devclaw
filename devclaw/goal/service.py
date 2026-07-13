@@ -715,10 +715,17 @@ class GoalService:
         # contract, which is exactly the silent loss T0.4 closed.
         g = self._goal_store.load_effective_goal(goal_id)
         s = self._goal_store.load_status(goal_id)
+        # Same grounding as the tick paths (triage F3): the workspace snapshot
+        # + the agreed spec. The on-demand eval used to omit BOTH — its
+        # "corrections" could describe the wrong repo and ignore the contract
+        # the tick-path evaluator judges against.
+        repo_context = await goal_evaluator._repo_context(g.workspace_dir)
         ev = await goal_evaluator.evaluate(
             g, s, self._goal_store.recent_log(goal_id),
             self._goal_store.recent_deliveries(goal_id),
             claude_caller=self._evaluator(),
+            spec=self._goal_store.read_spec(goal_id),
+            repo_context=repo_context,
         )
         now = self._goal_store.now_iso()
         # Telemetry-only (verdict/note) — column-only path, not a transition.

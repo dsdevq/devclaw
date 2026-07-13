@@ -383,10 +383,18 @@ async def _run_mid_flight_eval(
 ) -> "Outcome | None":
     """Periodic, artifact-grounded direction check. Returns an Outcome to return
     early (blocked) or None to keep going. Resets the delivery counter."""
+    # Ground the direction check in the goal's ACTUAL workspace (triage F3):
+    # a mid-flight "correction" inferred from the wrong repo is written into
+    # steering and burns real tasks, and a wrong-repo stalled/needs_human
+    # falsely blocks the goal. Best-effort — never raises. Zero-token guard
+    # holds: this runs only past the eval cadence gate, where cognition
+    # already fires; the git subprocess adds no LLM call and no idle cost.
+    repo_context = await _evaluator._repo_context(goal.workspace_dir)
     try:
         ev = await _evaluator.evaluate(
             goal, status, store.recent_log(goal_id), store.recent_deliveries(goal_id),
             claude_caller=evaluator_caller, spec=store.read_spec(goal_id),
+            repo_context=repo_context,
         )
     except _evaluator.GoalEvalError as exc:
         store.append_log(goal_id, f"eval error: {exc}")
