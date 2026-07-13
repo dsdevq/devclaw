@@ -9,6 +9,8 @@ Two halves:
 Driven with stub runners + a stub reviewer (no docker, no claude).
 """
 
+import subprocess
+
 import pytest
 
 from devclaw import task_queue
@@ -30,6 +32,18 @@ def test_build_prompt_includes_ticket_diff_and_contract():
     p = build_review_prompt(goal="Add X", kind="implement_feature", diff="diff --git ...")
     assert "Add X" in p and "implement_feature" in p and "diff --git" in p
     assert "STRICT JSON" in p and "request_changes" in p
+
+
+def test_build_prompt_includes_repo_context_when_supplied():
+    p = build_review_prompt(
+        goal="Add CI",
+        kind="implement_feature",
+        diff="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml",
+        repo_context="scripts/verify.sh: file\npyproject.toml: missing",
+    )
+    assert "REPOSITORY CONTEXT" in p
+    assert "scripts/verify.sh: file" in p
+    assert "pyproject.toml: missing" in p
 
 
 def test_clip_diff_truncates_oversized(monkeypatch):
@@ -105,6 +119,23 @@ async def test_review_diff_parses_model_json():
     assert v["verdict"] == "approve"
 
 
+async def test_review_diff_passes_repo_context_to_prompt():
+    seen = {}
+
+    async def caller(prompt):
+        seen["prompt"] = prompt
+        return '{"verdict":"approve","summary":"ok","issues":[]}'
+
+    await review_gate.review_diff(
+        goal="g",
+        kind="implement_feature",
+        diff="d",
+        repo_context="git_remote_origin: https://github.com/dsdevq/closeloop-bench-2026-07-11.git",
+        claude_caller=caller,
+    )
+    assert "git_remote_origin: https://github.com/dsdevq/closeloop-bench-2026-07-11.git" in seen["prompt"]
+
+
 async def test_review_diff_raises_on_unparseable():
     async def caller(_prompt):
         return "I think this looks pretty good honestly"
@@ -139,7 +170,7 @@ def _reviewer(verdicts: list):
     (→ request_changes with one blocking issue carrying that text)."""
     seq = list(verdicts)
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         v = seq.pop(0)
         if v == "approve":
             return {"verdict": "approve", "summary": "ok", "issues": [], "blocking": []}
@@ -207,7 +238,7 @@ async def test_review_fails_open_on_reviewer_error(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     calls: list = []
 
-    async def boom(*, goal, kind, diff):
+    async def boom(*, goal, kind, diff, repo_context=None):
         raise RuntimeError("claude unreachable")
 
     q = TaskQueue(store, runner=_ok_gate_runner(calls), reviewer=boom)
@@ -223,7 +254,7 @@ async def test_review_skipped_when_disabled(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "request_changes", "summary": "x", "issues": [], "blocking": [
             {"severity": "major", "location": "a", "problem": "b", "fix": "c"}]}
@@ -260,11 +291,57 @@ async def test_diff_uses_workspace_path_verbatim_not_host_translation(store, mon
     assert seen["path"] == ws
 
 
+async def test_review_receives_context_from_workspace(store, tmp_path, monkeypatch):
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Tester"], cwd=repo, check=True)
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "verify.sh").write_text("#!/usr/bin/env bash\n")
+    (repo / "global.json").write_text('{"sdk":{"version":"9.0.315"}}\n')
+    (repo / "frontend").mkdir()
+    (repo / "frontend" / "angular.json").write_text("{}\n")
+    (repo / "f.py").write_text("print('x')\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/dsdevq/closeloop-bench-2026-07-11.git",
+        ],
+        cwd=repo,
+        check=True,
+    )
+    contexts: list[str] = []
+
+    async def reviewer(*, goal, kind, diff, repo_context=None):
+        contexts.append(repo_context or "")
+        return {"verdict": "approve", "summary": "ok", "issues": [], "blocking": []}
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=reviewer)
+    tid = q.submit(
+        kind="implement_feature", workspace_dir=str(repo), goal="g", verify_cmd="pytest"
+    )
+    await q.drain()
+
+    assert store.get_task(tid).status == "done"
+    assert contexts
+    assert "git_remote_origin: https://github.com/dsdevq/closeloop-bench-2026-07-11.git" in contexts[0]
+    assert "scripts/verify.sh: file" in contexts[0]
+    assert "global.json: file" in contexts[0]
+    assert "frontend/angular.json: file" in contexts[0]
+
+
 async def test_review_skipped_for_non_code_kind(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "approve", "summary": "", "issues": [], "blocking": []}
 

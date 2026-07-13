@@ -29,6 +29,12 @@ problems to look thorough: if the change is genuinely solid, APPROVE it. Only
 not by themselves require changes. Judge ONLY the change in the diff against the
 ticket — do not demand scope beyond the ticket.
 
+Use the supplied REPOSITORY CONTEXT as the source of truth for repo identity,
+branch, and whether key files/directories exist. Do NOT infer repository facts
+from your own current working directory, Claude project context, host process
+context, or unrelated remembered repos. If a fact is not present in the diff or
+REPOSITORY CONTEXT, treat it as unknown rather than substituting another repo.
+
 Respond with STRICT JSON ONLY — no prose, no fences:
 {{
   "verdict": "approve" | "request_changes",

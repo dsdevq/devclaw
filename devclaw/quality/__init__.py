@@ -46,16 +46,19 @@ def _clip_diff(diff: str) -> str:
     )
 
 
-def build_review_prompt(*, goal: str, kind: str, diff: str) -> str:
+def build_review_prompt(
+    *, goal: str, kind: str, diff: str, repo_context: str | None = None
+) -> str:
     from ..prompts import load_prompt
 
-    return "\n\n".join(
-        [
-            load_prompt("review-gate"),
-            f"TICKET ({kind}):\n{goal}",
-            f"DIFF UNDER REVIEW:\n{_clip_diff(diff)}",
-        ]
-    )
+    parts = [
+        load_prompt("review-gate"),
+        f"TICKET ({kind}):\n{goal}",
+    ]
+    if repo_context and repo_context.strip():
+        parts.append(f"REPOSITORY CONTEXT (facts from the task workspace):\n{repo_context.strip()}")
+    parts.append(f"DIFF UNDER REVIEW:\n{_clip_diff(diff)}")
+    return "\n\n".join(parts)
 
 
 def validate_review(parsed: object) -> dict:
@@ -123,12 +126,15 @@ async def review_diff(
     goal: str,
     kind: str,
     diff: str,
+    repo_context: str | None = None,
     claude_caller: Callable[[str], Awaitable[str]] = review_caller,
 ) -> dict:
     """Review one diff into a validated verdict dict. ``claude_caller`` is injected
     so tests can stub the subprocess. Raises PlannerError if the model returns
     unparseable/invalid JSON (the caller decides whether to fail open)."""
-    prompt = build_review_prompt(goal=goal, kind=kind, diff=diff)
+    prompt = build_review_prompt(
+        goal=goal, kind=kind, diff=diff, repo_context=repo_context
+    )
     raw = await claude_caller(prompt)
     try:
         parsed = json.loads(extract_json(raw))

@@ -137,6 +137,62 @@ async def _git_diff(host_dir: str) -> str:
     return await asyncio.to_thread(_git_diff_sync, host_dir)
 
 
+def _run_git_context(host_dir: str, *args: str) -> str:
+    try:
+        p = subprocess.run(
+            ["git", "-C", host_dir, *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"<error: {exc}>"
+    out = (p.stdout or p.stderr or "").strip()
+    if p.returncode != 0:
+        return f"<git exited {p.returncode}: {out[:200]}>"
+    return out
+
+
+def _review_repo_context_sync(host_dir: str) -> str:
+    """Small, grounded repo snapshot for the host-side review gate.
+
+    The reviewer only sees the diff, not the sandbox filesystem. For tiny diffs
+    such as a CI YAML file, validating claims like "scripts/verify.sh exists"
+    requires a few facts from the task workspace; otherwise host-side Claude can
+    infer from the control-plane repo it was launched from.
+    """
+    probes = [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "scripts/verify.sh",
+        "global.json",
+        "pyproject.toml",
+        "package.json",
+        "frontend/package.json",
+        "frontend/angular.json",
+        "closeloop.sln",
+        "backend",
+        "frontend",
+    ]
+    facts = [
+        f"workspace_dir: {host_dir}",
+        f"git_remote_origin: {_run_git_context(host_dir, 'remote', 'get-url', 'origin')}",
+        f"git_branch: {_run_git_context(host_dir, 'branch', '--show-current')}",
+        f"git_head: {_run_git_context(host_dir, 'log', '-1', '--oneline')}",
+    ]
+    for rel in probes:
+        path = os.path.join(host_dir, rel)
+        kind = "dir" if os.path.isdir(path) else "file" if os.path.isfile(path) else "missing"
+        facts.append(f"{rel}: {kind}")
+    files = _run_git_context(host_dir, "ls-files")
+    if files and not files.startswith("<"):
+        top = sorted({line.split("/", 1)[0] for line in files.splitlines() if line.strip()})
+        facts.append("tracked_top_level: " + ", ".join(top[:40]))
+    return "\n".join(facts)
+
+
+async def _review_repo_context(host_dir: str) -> str:
+    return await asyncio.to_thread(_review_repo_context_sync, host_dir)
+
+
 def _integrity_failure(diff: str) -> Optional[str]:
     """Return a failure summary if the change weakened the tests (deleted/skipped),
     else None. Enforces what the prompt only asks for. Operates on an already-
@@ -838,7 +894,7 @@ class TaskQueue:
                         integrity = _integrity_failure(diff)
                         review_fb = (
                             None if integrity is not None
-                            else await self._review_failure(kind, goal, diff)
+                            else await self._review_failure(kind, goal, diff, workspace_dir)
                         )
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
@@ -880,7 +936,9 @@ class TaskQueue:
         self._check_and_trip_breaker(workspace_dir, task_id)
         return None
 
-    async def _review_failure(self, kind: TaskKind, goal: str, diff: str) -> Optional[str]:
+    async def _review_failure(
+        self, kind: TaskKind, goal: str, diff: str, workspace_dir: str
+    ) -> Optional[str]:
         """Run the pre-PR adversarial review gate on the change's diff. Returns the
         request-changes feedback (→ fed back into the retry loop like a gate fail),
         or None to let the task ship. Fails OPEN — a disabled gate, a non-code kind,
@@ -891,7 +949,10 @@ class TaskQueue:
         if not diff.strip():
             return None
         try:
-            review = await self._reviewer(goal=goal, kind=kind, diff=diff)
+            repo_context = await _review_repo_context(workspace_dir)
+            review = await self._reviewer(
+                goal=goal, kind=kind, diff=diff, repo_context=repo_context
+            )
         except Exception as err:  # noqa: BLE001 — never block a verified task on a review crash
             sys.stderr.write(f"task-queue: review gate errored (failing open): {err}\n")
             return None
