@@ -2393,3 +2393,176 @@ async def test_lost_ref_block_stays_human_gated(tmp_path):
     assert s.heal_attempts == 0
     assert planner.calls == 0 and evaluator.calls == 0
     assert len(notifier.sent) == pings
+
+
+# ---- prep-failure auto-heal (F8): ls-remote recheck on a capped backoff -----
+# Unlike the corrupt-doc probe (free, every tick), the prep recheck costs a
+# git subprocess, so it runs only when the persisted next_heal_at window is
+# open — between windows a blocked goal is a zero-subprocess, zero-cognition
+# tick. The ls-remote seam (tick_guards._ls_remote_ok_sync) is stubbed here;
+# the block itself is driven by the REAL prep-failure path.
+
+
+@pytest.mark.asyncio
+async def test_prep_block_autoheals_when_remote_reachable_again(tmp_path, monkeypatch):
+    """Prep-blocked goal + reachable remote → the first due recheck heals
+    (one ls-remote against the goal's repo_url, no ping, log line), and the
+    tick proceeds to plan + dispatch with the REAL prepare_ws."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    # investigation path: prep runs BEFORE any cognition, so the block tick
+    # is zero-token (mirrors test_investigation_prep_failure_blocks_without_cognition)
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="investigating"))
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.BLOCKED
+    assert store.load_status("g").blocked_kind == "mechanical:prep"
+    assert planner.calls == 0 and len(notifier.sent) == 1
+
+    probes: list[str] = []
+
+    def reachable(url: str) -> bool:
+        probes.append(url)
+        return True
+
+    monkeypatch.setattr("devclaw.goal.tick_guards._ls_remote_ok_sync", reachable)
+    out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=fake_prepare)
+
+    assert out is Outcome.DISPATCHED                      # healed and went on to plan
+    assert probes == ["https://example.com/demo.git"]     # exactly one ls-remote, the goal's URL
+    assert planner.calls == 1
+    s = store.load_status("g")
+    assert s.phase == "in_flight" and s.blocked_kind == ""
+    assert s.heal_attempts == 1 and s.next_heal_at is None
+    assert "auto-resumed: repo reachable again (heal 1/5)" in store.recent_log("g")
+    assert len(notifier.sent) == 1                        # a heal logs; it never pings
+
+
+@pytest.mark.asyncio
+async def test_prep_heal_respects_backoff_window(tmp_path, monkeypatch):
+    """A failed recheck arms an exponential next_heal_at window (30min·2^n,
+    capped): before it opens, a tick runs NO recheck at all — zero subprocess,
+    zero cognition. The heal budget continues across windows."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="investigating"))
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+    await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)
+
+    probes: list[str] = []
+    reachable = {"now": False}
+
+    def recheck(url: str) -> bool:
+        probes.append(url)
+        return reachable["now"]
+
+    monkeypatch.setattr("devclaw.goal.tick_guards._ls_remote_ok_sync", recheck)
+
+    # First recheck is due immediately (no window yet) — fails, arms 30min.
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    s = store.load_status("g")
+    assert len(probes) == 1 and s.heal_attempts == 1 and s.next_heal_at is not None
+
+    # Inside the window: NO recheck — the tick never even spawns the subprocess.
+    clock.advance(10 * 60)
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    assert len(probes) == 1
+
+    # Window open (t=31min > 30min): recheck fires, fails, window doubles to 1h.
+    clock.advance(21 * 60)
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    assert len(probes) == 2 and store.load_status("g").heal_attempts == 2
+
+    # 31min into the 1h window: still closed.
+    clock.advance(31 * 60)
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    assert len(probes) == 2
+    assert planner.calls == 0                             # zero cognition this whole time
+
+    # Past the window and the remote is back: heal, budget continuing at 3/5.
+    clock.advance(30 * 60)
+    reachable["now"] = True
+    out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=fake_prepare)
+    assert out is Outcome.DISPATCHED
+    assert len(probes) == 3
+    s = store.load_status("g")
+    assert s.blocked_kind == "" and s.heal_attempts == 3 and s.next_heal_at is None
+
+
+@pytest.mark.asyncio
+async def test_prep_heal_gives_up_after_cap(tmp_path, monkeypatch):
+    """5 failed rechecks spend the budget; the next tick parks the goal with
+    exactly ONE plain gave-up ping and never rechecks again — a parked goal
+    is a zero-subprocess, zero-cognition tick until a human steers."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="investigating"))
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+    await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare)
+
+    probes: list[str] = []
+
+    def never_reachable(url: str) -> bool:
+        probes.append(url)
+        return False
+
+    monkeypatch.setattr("devclaw.goal.tick_guards._ls_remote_ok_sync", never_reachable)
+
+    # 5 failed rechecks, jumping past every backoff window (max 6h).
+    for n in (1, 2, 3, 4, 5):
+        clock.advance(7 * 3600)
+        assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+        assert store.load_status("g").heal_attempts == n
+    assert len(probes) == 5
+    assert not any("gave up" in m for m in notifier.sent)
+
+    # Budget spent: the next tick parks — one plain gave-up ping, NO recheck.
+    clock.advance(7 * 3600)
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    assert len(probes) == 5                                # parked before any subprocess
+    assert len([m for m in notifier.sent if "gave up" in m]) == 1
+    s = store.load_status("g")
+    assert s.phase == "blocked" and s.blocked_kind == "mechanical:prep"
+
+    # And stays parked: no rechecks, no pings, zero cognition.
+    pings = len(notifier.sent)
+    for _ in range(3):
+        clock.advance(7 * 3600)
+        assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    assert len(probes) == 5 and len(notifier.sent) == pings
+    assert planner.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_prep_heal_checks_workspace_git_when_no_repo_url(tmp_path, monkeypatch):
+    """A goal with no repo_url (pre-existing-workspace config) rechecks by
+    stat — does <workspace_dir>/.git exist — and must never spawn ls-remote."""
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    ws = tmp_path / "ws"
+    seed_goal(tmp_path, "g", repo_url=None, workspace_dir=str(ws))
+    store.save_status("g", GoalStatus(phase="idle"))  # executing path (world-research skips prep)
+    planner, engine, notifier = FakeClaude(ACT), FakeEngine(), RecordingNotifier()
+
+    def no_ls_remote(url: str) -> bool:
+        raise AssertionError("ls-remote must not run for a goal without a repo_url")
+
+    monkeypatch.setattr("devclaw.goal.tick_guards._ls_remote_ok_sync", no_ls_remote)
+
+    # Executing path: plan → dispatch → prep fails → block (one plan call).
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.BLOCKED
+    assert store.load_status("g").blocked_kind == "mechanical:prep"
+
+    # Workspace still isn't a checkout → the stat recheck fails, backoff arms.
+    assert await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=_failing_prepare) is Outcome.IDLE
+    assert store.load_status("g").heal_attempts == 1
+
+    # The checkout appears; past the window the recheck passes and heals.
+    (ws / ".git").mkdir(parents=True)
+    clock.advance(31 * 60)
+    out = await _tick_prep(store, "g", planner, engine, notifier, prepare_ws=fake_prepare)
+    assert out is Outcome.DISPATCHED
+    s = store.load_status("g")
+    assert s.blocked_kind == "" and s.heal_attempts == 2 and s.next_heal_at is None

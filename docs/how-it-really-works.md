@@ -132,11 +132,15 @@ append-only event log and its views are projections. Goal state is owned by
   with an owner ping (#185/#188); a usage-limit hit *pauses-and-resumes* (one
   account-wide `paused_until` gates both queue and heartbeat; zero tokens while
   paused; auto-resumes when the cap resets — #189/#190/#191). Blocks carry a
-  structured `blocked_kind`; a `mechanical:corrupt_doc` block **auto-heals** once the
-  contract file parses again (the tick's contract probe is the recheck — zero LLM),
-  damped by a persisted per-goal `heal_attempts` cap of 3, past which the goal parks
-  for a human with one plain ping. `needs_answer`, `bug`, `mechanical:lost_ref`, and
-  `mechanical:dispatch_cap` blocks stay human-gated on purpose.
+  structured `blocked_kind`, and the two re-checkable mechanical kinds **auto-heal**
+  (zero LLM, damped by a persisted per-goal `heal_attempts` budget):
+  `mechanical:corrupt_doc` once the contract file parses again (the tick's contract
+  probe is the recheck — free, every tick; cap 3), and `mechanical:prep` via a
+  `git ls-remote` recheck on a persisted exponential backoff (`next_heal_at`,
+  30 min → 6 h; cap 5 — between windows a blocked goal stays a zero-subprocess
+  tick). Past its cap a goal parks for a human with one plain ping. `needs_answer`,
+  `bug`, `mechanical:lost_ref`, and `mechanical:dispatch_cap` blocks stay
+  human-gated on purpose.
 
 ## The code map (post-consolidation)
 

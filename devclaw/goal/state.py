@@ -98,6 +98,7 @@ class GoalState:
                   blocked_on            TEXT,
                   blocked_kind          TEXT,
                   heal_attempts         INTEGER NOT NULL DEFAULT 0,
+                  next_heal_at          TEXT,
                   next                  TEXT,
                   last_plan_at          TEXT,
                   last_tick_at          TEXT,
@@ -217,6 +218,7 @@ class GoalState:
                 "ALTER TABLE goal_status ADD COLUMN lifecycle TEXT",
                 "ALTER TABLE goal_status ADD COLUMN blocked_kind TEXT",
                 "ALTER TABLE goal_status ADD COLUMN heal_attempts INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE goal_status ADD COLUMN next_heal_at TEXT",
             ):
                 try:
                     self._store._db.execute(sql)
@@ -337,12 +339,12 @@ class GoalState:
                 """
                 INSERT INTO goal_status (
                   goal_id, version, state, phase, lifecycle, blocked_on, blocked_kind,
-                  heal_attempts, "next",
+                  heal_attempts, next_heal_at, "next",
                   last_plan_at, last_tick_at, actions_dispatched, deliveries_since_eval,
                   last_eval_verdict, last_eval_at, last_eval_note, last_progress_at,
                   no_progress_notified, in_flight_ref_id, in_flight_kind,
                   in_flight_json, inbox_ingest_cursor, updated_at
-                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(goal_id) DO UPDATE SET
                   version               = goal_status.version + 1,
                   state                 = excluded.state,
@@ -351,6 +353,7 @@ class GoalState:
                   blocked_on            = excluded.blocked_on,
                   blocked_kind          = excluded.blocked_kind,
                   heal_attempts         = excluded.heal_attempts,
+                  next_heal_at          = excluded.next_heal_at,
                   "next"                = excluded."next",
                   last_plan_at          = excluded.last_plan_at,
                   last_tick_at          = excluded.last_tick_at,
@@ -375,6 +378,7 @@ class GoalState:
                     status.blocked_on,
                     status.blocked_kind,
                     status.heal_attempts,
+                    status.next_heal_at,
                     status.next,
                     status.last_plan_at,
                     status.last_tick_at,
@@ -410,10 +414,12 @@ class GoalState:
         "last_eval_at": "last_eval_at",
         "last_eval_note": "last_eval_note",
         "deliveries_since_eval": "deliveries_since_eval",
-        # heal_attempts is damping bookkeeping (never read by derive_state) —
-        # the column-only path exists so the auto-heal's gave-up marker can be
-        # stamped on a still-BLOCKED goal without a full-row rewrite.
+        # heal_attempts / next_heal_at are damping bookkeeping (never read by
+        # derive_state) — the column-only path exists so the auto-heal's
+        # gave-up marker and the prep-recheck backoff window can be stamped
+        # on a still-BLOCKED goal without a full-row rewrite.
         "heal_attempts": "heal_attempts",
+        "next_heal_at": "next_heal_at",
     }
 
     def update_columns(self, goal_id: str, fields: dict) -> None:
@@ -849,6 +855,7 @@ def _row_to_status(row, phase_history: "tuple[dict, ...]") -> GoalStatus:
         # ALTERed by _bootstrap) reads as "" — unclassified, same as the default.
         blocked_kind=row["blocked_kind"] or "",
         heal_attempts=int(row["heal_attempts"] or 0),
+        next_heal_at=row["next_heal_at"] or None,
         next=row["next"] or "",
         last_plan_at=row["last_plan_at"] or None,
         last_tick_at=row["last_tick_at"] or None,
