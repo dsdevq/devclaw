@@ -36,8 +36,8 @@ next action; every dispatch forks a fresh branch off current `main`.
      v        v
   squash-   PR left open,
   merge     planner told
-  to main   "pr_state=open (owner
-     |       review pending)"
+  to main   "pr_state=open (unmerged —
+     |       owner review pending)"
      v
   next dispatch forks from
   UPDATED main -> no overlap
@@ -131,8 +131,12 @@ program PRs by hand, same contract as Shape 1.
    settle FAILED       -> stays        (failed run, or gate FAILED)
 
    counter >= cap      -> goal BLOCKED, owner notified
-   owner steer         -> unblocks, counter reset to 0
+   owner steer/resume  -> unblocks, counter reset to 0
 ```
+
+Both `steer_goal` and `resume_goal` clear the counter; the cap block is
+human-gated by design — unlike `mechanical:corrupt_doc`/`mechanical:prep`,
+it never auto-heals.
 
 Only a planner looping on **broken** dispatches accumulates to the cap. A
 healthy goal — including one that grounds every delivery in a read-only

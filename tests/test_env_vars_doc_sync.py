@@ -1,4 +1,4 @@
-"""docs/env-vars.md ↔ code parity — the env surface stays honest.
+"""docs/reference/env-vars.md ↔ code parity — the env surface stays honest.
 
 The doc calls itself the single source of truth; history shows it drifts
 (pre-2026-07-11 it documented ~60 of ~85 vars actually read). This test makes
@@ -19,7 +19,7 @@ import re
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
-_DOC = _REPO / "docs" / "env-vars.md"
+_DOC = _REPO / "docs" / "reference" / "env-vars.md"
 
 #: an env READ: os.environ.get / [] / setdefault / os.getenv, tolerating a
 #: line break between the call and the var-name literal.
@@ -46,7 +46,7 @@ def _documented_rows() -> set[str]:
 def test_every_env_read_is_documented():
     undocumented = _runtime_reads() - _documented_rows()
     assert not undocumented, (
-        f"env vars read by the runtime but missing from docs/env-vars.md: "
+        f"env vars read by the runtime but missing from docs/reference/env-vars.md: "
         f"{sorted(undocumented)} — add a row (or demote the read to a "
         f"constant if it isn't a real per-host fact)"
     )
@@ -55,7 +55,7 @@ def test_every_env_read_is_documented():
 def test_every_documented_var_is_read():
     ghosts = _documented_rows() - _runtime_reads()
     assert not ghosts, (
-        f"vars documented in docs/env-vars.md but read nowhere in the "
+        f"vars documented in docs/reference/env-vars.md but read nowhere in the "
         f"runtime: {sorted(ghosts)} — remove the row (dead config docs are "
         f"worse than none)"
     )

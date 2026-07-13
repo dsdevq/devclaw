@@ -1,5 +1,9 @@
 # Engine decision — OpenHands vs Claude-SDK
 
+> **Decision record** — frozen as **ADR 0002** on 2026-07-13. The decision and the
+> switch procedure below stand; point-in-time system references are not maintained
+> for drift — the current system is [`../architecture.md`](../architecture.md).
+
 ## Current default
 
 **OpenHands** (`run_sandcastle` via `openhands-runner/runner.py`). This is what production runs. Don't change without data.
@@ -51,7 +55,7 @@ Then task #8 fires:
 - delete `openhands-runner/`
 - drop `openhands-sdk==1.24.0` from the sandbox Dockerfile + requirements
 - make `claude_sdk` the unset-engine default in `server/_state.py`
-- delete `devclaw/sandcastle_runner.py` if Claude-SDK fully replaces it
+- delete `devclaw/engine/sandcastle.py` if Claude-SDK fully replaces it
   (note: it currently provides `_build_claude_mounts`, `_strip_api_keys`,
   `_teardown`, `_translate_workspace_path` — the Claude-SDK engine reuses
   them today; move them somewhere shared first)
