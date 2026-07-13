@@ -9,6 +9,8 @@ Cognition-quality grading of the brief itself lives in tests/chain/.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from devclaw.goal.models import GoalStatus
@@ -126,6 +128,35 @@ async def test_existing_repo_goal_takes_repo_research_path(tmp_path):
     # World-research was not touched.
     assert world.calls == 0
     # No discovery brief yet — that lands when the analysis settles.
+    assert not (tmp_path / "g" / "discovery.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_world_research_skips_when_workspace_checkout_exists(tmp_path):
+    """``repo_url=None`` but a REAL git checkout already sits in
+    ``workspace_dir`` (the documented "None → must pre-exist" config) → this is
+    an existing-repo goal: the tick dispatches ``review_repository`` and
+    world-research must NOT fire — its prompt asserts the project does not
+    exist yet, so firing it here means the real code is never analyzed
+    (triage F4 GAP B, 2026-07-13)."""
+    store = _store(tmp_path)
+    repo = tmp_path / "pre-existing"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True)
+    seed_goal(tmp_path, "g", repo_url=None, workspace_dir=str(repo))
+    store.save_status("g", GoalStatus(lifecycle="investigating"))
+
+    world = FakeClaude(response="SHOULD NOT FIRE", role="world_research")
+    planner, evaluator, engine, notifier = FakeClaude(), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier, world_research=world)
+
+    # Repo-research path: the read-only analysis was dispatched.
+    assert out is Outcome.DISPATCHED
+    assert len(engine.dispatched) == 1
+    assert engine.dispatched[0][0].tool == "review_repository"
+    # World-research never fired.
+    assert world.calls == 0
     assert not (tmp_path / "g" / "discovery.md").exists()
 
 

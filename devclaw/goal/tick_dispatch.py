@@ -398,9 +398,21 @@ async def _resolve_discovery(
     optionally run the decomposer to emit a structured per-tool checklist
     (Pillar 1), then transition to executing. Synthesis and decomposition are
     each non-fatal — a failure in either falls back to backlog-driven mode."""
+    # Ground the synthesis in the ACTUAL goal workspace: on a failed/empty
+    # review, `repo_analysis` degrades to a placeholder ("review failed (no
+    # analysis captured)") and host-side claude — which inherits devclaw's own
+    # cwd — would otherwise fill the gap with the WRONG repo (triage F4
+    # 2026-07-13, sibling of the #227 wrong-codebase review). The workspace was
+    # already prepped at dispatch, so the checkout exists on the happy AND
+    # failed-review paths. Best-effort and collected OUTSIDE the try below: it
+    # never raises, so a git hiccup gathering context can't trip the non-fatal
+    # synthesis fallback.
+    repo_context = await _research._workspace_snapshot(goal.workspace_dir)
     brief = ""
     try:
-        brief = await _research.discovery_brief(goal, repo_analysis, caller=research_caller)
+        brief = await _research.discovery_brief(
+            goal, repo_analysis, caller=research_caller, repo_context=repo_context,
+        )
         store.write_discovery(goal_id, brief)
         store.append_log(goal_id, "discovery brief written")
         synth_ok = True
