@@ -92,7 +92,8 @@ async def _block_on_prep_failure(
     store.append_log(goal_id, f"workspace prep failed — blocking for the owner: {msg}")
     store.transition(
         goal_id, Event.BLOCK,
-        replace(status, lifecycle="executing", phase="blocked", blocked_on=msg, in_flight=None, next=""),
+        replace(status, lifecycle="executing", phase="blocked", blocked_on=msg,
+                blocked_kind="mechanical:prep", in_flight=None, next=""),
         expect=status,
     )
     await _notify(
@@ -130,7 +131,8 @@ async def _block_on_corrupt_doc(
     store.append_log(goal_id, f"goal contract file corrupt — blocking for the owner: {msg}")
     store.transition(
         goal_id, Event.BLOCK,
-        replace(status, lifecycle="executing", phase="blocked", blocked_on=msg, next=""),
+        replace(status, lifecycle="executing", phase="blocked", blocked_on=msg,
+                blocked_kind="mechanical:corrupt_doc", next=""),
         expect=status,
     )
     await _notify(
@@ -172,7 +174,7 @@ async def _block_on_lost_ref(
         goal_id, Event.BLOCK,
         replace(
             status, lifecycle="executing", in_flight=None,
-            phase="blocked", blocked_on=msg, next="",
+            phase="blocked", blocked_on=msg, blocked_kind="mechanical:lost_ref", next="",
         ),
         expect=status,
     )

@@ -36,6 +36,20 @@ from .base import _FRONTMATTER
 class GoalStatusMixin:
     # ---- status (state) ----------------------------------------------------
 
+    @staticmethod
+    def _normalized_blocked_kind(status: GoalStatus) -> str:
+        """``blocked_kind`` is only meaningful while ``phase == "blocked"`` —
+        any write landing on a non-blocked phase clears it to ``""``. Enforced
+        HERE, in the single-writer status layer (applied by every full-row
+        write: save_status / transition / force_block), rather than at each
+        unblock site: block-lifting paths build their new status via
+        ``replace(...)`` of the blocked snapshot (steer_goal's UNBLOCK, the
+        planner-family exits from BLOCKED), so a stale kind would silently
+        ride along on every one of them. One choke point makes the invariant
+        structural. ``update_status_fields`` never touches phase or
+        blocked_kind, so the column-only path needs no counterpart."""
+        return status.blocked_kind if status.phase == "blocked" else ""
+
     def load_status(self, goal_id: str) -> GoalStatus:
         # Source of truth is the goal_status table (Tranche 1/PR3). Migrate any
         # legacy STATUS.md into it lazily + idempotently, then read the row back.
@@ -105,6 +119,7 @@ class GoalStatusMixin:
             lifecycle=fm.get("lifecycle") or None,
             in_flight=inflight,
             blocked_on=fm.get("blocked_on") or None,
+            blocked_kind=fm.get("blocked_kind", "") or "",
             next=fm.get("next", "") or "",
             last_plan_at=fm.get("last_plan_at") or None,
             last_tick_at=fm.get("last_tick_at") or None,
@@ -146,6 +161,7 @@ class GoalStatusMixin:
             # .transition() call has a trustworthy `cur_state` to CAS from.
             status = replace(
                 status, phase_history=history, state=derive_state(status).value,
+                blocked_kind=self._normalized_blocked_kind(status),
             )
             self._goal_state.write_status(goal_id, status)
         # STATUS.md view — the exact frontmatter _read_frontmatter parses + the
@@ -241,6 +257,7 @@ class GoalStatusMixin:
             history = self._goal_state.read_phase_history(goal_id)
             written = replace(
                 new, phase_history=history, state=target.value, version=fresh.version + 1,
+                blocked_kind=self._normalized_blocked_kind(new),
             )
             self._goal_state.write_status(goal_id, written)
         self._flush_or_defer_status_view(goal_id, written)
@@ -290,7 +307,9 @@ class GoalStatusMixin:
         proposed an illegal transition (always a bug, not an expected race —
         see :class:`~devclaw.goal.transitions.IllegalTransition`), the goal
         can always land on BLOCKED and the owner gets a legible ping instead
-        of the tick loop crash-retrying forever.
+        of the tick loop crash-retrying forever. Stamps ``blocked_kind="bug"``
+        — the one block class that is neither mechanically re-checkable nor
+        an owner question (see :class:`~devclaw.goal.models.GoalStatus`).
 
         Preserves ``in_flight`` AS-IS (same reasoning as
         ``_block_on_corrupt_doc``: blocking stops new cognition, it must not
@@ -305,7 +324,8 @@ class GoalStatusMixin:
             if cur_state in (State.DONE, State.CANCELLED):
                 return False
             new = replace(
-                fresh, phase="blocked", lifecycle="executing", blocked_on=blocked_on, next="",
+                fresh, phase="blocked", lifecycle="executing", blocked_on=blocked_on,
+                blocked_kind="bug", next="",
             )
             prev_phase = self._goal_state.current_phase(goal_id)
             if new.phase != prev_phase:
@@ -341,6 +361,7 @@ class GoalStatusMixin:
                 else None
             ),
             "blocked_on": status.blocked_on,
+            "blocked_kind": status.blocked_kind,
             "next": status.next,
             "last_plan_at": status.last_plan_at,
             "last_tick_at": status.last_tick_at,
@@ -371,7 +392,8 @@ class GoalStatusMixin:
             verb = "verifying done via" if s.phase == "verifying" else "running"
             head = f"{verb} `{s.in_flight.tool}` ({s.in_flight.id})"
         elif s.phase == "blocked":
-            head = f"blocked — {s.blocked_on}"
+            kind = f" [{s.blocked_kind}]" if s.blocked_kind else ""
+            head = f"blocked{kind} — {s.blocked_on}"
         else:
             head = s.phase
         lines = [f"# {goal_id} — status", "", f"**phase:** {head}"]

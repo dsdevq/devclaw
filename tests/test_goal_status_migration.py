@@ -337,3 +337,69 @@ def test_two_stores_on_a_shared_statestore_see_live_status(tmp_path):
     got = reader.load_status("g")
     assert got.phase == "blocked" and got.next == "second"   # latest, not pinned
     shared_a.close(); shared_b.close()
+
+
+# ---- blocked_kind column — lazy schema migration (F8 prerequisite) ----------
+
+
+def test_blocked_kind_lazy_migration_pre_column_row_reads_empty(tmp_path):
+    """A ``goal_status`` row written before the ``blocked_kind`` column
+    existed must keep working on the next open: ``GoalState._bootstrap``'s
+    forward-compat ALTER adds the column (same lazy pattern as the PR2→PR3
+    phase/lifecycle ALTERs), the pre-existing row reads ``blocked_kind == ""``
+    (NULL → unclassified), and subsequent full write-path saves round-trip a
+    real kind."""
+    from devclaw.goal.state import GoalState
+    from devclaw.state_store import StateStore
+
+    db_path = str(tmp_path / "devclaw.db")
+    store = StateStore(db_path)
+    with store._lock:
+        # Recreate goal_status with the PRE-blocked_kind schema and seed a
+        # blocked row, simulating a DB bootstrapped before this column landed.
+        store._db.execute("DROP TABLE IF EXISTS goal_status")
+        store._db.execute(
+            """
+            CREATE TABLE goal_status (
+              goal_id               TEXT PRIMARY KEY,
+              version               INTEGER NOT NULL DEFAULT 0,
+              state                 TEXT,
+              phase                 TEXT,
+              lifecycle             TEXT,
+              blocked_on            TEXT,
+              next                  TEXT,
+              last_plan_at          TEXT,
+              last_tick_at          TEXT,
+              actions_dispatched    INTEGER,
+              deliveries_since_eval INTEGER,
+              last_eval_verdict     TEXT,
+              last_eval_at          TEXT,
+              last_eval_note        TEXT,
+              last_progress_at      TEXT,
+              no_progress_notified  INTEGER,
+              in_flight_ref_id      TEXT,
+              in_flight_kind        TEXT,
+              in_flight_json        TEXT,
+              inbox_ingest_cursor   INTEGER NOT NULL DEFAULT 0,
+              updated_at            INTEGER
+            )
+            """
+        )
+        store._db.execute(
+            "INSERT INTO goal_status (goal_id, version, state, phase, lifecycle, blocked_on) "
+            "VALUES ('g', 3, 'BLOCKED', 'blocked', 'executing', 'which DB?')"
+        )
+        store._commit()
+
+    gs = GoalState(store)  # _bootstrap runs the blocked_kind ALTER
+
+    back = gs.read_status("g")
+    assert back.blocked_kind == ""                     # NULL column → unclassified
+    assert back.phase == "blocked" and back.blocked_on == "which DB?"
+    assert back.version == 3                           # the row itself is untouched
+
+    # The migrated row keeps working through the full store write path.
+    gstore = GoalStore(tmp_path / "goals", now=Clock(), state=store)
+    gstore.save_status("g", GoalStatus(phase="blocked", blocked_on="boom", blocked_kind="bug"))
+    assert gstore.load_status("g").blocked_kind == "bug"
+    store.close()
