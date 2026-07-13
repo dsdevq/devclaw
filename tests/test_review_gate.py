@@ -9,6 +9,8 @@ Two halves:
 Driven with stub runners + a stub reviewer (no docker, no claude).
 """
 
+import subprocess
+
 import pytest
 
 from devclaw import task_queue
@@ -42,6 +44,38 @@ def test_build_prompt_reviews_along_two_axes_with_smell_baseline():
     assert "speculative generality" in p and "shotgun surgery" in p
     assert "judgement call" in p
     assert "documented conventions" in p and "override" in p
+
+
+def test_build_prompt_includes_repo_context_when_supplied():
+    """When repo context is supplied it lands in the prompt under a REPOSITORY
+    CONTEXT heading, so the reviewer judges the actual repo — the fix for a lone
+    ci.yml diff getting reviewed as the wrong (control-plane) codebase."""
+    p = build_review_prompt(
+        goal="Add CI",
+        kind="implement_feature",
+        diff="diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml",
+        repo_context=(
+            "git_remote_origin: https://github.com/dsdevq/closeloop-bench.git\n"
+            "scripts/verify.sh: file\n"
+            "pyproject.toml: missing"
+        ),
+    )
+    # match the injected section HEADING, not the phrase in the prompt's own
+    # grounding instruction (which always mentions "REPOSITORY CONTEXT").
+    assert "REPOSITORY CONTEXT (facts" in p
+    assert "closeloop-bench.git" in p
+    assert "scripts/verify.sh: file" in p and "pyproject.toml: missing" in p
+
+
+def test_build_prompt_omits_repo_context_section_when_absent():
+    """No context (or blank) → no injected REPOSITORY CONTEXT section, so the
+    default/older call sites are byte-unaffected."""
+    p = build_review_prompt(goal="Add X", kind="implement_feature", diff="d")
+    assert "REPOSITORY CONTEXT (facts" not in p
+    blank = build_review_prompt(
+        goal="Add X", kind="implement_feature", diff="d", repo_context="   "
+    )
+    assert "REPOSITORY CONTEXT (facts" not in blank
 
 
 def test_clip_diff_truncates_oversized(monkeypatch):
@@ -202,6 +236,26 @@ async def test_review_diff_parses_model_json():
     assert v["verdict"] == "approve"
 
 
+async def test_review_diff_passes_repo_context_into_the_prompt():
+    """review_diff must forward repo_context all the way into the caller's prompt
+    — the plumbing that carries workspace facts to the model."""
+    seen = {}
+
+    async def caller(prompt):
+        seen["prompt"] = prompt
+        return '{"verdict":"approve","summary":"ok","issues":[]}'
+
+    await review_gate.review_diff(
+        goal="g",
+        kind="implement_feature",
+        diff="diff --git a/x b/x\n+y",
+        repo_context="git_remote_origin: https://github.com/dsdevq/closeloop-bench.git",
+        claude_caller=caller,
+    )
+    assert "REPOSITORY CONTEXT (facts" in seen["prompt"]
+    assert "closeloop-bench.git" in seen["prompt"]
+
+
 async def test_review_diff_raises_on_unparseable():
     async def caller(_prompt):
         return "I think this looks pretty good honestly"
@@ -260,7 +314,7 @@ def _reviewer(verdicts: list):
     (→ request_changes with one blocking issue carrying that text)."""
     seq = list(verdicts)
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         v = seq.pop(0)
         if v == "approve":
             return {"verdict": "approve", "summary": "ok", "issues": [], "blocking": []}
@@ -336,7 +390,7 @@ async def test_review_crash_fails_fast_closed(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 3)  # generous budget, must NOT be used
     calls: list = []
 
-    async def boom(*, goal, kind, diff):
+    async def boom(*, goal, kind, diff, repo_context=None):
         raise RuntimeError("reviewer exploded")
 
     q = TaskQueue(store, runner=_ok_gate_runner(calls), reviewer=boom)
@@ -357,7 +411,7 @@ async def test_review_quota_crash_pauses_instead_of_failing(store, monkeypatch):
     fail-open shipped the change unreviewed precisely when quota ran out."""
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
 
-    async def quota_boom(*, goal, kind, diff):
+    async def quota_boom(*, goal, kind, diff, repo_context=None):
         raise RuntimeError("Internal error: You're out of extra usage · resets 10pm (UTC)")
 
     q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=quota_boom)
@@ -373,7 +427,7 @@ async def test_review_skipped_when_disabled(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "request_changes", "summary": "x", "issues": [], "blocking": [
             {"severity": "major", "location": "a", "problem": "b", "fix": "c"}]}
@@ -396,7 +450,7 @@ async def test_project_review_gate_override_off_skips_even_when_global_on(store,
 
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "request_changes", "summary": "x", "issues": [], "blocking": [
             {"severity": "major", "location": "a", "problem": "b", "fix": "c"}]}
@@ -457,7 +511,7 @@ async def test_review_skipped_for_non_code_kind(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "approve", "summary": "", "issues": [], "blocking": []}
 
@@ -466,6 +520,55 @@ async def test_review_skipped_for_non_code_kind(store, monkeypatch):
     tid = q.submit(kind="review_repository", workspace_dir="/ws", goal="g", verify_cmd="pytest")
     await q.drain()
     assert called["n"] == 0
+
+
+async def test_review_gate_grounded_in_actual_workspace_repo(store, tmp_path, monkeypatch):
+    """END TO END: the reviewer receives REPOSITORY CONTEXT collected from the
+    task's REAL workspace — remote, branch, key-file presence, tracked layout —
+    so it judges the actual repo and can never substitute the control-plane repo
+    host-side claude was launched from. Regression for the wrong-codebase review
+    (live-found 2026-07-13: a lone ci.yml diff on .NET/Angular closeloop-bench was
+    reviewed as devclaw's own Python/React repo because the prompt was ungrounded)."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+
+    def _git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    repo = tmp_path / "closeloop"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    _git("remote", "add", "origin",
+         "https://github.com/dsdevq/closeloop-bench-2026-07-11.git")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "verify.sh").write_text("#!/usr/bin/env bash\n")
+    (repo / "global.json").write_text('{"sdk":{"version":"9.0.315"}}\n')
+    (repo / "backend").mkdir()
+    (repo / "backend" / "Program.cs").write_text("// entry\n")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "init")
+
+    seen: dict = {}
+
+    async def reviewer(*, goal, kind, diff, repo_context=None):
+        seen["ctx"] = repo_context or ""
+        return {"verdict": "approve", "summary": "ok", "issues": [], "blocking": []}
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=reviewer)
+    tid = q.submit(
+        kind="implement_feature", workspace_dir=str(repo), goal="add CI",
+        verify_cmd="pytest",
+    )
+    await q.drain()
+
+    assert store.get_task(tid).status == "done"
+    ctx = seen["ctx"]
+    assert "closeloop-bench-2026-07-11.git" in ctx    # the ACTUAL repo, not devclaw
+    assert "scripts/verify.sh: file" in ctx           # nested key file resolved
+    assert "global.json: file" in ctx                 # .NET marker present
+    assert "pyproject.toml: missing" in ctx           # and it is NOT a python repo
+    assert "tracked_top_level:" in ctx and "backend" in ctx
 
 
 # ==================== scaffold tasks (L3, #222) ======================
@@ -493,7 +596,7 @@ async def test_scaffold_task_skips_adversarial_review(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1  # if ever called it would block — proves the skip
         return {"verdict": "request_changes", "summary": "x", "issues": [], "blocking": [
             {"severity": "major", "location": "a", "problem": "b", "fix": "c"}]}
@@ -517,7 +620,7 @@ async def test_scaffold_task_still_fails_failing_verify_gate(store, monkeypatch)
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "approve", "summary": "", "issues": [], "blocking": []}
 
@@ -541,7 +644,7 @@ async def test_scaffold_task_still_runs_test_integrity(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
     called = {"n": 0}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         called["n"] += 1
         return {"verdict": "approve", "summary": "", "issues": [], "blocking": []}
 

@@ -54,6 +54,15 @@ problems to look thorough: if the change is genuinely solid, APPROVE it. Only
 not by themselves require changes. Judge ONLY the change in the diff against the
 ticket — do not demand scope beyond the ticket.
 
+Ground every repo fact in what you are given. When a REPOSITORY CONTEXT block is
+present, it is the source of truth for repo identity, branch, and whether a
+file/directory exists. Do NOT infer repository facts from your own working
+directory, the host/Claude process context, or any other repository you have
+seen before. If a fact is not in the diff or REPOSITORY CONTEXT, treat it as
+unknown rather than substituting another codebase — describing the wrong repo
+(e.g. its language, framework, or build tooling) is itself a blocker-severity
+error in your review.
+
 Respond with STRICT JSON ONLY — no prose, no fences:
 {{
   "verdict": "approve" | "request_changes",

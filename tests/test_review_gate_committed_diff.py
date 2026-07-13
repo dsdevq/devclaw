@@ -90,7 +90,7 @@ async def test_review_gate_sees_agent_committed_work(store, monkeypatch, tmp_pat
 
     seen: dict = {}
 
-    async def reviewer(*, goal, kind, diff):
+    async def reviewer(*, goal, kind, diff, repo_context=None):
         seen["diff"] = diff
         return {"verdict": "approve", "summary": "ok", "issues": [], "blocking": []}
 

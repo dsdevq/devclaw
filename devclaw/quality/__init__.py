@@ -164,16 +164,23 @@ def filter_reviewable_diff(diff: str) -> str:
     return "".join(kept)
 
 
-def build_review_prompt(*, goal: str, kind: str, diff: str) -> str:
+def build_review_prompt(
+    *, goal: str, kind: str, diff: str, repo_context: Optional[str] = None
+) -> str:
     from ..prompts import load_prompt
 
-    return "\n\n".join(
-        [
-            load_prompt("review-gate"),
-            f"TICKET ({kind}):\n{goal}",
-            f"DIFF UNDER REVIEW:\n{_clip_diff(filter_reviewable_diff(diff))}",
-        ]
-    )
+    parts = [
+        load_prompt("review-gate"),
+        f"TICKET ({kind}):\n{goal}",
+    ]
+    if repo_context and repo_context.strip():
+        parts.append(
+            "REPOSITORY CONTEXT (facts from the task workspace — the source of "
+            "truth for repo identity, branch, and which files/dirs exist):\n"
+            + repo_context.strip()
+        )
+    parts.append(f"DIFF UNDER REVIEW:\n{_clip_diff(filter_reviewable_diff(diff))}")
+    return "\n\n".join(parts)
 
 
 def validate_review(parsed: object) -> dict:
@@ -241,6 +248,7 @@ async def review_diff(
     goal: str,
     kind: str,
     diff: str,
+    repo_context: Optional[str] = None,
     claude_caller: Callable[[str], Awaitable[str]] = review_caller,
 ) -> dict:
     """Review one diff into a validated verdict dict. ``claude_caller`` is injected
@@ -257,7 +265,9 @@ async def review_diff(
             "issues": [],
             "blocking": [],
         }
-    prompt = build_review_prompt(goal=goal, kind=kind, diff=diff)
+    prompt = build_review_prompt(
+        goal=goal, kind=kind, diff=diff, repo_context=repo_context
+    )
     raw = await claude_caller(prompt)
     try:
         parsed = json.loads(extract_json(raw))
