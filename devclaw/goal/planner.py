@@ -15,6 +15,7 @@ so ``--print`` is also the safer quota choice for a recurring loop.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from typing import Awaitable, Callable
 
 from .checklist import ready_items as _ready_items
 from .models import Action, Checklist, Goal, GoalStatus, PlanResult
+from ..task_git import _review_repo_context_sync
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -37,6 +39,40 @@ class GoalPlannerError(Exception):
     def __init__(self, message: str, raw: str | None = None) -> None:
         super().__init__(message)
         self.raw = raw
+
+
+async def _collect_repo_context(workspace_dir: str) -> str:
+    """Live workspace snapshot for the plan prompt — the same grounded facts the
+    review gate gets (remote, branch, head, key-file probes, tracked top-level
+    layout; see :func:`devclaw.task_git._review_repo_context_sync`), collected
+    fresh at PLAN time. On the fallback paths (investigation dispatch failed,
+    discovery synthesis failed, ``DEVCLAW_GOAL_INVESTIGATE=0``, from-scratch
+    goals) the prompt otherwise carries ZERO workspace-derived facts beyond a
+    path string — and host-side ``claude`` inherits devclaw's own cwd, so an
+    ungrounded planner can substitute the control-plane repo (triage F5, the
+    planner sibling of the #227 review-gate fix). On the healthy path it keeps
+    the discovery brief honest: the brief is a creation-time artifact, this is
+    the workspace NOW.
+
+    Async wrapper — runs the blocking collector in a thread (same child-watcher
+    rationale as ``task_queue._git_diff``) and looks up
+    :func:`_review_repo_context_sync` as a module global so tests can patch it
+    here. Strictly best-effort and it NEVER raises: any hiccup degrades to ""
+    (the prompt simply omits the section) — grounding must never fail a plan
+    step. The tick calls this ONLY past its should_plan gate, so idle/blocked
+    ticks stay zero-cost (no git subprocess)."""
+    try:
+        if not os.path.isdir(workspace_dir):
+            # No directory to probe — the collector answers from that one stat
+            # (no git subprocess), so skip the thread hop. Keeps the path to
+            # cognition free of executor scheduling for absent workspaces,
+            # which the tick-lock tests rely on when they park a planner
+            # behind bare event-loop pumps (and every non-prepped test goal
+            # is this case).
+            return _review_repo_context_sync(workspace_dir)
+        return await asyncio.to_thread(_review_repo_context_sync, workspace_dir)
+    except Exception:  # noqa: BLE001 — best-effort, never fail the plan step
+        return ""
 
 
 def _render_checklist_section(checklist: Checklist) -> str:
@@ -88,6 +124,7 @@ def build_prompt(
     discovery: str = "",
     checklist: Checklist | None = None,
     trends: str = "",
+    repo_context: str = "",
 ) -> str:
     from ..prompts import load_prompt
 
@@ -112,6 +149,16 @@ def build_prompt(
         "\n## Recent history (log)",
         recent_log or "(no events yet)",
     ]
+    # Live workspace snapshot (triage F5): rendered BEFORE the discovery brief
+    # — the brief is a creation-time artifact, this is the workspace now. ""
+    # (collector hiccup) skips the section rather than telegraphing an empty
+    # discipline, same convention as trends below.
+    if repo_context:
+        parts += [
+            "\n## Repository context (facts from the actual workspace — "
+            "trust this over any assumption)",
+            repo_context,
+        ]
     if discovery:
         parts += [
             "\n## Discovery brief (from investigating the repo — current state · "
@@ -197,11 +244,17 @@ def validate(parsed: object) -> PlanResult:
                 addresses.append(s)
     raw_title = a.get("title")
     parsed_title = str(raw_title).strip() if raw_title else None
+    # A planner-supplied "verify_cmd" is deliberately IGNORED — never honored,
+    # never an error (triage F5). The prompt schema has never offered the
+    # field, so any value here is an ungrounded guess, and accepting it let
+    # that guess mechanically OVERRIDE the firmed command at dispatch
+    # (engine.py: ``action.verify_cmd or goal.verify_cmd``). The firmed
+    # verify_cmd IS the grounded contract; Action.verify_cmd stays None on
+    # every planner path so the engine always falls through to it.
     action = Action(
         engine="devclaw",
         tool=tool,
         goal=g,
-        verify_cmd=(str(a["verify_cmd"]).strip() if a.get("verify_cmd") else None),
         open_pr=bool(a.get("open_pr", True)),
         addresses=addresses,
         title=parsed_title or None,
@@ -220,15 +273,19 @@ async def plan(
     discovery: str = "",
     checklist: Checklist | None = None,
     trends: str = "",
+    repo_context: str = "",
 ) -> PlanResult:
     """Run the next-action plan step. ``claude_caller`` is injected so tests stub
     the LLM. ``discovery`` is the investigating-phase brief, when present.
     ``checklist`` is the decomposer's structured plan — when present, the
     prompt enters checklist mode and the planner picks one ready item.
     ``trends`` is the per-project trend retrospective tail (closes the
-    detector → consumer loop; see trend-PR3)."""
+    detector → consumer loop; see trend-PR3). ``repo_context`` is the live
+    workspace snapshot from :func:`_collect_repo_context` — grounded facts
+    from the actual repo at plan time (triage F5); "" omits the section."""
     prompt = build_prompt(
         goal, status, recent_log, steering, finished_detail, discovery, checklist, trends,
+        repo_context,
     )
     raw = await claude_caller(prompt)
     try:

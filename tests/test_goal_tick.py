@@ -2566,3 +2566,120 @@ async def test_prep_heal_checks_workspace_git_when_no_repo_url(tmp_path, monkeyp
     assert out is Outcome.DISPATCHED
     s = store.load_status("g")
     assert s.blocked_kind == "" and s.heal_attempts == 2 and s.next_heal_at is None
+
+# ---- live workspace snapshot grounds the plan prompt (triage F5) -------------
+# The planner sibling of the #227 review-gate fix: on the documented fallback
+# paths (investigation dispatch failed, discovery synthesis failed,
+# DEVCLAW_GOAL_INVESTIGATE=0, from-scratch) the plan prompt used to carry ZERO
+# workspace-derived facts beyond a path string — and host-side claude inherits
+# devclaw's own cwd, so the instruction it composed could describe the
+# control-plane repo instead of the goal's. Every planning tick now collects a
+# live snapshot of the ACTUAL workspace, and ONLY planning ticks pay for it.
+
+
+def _seed_workspace_repo(tmp_path):
+    """A REAL on-disk git repo with .NET markers (shaped like
+    test_review_gate.py's grounding fixture) — the planner's live snapshot
+    must carry these facts, not devclaw's own."""
+    import subprocess
+
+    repo = tmp_path / "closeloop-ws"
+    repo.mkdir()
+
+    def _git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    _git("remote", "add", "origin",
+         "https://github.com/dsdevq/closeloop-bench-2026-07-11.git")
+    (repo / "global.json").write_text('{"sdk":{"version":"9.0.315"}}\n')
+    (repo / "backend").mkdir()
+    (repo / "backend" / "Program.cs").write_text("// entry\n")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "init")
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_plan_prompt_carries_live_workspace_snapshot_on_fallback_path(tmp_path):
+    """The worst case: investigation dispatch failed and the goal skipped to
+    executing with NO discovery.md and NO checklist — the prompt's only
+    workspace anchor used to be the path string. The planner must now see
+    grounded facts from the actual repo (remote, key-file probes)."""
+    repo = _seed_workspace_repo(tmp_path)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+    store.append_log("g", "investigation dispatch failed (boom) — skipping to executing")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED
+    assert planner.calls == 1
+    prompt = planner.last_prompt
+    assert "Repository context" in prompt
+    assert "closeloop-bench-2026-07-11.git" in prompt   # the ACTUAL remote
+    assert "global.json: file" in prompt                # live .NET probe line
+    assert "pyproject.toml: missing" in prompt          # NOT devclaw's stack
+
+
+@pytest.mark.asyncio
+async def test_plan_prompt_carries_snapshot_on_healthy_path_too(tmp_path):
+    """With a discovery brief present (the healthy path) the snapshot still
+    rides along: the brief is a creation-time artifact — the snapshot is the
+    workspace NOW, rendered before it as the source of truth."""
+    repo = _seed_workspace_repo(tmp_path)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+    store.write_discovery("g", "## Current state\nbare API, no health endpoint")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+    assert out is Outcome.DISPATCHED
+    prompt = planner.last_prompt
+    assert "Discovery brief" in prompt                          # healthy path intact
+    assert "closeloop-bench-2026-07-11.git" in prompt           # snapshot too
+    assert prompt.index("Repository context") < prompt.index("Discovery brief")
+
+
+@pytest.mark.asyncio
+async def test_planner_snapshot_only_collected_when_planning(tmp_path, monkeypatch):
+    """The zero-token guard's subprocess sibling: an idle tick and a
+    blocked-without-work tick must not even COLLECT the snapshot (no git
+    subprocess), while a planning tick collects it exactly once."""
+    from devclaw.goal import planner as goal_planner
+
+    calls = {"n": 0}
+
+    async def counting_collector(workspace_dir: str) -> str:
+        calls["n"] += 1
+        return f"workspace_dir: {workspace_dir}"
+
+    monkeypatch.setattr(goal_planner, "_collect_repo_context", counting_collector)
+
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g", cadence="1d")
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    # Idle tick (cadence not due) → no collection, no cognition.
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out is Outcome.IDLE
+    assert calls["n"] == 0 and planner.calls == 0
+
+    # Blocked goal, no new work → still nothing.
+    store.save_status("g", GoalStatus(phase="blocked", blocked_on="waiting on owner"))
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out is Outcome.IDLE
+    assert calls["n"] == 0 and planner.calls == 0
+
+    # Planning tick (cadence due) → exactly one collection, one plan call.
+    store.save_status("g", GoalStatus(phase="idle"))
+    out = await _tick(store, "g", planner, evaluator, engine, notifier)
+    assert out is Outcome.DISPATCHED
+    assert calls["n"] == 1 and planner.calls == 1

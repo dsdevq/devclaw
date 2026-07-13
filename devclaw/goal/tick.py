@@ -492,12 +492,23 @@ async def _handle_executing(
     trends_text = read_trends_text(goal.workspace_dir, limit_chars=2000)
     if trends_text.startswith("(no trends recorded") or trends_text.startswith("(could not read"):
         trends_text = ""
+    # Live workspace snapshot (triage F5): grounded plan-time facts from the
+    # ACTUAL repo (remote, head, key-file probes, layout), so the planner's
+    # instruction can't inherit repo assumptions from host-side claude's own
+    # environment — on the fallback paths (investigation dispatch failed,
+    # discovery synthesis failed, investigate disabled, from-scratch) the
+    # prompt otherwise has no workspace-derived facts at all. Collected HERE,
+    # past the should_plan gate beside the trends read, so idle/blocked ticks
+    # stay zero-cost: no git subprocess, no LLM. Best-effort — never raises;
+    # "" just omits the prompt section.
+    repo_context = await _planner._collect_repo_context(goal.workspace_dir)
     try:
         result = await _planner.plan(
             goal, status, ctx.store.recent_log(goal_id), steering, finished_detail,
             claude_caller=ctx.planner_caller, discovery=ctx.store.read_discovery(goal_id),
             checklist=ctx.store.read_checklist(goal_id),
             trends=trends_text,
+            repo_context=repo_context,
         )
     except (_planner.GoalPlannerError, PlannerError) as exc:
         # A usage/rate limit at the PLANNER must pause the layer, not be logged
