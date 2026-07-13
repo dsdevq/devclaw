@@ -134,6 +134,18 @@ class GoalStatus:
     lifecycle: Optional[Lifecycle] = None
     in_flight: Optional[InFlight] = None
     blocked_on: Optional[str] = None
+    #: structured classification of the CURRENT block — the machine-readable
+    #: sibling of the human-readable ``blocked_on`` prose (a planned auto-heal
+    #: pass must never string-match ``blocked_on`` to decide what it may retry).
+    #: Taxonomy: ``mechanical:<site>`` (the condition is cheaply re-checkable
+    #: without an LLM — ``mechanical:prep`` / ``mechanical:corrupt_doc`` /
+    #: ``mechanical:lost_ref`` / ``mechanical:dispatch_cap``); ``needs_answer``
+    #: (cognition asked the owner a question); ``bug`` (the force_block
+    #: illegal-transition escape hatch). ``""`` = not blocked, or a block that
+    #: predates this field / wasn't classified. Only meaningful while
+    #: ``phase == "blocked"`` — the store clears it on any write that lands on
+    #: a non-blocked phase (see GoalStatusMixin._normalized_blocked_kind).
+    blocked_kind: str = ""
     #: human note of the intended next step
     next: str = ""
     #: ISO ts of the last time the plan step (LLM) ran

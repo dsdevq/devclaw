@@ -96,6 +96,7 @@ class GoalState:
                   phase                 TEXT,
                   lifecycle             TEXT,
                   blocked_on            TEXT,
+                  blocked_kind          TEXT,
                   next                  TEXT,
                   last_plan_at          TEXT,
                   last_tick_at          TEXT,
@@ -205,12 +206,15 @@ class GoalState:
 
             # Forward-compat ALTERs for DBs bootstrapped by PR2 (which created
             # goal_status WITHOUT phase/lifecycle — those columns were only added
-            # in PR3, when the table went live). Idempotent: a fresh DB already
-            # has them from the CREATE above, so the duplicate-column error is
-            # swallowed. Mirrors StateStore._bootstrap's ALTER pattern.
+            # in PR3, when the table went live) and for pre-blocked_kind DBs
+            # (the column landed with the F8-prerequisite block classification).
+            # Idempotent: a fresh DB already has them from the CREATE above, so
+            # the duplicate-column error is swallowed. Mirrors
+            # StateStore._bootstrap's ALTER pattern.
             for sql in (
                 "ALTER TABLE goal_status ADD COLUMN phase TEXT",
                 "ALTER TABLE goal_status ADD COLUMN lifecycle TEXT",
+                "ALTER TABLE goal_status ADD COLUMN blocked_kind TEXT",
             ):
                 try:
                     self._store._db.execute(sql)
@@ -330,18 +334,20 @@ class GoalState:
             self._store._db.execute(
                 """
                 INSERT INTO goal_status (
-                  goal_id, version, state, phase, lifecycle, blocked_on, "next",
+                  goal_id, version, state, phase, lifecycle, blocked_on, blocked_kind,
+                  "next",
                   last_plan_at, last_tick_at, actions_dispatched, deliveries_since_eval,
                   last_eval_verdict, last_eval_at, last_eval_note, last_progress_at,
                   no_progress_notified, in_flight_ref_id, in_flight_kind,
                   in_flight_json, inbox_ingest_cursor, updated_at
-                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(goal_id) DO UPDATE SET
                   version               = goal_status.version + 1,
                   state                 = excluded.state,
                   phase                 = excluded.phase,
                   lifecycle             = excluded.lifecycle,
                   blocked_on            = excluded.blocked_on,
+                  blocked_kind          = excluded.blocked_kind,
                   "next"                = excluded."next",
                   last_plan_at          = excluded.last_plan_at,
                   last_tick_at          = excluded.last_tick_at,
@@ -364,6 +370,7 @@ class GoalState:
                     status.phase,
                     status.lifecycle,
                     status.blocked_on,
+                    status.blocked_kind,
                     status.next,
                     status.last_plan_at,
                     status.last_tick_at,
@@ -830,6 +837,9 @@ def _row_to_status(row, phase_history: "tuple[dict, ...]") -> GoalStatus:
         lifecycle=row["lifecycle"] or None,
         in_flight=in_flight,
         blocked_on=row["blocked_on"] or None,
+        # NULL on a row that predates the column (pre-blocked_kind DB, lazily
+        # ALTERed by _bootstrap) reads as "" — unclassified, same as the default.
+        blocked_kind=row["blocked_kind"] or "",
         next=row["next"] or "",
         last_plan_at=row["last_plan_at"] or None,
         last_tick_at=row["last_tick_at"] or None,

@@ -369,7 +369,9 @@ async def _run_mid_flight_eval(
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "direction evaluation flagged a problem"
         store.transition(
-            goal_id, Event.BLOCK, replace(base, phase="blocked", blocked_on=q, next=""), expect=status,
+            goal_id, Event.BLOCK,
+            replace(base, phase="blocked", blocked_on=q, blocked_kind="needs_answer", next=""),
+            expect=status,
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] direction check ({ev.verdict}) — {q}", summarize=summarize)
         return Outcome.BLOCKED
@@ -498,7 +500,8 @@ async def _handle_executing(
     if result.decision == "blocked":
         ctx.store.transition(
             goal_id, Event.BLOCK,
-            replace(base, phase="blocked", blocked_on=result.question, next=""),
+            replace(base, phase="blocked", blocked_on=result.question,
+                    blocked_kind="needs_answer", next=""),
             expect=status, consume_steering=consume_ids,
         )
         ctx.store.append_log(goal_id, f"blocked: {result.question}")

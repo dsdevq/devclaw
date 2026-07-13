@@ -323,7 +323,8 @@ async def _resolve_done_gate(
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"
         store.transition(
-            goal_id, Event.BLOCK, replace(base, phase="blocked", blocked_on=q, next=""),
+            goal_id, Event.BLOCK,
+            replace(base, phase="blocked", blocked_on=q, blocked_kind="needs_answer", next=""),
             expect=status, consume_steering=consume_steering,
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] not done — {q}", summarize=summarize)

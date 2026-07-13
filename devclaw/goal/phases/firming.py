@@ -449,7 +449,7 @@ class FirmingHandler:
         store.transition(
             goal_id, Event.FIRMING_NEEDS_ANSWERS,
             replace(fresh, lifecycle="firming", phase="blocked",
-                    blocked_on=blocker_msg, next=""),
+                    blocked_on=blocker_msg, blocked_kind="needs_answer", next=""),
             expect=fresh,
         )
         store.append_log(

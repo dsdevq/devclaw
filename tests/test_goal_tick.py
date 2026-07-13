@@ -2155,3 +2155,80 @@ async def test_missing_checklist_and_firmed_draft_stay_backlog_mode(tmp_path):
     assert out is Outcome.DISPATCHED  # backlog mode unchanged
     assert planner.calls == 1
     assert store.load_status("g").phase == "in_flight"
+
+
+# ---- blocked_kind: structured block classification (F8 prerequisite) --------
+# A planned auto-heal pass must distinguish MECHANICAL blocks (condition
+# cheaply re-checkable without an LLM) from NEEDS-ANSWER blocks (cognition
+# asked the owner) and BUG blocks (the force_block escape hatch) — by a
+# structured field, never by string-matching the blocked_on prose.
+
+
+@pytest.mark.asyncio
+async def test_blocked_kind_stamped_per_block_site(tmp_path):
+    """Each block class stamps its machine-readable kind next to the prose:
+    a torn checklist.yaml → mechanical:corrupt_doc, the dispatch-cap backstop
+    → mechanical:dispatch_cap, a planner decision=blocked → needs_answer, and
+    force_block (the illegal-transition escape hatch) → bug."""
+    store = _store(tmp_path, Clock())
+    planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+    # mechanical:corrupt_doc — a contract file that exists but won't parse
+    seed_goal(tmp_path, "gc")
+    (tmp_path / "gc" / "checklist.yaml").write_text("not yaml: [garbage\n")
+    assert await _tick(store, "gc", planner, evaluator, engine, notifier) is Outcome.BLOCKED
+    s = store.load_status("gc")
+    assert s.phase == "blocked" and s.blocked_kind == "mechanical:corrupt_doc"
+    # the STATUS.md view surfaces the kind next to blocked_on (frontmatter + body)
+    text = (tmp_path / "gc" / "STATUS.md").read_text()
+    assert GoalStore._read_frontmatter(text)["blocked_kind"] == "mechanical:corrupt_doc"
+    assert "blocked [mechanical:corrupt_doc] —" in text
+
+    # mechanical:dispatch_cap — the runaway backstop (backlog 2 → cap 4)
+    seed_goal(tmp_path, "gd")
+    store.save_status("gd", GoalStatus(phase="idle", actions_dispatched=4))
+    assert await _tick(store, "gd", planner, evaluator, engine, notifier) is Outcome.BLOCKED
+    assert store.load_status("gd").blocked_kind == "mechanical:dispatch_cap"
+
+    # needs_answer — the planner asked the owner a question
+    seed_goal(tmp_path, "gq")
+    ask = FakeClaude(json.dumps({"decision": "blocked", "question": "which auth provider?"}))
+    assert await _tick(store, "gq", ask, evaluator, engine, notifier) is Outcome.BLOCKED
+    sq = store.load_status("gq")
+    assert sq.blocked_on == "which auth provider?" and sq.blocked_kind == "needs_answer"
+
+    # bug — the force_block illegal-transition escape hatch
+    seed_goal(tmp_path, "gb")
+    assert store.force_block("gb", "illegal state transition: EXEC_IDLE --ACHIEVE-> …") is True
+    sb = store.load_status("gb")
+    assert sb.phase == "blocked" and sb.blocked_kind == "bug"
+
+
+def test_blocked_kind_cleared_on_unblock(tmp_path):
+    """steer_goal lifts the block → blocked_kind returns to "" (enforced at
+    the store's write choke point: any write landing on a non-blocked phase
+    clears the kind, so no unblock path can leak a stale classification)."""
+    from devclaw.goal.service import GoalConfig, GoalService
+    from devclaw.state_store import StateStore
+    from devclaw.task_queue import TaskQueue
+
+    goals_dir = tmp_path / "goals"
+    seed_goal(goals_dir, "g")
+
+    db = StateStore(str(tmp_path / "state.db"))
+    try:
+        cfg = GoalConfig(goals_dir=goals_dir, notify_url="", tick_seconds=900, eval_every=99, verify_done=False)
+        svc = GoalService(TaskQueue(db), db, config=cfg)
+        svc._goal_store.save_status(
+            "g", GoalStatus(phase="blocked", blocked_on="cap hit",
+                            blocked_kind="mechanical:dispatch_cap", actions_dispatched=5),
+        )
+        assert svc._goal_store.load_status("g").blocked_kind == "mechanical:dispatch_cap"
+
+        svc.steer_goal("g", "resume with new approach")
+
+        saved = svc._goal_store.load_status("g")
+        assert saved.phase == "idle"
+        assert saved.blocked_kind == ""
+    finally:
+        db.close()

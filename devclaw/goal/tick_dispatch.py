@@ -107,7 +107,8 @@ async def _dispatch_action(
         store.append_log(goal_id, f"dispatch cap {cap} reached — blocking for review")
         store.transition(
             goal_id, Event.BLOCK,
-            replace(base, phase="blocked", blocked_on=f"dispatch cap {cap} reached — review the open PRs"),
+            replace(base, phase="blocked", blocked_on=f"dispatch cap {cap} reached — review the open PRs",
+                    blocked_kind="mechanical:dispatch_cap"),
             expect=base, consume_steering=consume_steering,
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] dispatch cap ({cap}) reached — paused for your review", summarize=summarize)
