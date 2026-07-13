@@ -468,3 +468,146 @@ async def test_round_1_failure_fallback_survives_telemetry_bump(store_with_goal)
     after = store.load_status("g")
     assert after.lifecycle == "executing"
     assert after.phase == "idle"
+
+
+# ---- workspace grounding (triage F1, 2026-07-13) ----------------------------
+# Firming writes the durable contract (done_when, stub_acceptable, and a
+# verify_cmd that WINS via load_effective_goal), yet its prompt carried zero
+# structured workspace facts — on the degrade paths (empty review detail,
+# discovery-synthesis failure) it held literally none, and host-side claude
+# inherits devclaw's own cwd. These pin the REPOSITORY CONTEXT snapshot
+# (#227's collector) into the firming prompt on every round.
+
+
+def _dotnet_angular_workspace(tmp_path):
+    """A small REAL on-disk git repo with .NET/Angular markers — the
+    closeloop-bench shape whose contract got poisoned by a fabricated
+    `verify_cmd: pytest -q` (same fixture pattern as test_review_gate's
+    end-to-end grounding test)."""
+    import subprocess
+
+    repo = tmp_path / "cashflow-ws"
+    repo.mkdir()
+
+    def _git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    _git("remote", "add", "origin", "https://github.com/dsdevq/cashflow-bench.git")
+    (repo / "global.json").write_text('{"sdk":{"version":"9.0.315"}}\n')
+    (repo / "frontend").mkdir()
+    (repo / "frontend" / "angular.json").write_text("{}\n")
+    (repo / "backend").mkdir()
+    (repo / "backend" / "Program.cs").write_text("// entry\n")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "init")
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_firming_prompt_carries_workspace_snapshot_on_degrade_path(tmp_path):
+    """NO discovery brief at all (tick_settle's empty-review-detail /
+    tick_dispatch's synthesis-failure degrade paths still advance the goal to
+    firming) — the prompt must still carry grounded workspace facts, or the
+    contract gets written from the host process's own repo."""
+    repo = _dotnet_angular_workspace(tmp_path)
+    store = GoalStore(tmp_path, now=Clock())
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    store.save_status("g", GoalStatus(lifecycle="firming"))
+    firming = FakeClaude(response=DRAFT_WITH_UNKNOWNS, role="goal_firming")
+    handler = FirmingHandler(caller=firming)
+
+    await handler.run(
+        "g", store.load_goal("g"), store.load_status("g"),
+        _ctx(store, RecordingNotifier()),
+    )
+
+    prompt = firming.last_prompt
+    assert "(no discovery brief yet)" in prompt          # truly the degrade path
+    assert "REPOSITORY CONTEXT (facts" in prompt          # the injected section
+    assert "cashflow-bench.git" in prompt                 # the ACTUAL repo, not devclaw
+    assert "global.json: file" in prompt                  # .NET marker probe line
+    assert "pyproject.toml: missing" in prompt            # and it is NOT a python repo
+
+
+@pytest.mark.asyncio
+async def test_firming_prompt_carries_snapshot_on_happy_path_too(tmp_path):
+    """With a discovery brief present, the snapshot still rides along (round 1
+    AND the answer round — the round that typically writes the final
+    contract), grounding verify_cmd/verifiable_by in mechanical facts the
+    prose brief may not spell out."""
+    repo = _dotnet_angular_workspace(tmp_path)
+    store = GoalStore(tmp_path, now=Clock())
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    store.save_status("g", GoalStatus(lifecycle="firming"))
+    store.write_discovery("g", "## Current state\nthe baseline brief")
+    firming = FakeClaude(response=DRAFT_WITH_UNKNOWNS, role="goal_firming")
+    handler = FirmingHandler(caller=firming)
+
+    await handler.run(
+        "g", store.load_goal("g"), store.load_status("g"),
+        _ctx(store, RecordingNotifier()),
+    )
+
+    assert "the baseline brief" in firming.last_prompt    # brief still flows through
+    assert "REPOSITORY CONTEXT (facts" in firming.last_prompt
+    assert "cashflow-bench.git" in firming.last_prompt
+
+    # round N (answer_unknowns) collects too
+    firming2 = FakeClaude(response=DRAFT_FIRMED, role="goal_firming")
+    decomposer = FakeClaude(response=DECOMPOSER_CHECKLIST_YAML, role="goal_decomposer")
+    handler2 = FirmingHandler(caller=firming2, decomposer_caller=decomposer)
+    await handler2.handle_answer(
+        "g", {"cf-u1": "calendar_month"}, ctx=_ctx(store, RecordingNotifier()),
+    )
+    assert "REPOSITORY CONTEXT (facts" in firming2.last_prompt
+    assert "cashflow-bench.git" in firming2.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_firming_snapshot_is_best_effort_never_fatal(store_with_goal, monkeypatch):
+    """A raising collector must never cost a firming round — the snapshot is
+    an enhancement; failure degrades to an omitted section, matching #227's
+    never-raises contract at the review gate."""
+    from devclaw.goal.phases import firming as firming_mod
+
+    def boom(workspace_dir):
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr(firming_mod, "_review_repo_context_sync", boom)
+    store = store_with_goal
+    firming = FakeClaude(response=DRAFT_WITH_UNKNOWNS, role="goal_firming")
+    handler = FirmingHandler(caller=firming)
+
+    result = await handler.run(
+        "g", store.load_goal("g"), store.load_status("g"),
+        _ctx(store, RecordingNotifier()),
+    )
+
+    assert result.outcome == "blocked"                    # the round still ran
+    assert firming.calls == 1
+    # nothing ungrounded was injected — the section is simply omitted
+    assert "REPOSITORY CONTEXT (facts" not in firming.last_prompt
+
+
+@pytest.mark.asyncio
+async def test_firming_prompt_carries_grounding_rules(store_with_goal):
+    """The anti-inference clauses render: repo facts only from the brief or
+    REPOSITORY CONTEXT, never from the host process/priors; a missing fact
+    becomes an unknowns[] entry, not a guess."""
+    store = store_with_goal
+    firming = FakeClaude(response=DRAFT_WITH_UNKNOWNS, role="goal_firming")
+    handler = FirmingHandler(caller=firming)
+
+    await handler.run(
+        "g", store.load_goal("g"), store.load_status("g"),
+        _ctx(store, RecordingNotifier()),
+    )
+
+    prompt = firming.last_prompt
+    assert "Ground every repo fact in what you are given" in prompt
+    assert "never from" in prompt and "host process" in prompt
+    assert "may only name files, tools, or directories present" in prompt
+    assert "`unknowns[]` entry instead of guessing" in prompt
