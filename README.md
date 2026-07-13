@@ -162,6 +162,7 @@ A `program` runs once to completion; a **goal** is a standing intent DevClaw adv
 | `get_goal(goal_id)` | Objective, phase, what's in flight, the latest direction verdict, recent log |
 | `list_goals()` | All goals + phase + direction |
 | `steer_goal(goal_id, message)` | Correct/redirect — recorded as steering, honored on the next tick |
+| `resume_goal(goal_id)` | Recovery verb: unblock a blocked goal whose blocker was cleared out-of-band and re-plan on the next tick — same contract, no steering recorded (direction changes go through `steer_goal`) |
 | `evaluate_goal(goal_id)` | Force an on-demand, artifact-grounded direction evaluation now (not just on the periodic cadence) |
 | `tail_goal(goal_id, …)` | Deep read-only feed: deliveries tail (what each action actually shipped) + recent events |
 | `answer_unknowns(goal_id, answers)` | Owner's answers to the firming phase's named unknowns (`{unknown_id: answer_text}`, must cover every open one) — advances firming toward `executing` |

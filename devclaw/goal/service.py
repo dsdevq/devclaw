@@ -638,6 +638,63 @@ class GoalService:
         self.poke()
         return {"goal_id": goal_id, "steered": True, "message": message}
 
+    def resume_goal(self, goal_id: str) -> dict:
+        """Recovery verb: "the blocker is cleared — re-attempt the SAME
+        contract." Fires the existing UNBLOCK edge (BLOCKED → EXECUTING_IDLE)
+        WITHOUT recording steering, so a pure resume never becomes a direction
+        override in the next planner prompt (that's :meth:`steer_goal`'s job).
+        Not a field patch either — the goal contract (objective / done_when /
+        backlog) is untouched.
+
+        Legible no-ops instead of errors:
+
+        - a non-blocked goal has no UNBLOCK edge — return a message, never
+          raise ``IllegalTransition`` (idempotent: a second resume is a no-op);
+        - a firming-blocked goal is REFUSED — it waits on owner answers only
+          ``answer_unknowns`` can supply. A bare unblock would strand it in
+          FIRMING_IDLE limbo: round-1 firming already wrote firmed-draft.yaml,
+          so ``FirmingHandler.can_run`` stays False and no event ever fires.
+        """
+        if not self._goal_store.exists(goal_id):
+            raise KeyError(goal_id)
+        s = self._goal_store.load_status(goal_id)
+        if s.phase != "blocked":
+            return {
+                "goal_id": goal_id, "resumed": False,
+                "message": f"goal is not blocked (phase={s.phase!r}) — nothing to resume",
+            }
+        if (s.lifecycle or "executing") == "firming":
+            return {
+                "goal_id": goal_id, "resumed": False,
+                "message": (
+                    "goal is blocked in FIRMING awaiting owner answers — resume_goal "
+                    "cannot supply those; call answer_unknowns(goal_id, "
+                    "{unknown_id: answer, ...}) instead"
+                ),
+            }
+        was_blocked_on = s.blocked_on or ""
+        # Same unblock write shape as steer_goal (actions_dispatched=0 so the
+        # dispatch cap doesn't re-fire on the first re-plan), plus two resume-
+        # specific fields: blocked_on cleared (the reason is resolved — don't
+        # display it as live), and last_plan_at=None so cadence_due() reads
+        # True on the next tick. A bare UNBLOCK would otherwise park the goal
+        # until its cadence elapses — the tick's should_plan is
+        # `work OR cadence_due`, and resume (unlike steering) adds no work.
+        # A TransitionConflict propagates as a visible MCP error, exactly like
+        # steer_goal — practically unreachable since nothing awaits between
+        # the load above and this write.
+        self._goal_store.transition(
+            goal_id, Event.UNBLOCK,
+            replace(s, phase="idle", blocked_on="", actions_dispatched=0, last_plan_at=None),
+            expect=s,
+        )
+        self._goal_store.append_log(
+            goal_id,
+            f"resumed: blocker cleared ({was_blocked_on[:120]}) — re-attempting the same contract",
+        )
+        self.poke()
+        return {"goal_id": goal_id, "resumed": True, "was_blocked_on": was_blocked_on}
+
     async def evaluate_goal(self, goal_id: str) -> dict:
         """Force a direction evaluation NOW (artifact-grounded) and return the
         verdict. Reports + steers (corrections → inbox); does not block on demand."""
