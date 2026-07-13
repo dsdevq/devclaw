@@ -16,7 +16,7 @@ always `claude` over Pro/Max **OAuth — no API key, no metered billing**.
 
 ## The layer map — where a change belongs
 
-The system is 5 layers below the user (canonical detail: [`docs/architecture-layers.md`](./docs/architecture-layers.md)).
+The system is 5 layers below the user (canonical detail: [`docs/architecture.md`](./docs/architecture.md)).
 Only layer 5 is an agent harness in the technical sense.
 
 | # | Layer | Code | Put a change here if it's about… |
@@ -53,7 +53,7 @@ spawn containers itself — it goes through the engine).
   `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs`, `goal_phase_history`.
   `STATUS.md`/`log.md`/`inbox.md`/`deliveries.md`/`checklist.yaml`/`firmed-draft.yaml`
   are generated **views** — human- and rollback-readable, never read back for
-  decisions. Mutation is NOT heartbeat-exclusive: `steer_goal`/`cancel_goal` write from
+  decisions. Mutation is NOT heartbeat-exclusive: `steer_goal`/`resume_goal`/`cancel_goal` write from
   the MCP-tool call path too, concurrently with the heartbeat — `GoalStore.transition()`
   is the CAS'd choke point (`devclaw/goal/transitions.py`'s `LEGAL` table) that makes
   that safe: a stale-snapshot write raises `TransitionConflict` and is abandoned rather
@@ -85,6 +85,13 @@ Recent work made the loop fail **loud, not silent**. Match it when you add code:
   failed: one account-wide `paused_until` gates both queue and heartbeat, WIP is
   preserved, the owner is pinged once, and it auto-resumes when the cap resets
   (#189/#190/#191). Zero tokens while paused.
+- **Mechanical blocks auto-heal; recovery is a verb, not a fake steer.** Blocks
+  carry a structured `blocked_kind`; `mechanical:corrupt_doc` and
+  `mechanical:prep` self-heal when their condition clears (zero LLM, damped by
+  a persisted per-goal heal budget + backoff); `needs_answer`/`bug`/`lost_ref`/
+  `dispatch_cap` stay human-gated. `resume_goal` re-attempts the SAME contract
+  without recording steering; `steer_goal` stays the direction-change verb
+  (2026-07-13 harden-loop tranche, #228–#238).
 
 Rule of thumb: **loud failure over silent degradation.**
 
@@ -111,14 +118,14 @@ evals/                       stub e2e suite + real-pipeline harnesses
 
 ```bash
 pip install -e ".[dev]"
-pytest        # ~1037 tests, all stubbed — no docker, no claude
+pytest        # ~1226 tests, all stubbed — no docker, no claude
 ```
 
 Engine modes (`DEVCLAW_ENGINE`): **unset** = OpenHands in a per-task docker sandbox
 (production); `host` = OpenHands on the host, no sandbox (dev/CI); `stub` =
 deterministic, no docker/no claude (the mode the test suite and `evals/run_all.py`
 use). For the real pipeline (a logged-in `claude` + docker), follow
-[`docs/live-shakedown.md`](./docs/live-shakedown.md).
+[`docs/runbooks/live-shakedown.md`](./docs/runbooks/live-shakedown.md).
 
 ## Conventions
 
@@ -133,6 +140,6 @@ use). For the real pipeline (a logged-in `claude` + docker), follow
 ## Where to look next
 
 - [`docs/INDEX.md`](./docs/INDEX.md) — every doc, one-line purpose, currency tag. **Read this before trusting any other doc.**
-- [`docs/architecture-layers.md`](./docs/architecture-layers.md) — the locked 5-layer model + per-layer contracts/invariants.
-- [`docs/task-execution-flow.md`](./docs/task-execution-flow.md) — the temporal trace of one task, every hop.
-- [`docs/env-vars.md`](./docs/env-vars.md) — every env var, grouped.
+- [`docs/architecture.md`](./docs/architecture.md) — the mental model + the locked 5-layer contracts and invariants.
+- [`docs/flows/task-execution.md`](./docs/flows/task-execution.md) — the temporal trace of one task, every hop.
+- [`docs/reference/env-vars.md`](./docs/reference/env-vars.md) — every env var, grouped.

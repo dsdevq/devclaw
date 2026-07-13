@@ -2,7 +2,7 @@
 
 A step-by-step trace of what happens when devclaw runs ONE task (an
 `implement_feature`, `fix_bug`, `review_repository`, etc.). Sibling
-reference to [`architecture-v2.md`](./architecture-v2.md): that file
+reference to [`decisions/0001-openhands-engine.md`](../decisions/0001-openhands-engine.md): that file
 describes the *structural* choice (why three layers); this one walks the
 *temporal* sequence (what each layer does, in order, for one task).
 
@@ -15,7 +15,7 @@ Use this when:
 
 The three nodes (Node 1 = openclaw waiter / TS, Node 2 = devclaw-mcp /
 Python, Node 3 = ephemeral sandbox / per task) are defined in
-[`architecture-v2.md`](./architecture-v2.md) and in
+[`decisions/0001-openhands-engine.md`](../decisions/0001-openhands-engine.md) and in
 `~/memory/projects/devclaw/architecture.md`. This doc assumes you've read
 one of those.
 
@@ -145,6 +145,7 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │  Step I — review gate (quality/review_diff):                │                      │
      │  │     • git diff main..HEAD of the workspace                  │                      │
      │  │     • feed diff to `claude --print` for adversarial check   │                      │
+     │  │     • + workspace snapshot as REPOSITORY CONTEXT (#227)     │                      │
      │  │     • test-integrity guard: were tests deleted/weakened?    │                      │
      │  │     • either: ok / needs revision (kicked back to engineer) │                      │
      │  │                                                             │                      │

@@ -19,7 +19,7 @@ project-overridable behavior), it's now a named constant next to its use site.
 are truthy unless explicitly `0` / `false`. **Real env vars always win** over
 `.env` — `.env` is the per-machine default surface, not an override.
 
-The committed [`.env.example`](../.env.example) lists every var with its
+The committed [`.env.example`](../../.env.example) lists every var with its
 default; copy it to `.env` and uncomment what you want to change.
 
 ## Server transport + auth
@@ -49,14 +49,14 @@ default; copy it to `.env` and uncomment what you want to change.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `DEVCLAW_ENGINE` | *(unset)* | `(unset)` → OpenHands in a per-task docker sandbox (production). `host` → OpenHands on the host with **no** sandbox (dev/CI, agent has full FS access). `stub` → deterministic stub (harness validation, no docker, no claude). `claude_sdk` → `claude --print` inside the sandcastle (spike; see [engine-decision.md](./engine-decision.md)). |
+| `DEVCLAW_ENGINE` | *(unset)* | `(unset)` → OpenHands in a per-task docker sandbox (production). `host` → OpenHands on the host with **no** sandbox (dev/CI, agent has full FS access). `stub` → deterministic stub (harness validation, no docker, no claude). `claude_sdk` → `claude --print` inside the sandcastle (spike; see [decisions/0002-engine-mode.md](../decisions/0002-engine-mode.md)). |
 | `DEVCLAW_COGNITION` | `claude` | Which `Cognition` impl every role's `default_caller` routes through. `claude` → `claude --print` over Pro/Max OAuth (production). `stub` → deterministic canned responses (offline harnesses + eval scaffolding). Unknown values fail loud at first use. |
 
 ## Model tiering (cognition cost lever)
 
 Cognition cost is steered by **three tiers**, not per-role vars. Which role
 runs at which tier is a code decision — the table in
-[`devclaw/model_tiers.py`](../devclaw/model_tiers.py) — changed by PR (the
+[`devclaw/model_tiers.py`](../../devclaw/model_tiers.py) — changed by PR (the
 twelve per-role vars this replaced were never once set on any host). Tier
 values are `claude --model` inputs: an alias (`haiku`/`sonnet`/`opus`) or a
 full id. Empty → account default. **No API key = the constraint is your
@@ -143,7 +143,7 @@ zero-token-by-default background signal, not a cognition role.
 
 ## What's NOT here on purpose
 
-- The waiter agent's env (model, profile, allowed tools) lives in OpenClaw's `openclaw.json` on the VPS — not this repo. See [vps-waiter-deploy.md](./vps-waiter-deploy.md).
+- The waiter agent's env (model, profile, allowed tools) lives in OpenClaw's `openclaw.json` on the VPS — not this repo. See [runbooks/vps-waiter-deploy.md](../runbooks/vps-waiter-deploy.md).
 - Per-project verify commands and goal `done_when` strings are runtime arguments to MCP tools, not env. They belong with the project, not the host.
 - The eval-harness `MEASURE_*` vars (see `evals/measure_passrate.py`) and the test-suite gates (`DEVCLAW_RUN_COGNITION_EVALS`, `DEVCLAW_TEST_*`) — offline tooling, not the runtime.
 - Internal tuning constants (timeouts, retry buffers, breaker thresholds, review diff caps) — named constants at their use sites, tuned by PR.

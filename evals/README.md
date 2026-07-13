@@ -101,7 +101,7 @@ Each driver wires the engine exactly like the server does (`StateStore` + `TaskQ
 
 | # | Gate | What it proves | Cost | Run when |
 |---|---|---|---|---|
-| L1 | `pytest -q` (~1037 unit) | The static contract: types, pure functions, prompt loading, store invariants. | seconds, free | every change |
+| L1 | `pytest -q` (~1226 unit) | The static contract: types, pure functions, prompt loading, store invariants. | seconds, free | every change |
 | L2 | `run_all.py` (stub e2e, 11 scenarios) | Orchestration regression: every runtime path (single-task, full lifecycle, grill, blocked planner, steered goal, failing verify, watchdog, quota pause, off-track done-gate). Stub cognition + stub engine. | ~30s, free | every change touching runtime path |
 | L3 | `run_all.py --cognition claude` | Real cognition makes sensible decisions on the same 11 scenarios. Catches prompt drift and decision-quality regressions. | ~2-3 min, OAuth quota | before merging anything that touches a prompt or cognition seam |
 | L4 | `measure_passrate.py` (5 lifekit-dashboard tasks) | The full pipeline (run_sandcastle → docker → OpenHands → claude → open_pr) actually ships verified PRs. The end-to-end smoke. | ~30-60 min, OAuth quota, 5 real PRs | pre-release, after any engine/delivery change |
@@ -127,7 +127,7 @@ whole point (merged-without-rework is a human judgment at the boundary, not a ga
 harness can pass itself).
 
 1. **Prereq — deploy main to the VPS** and build the sandbox image(s) for each project's
-   toolchain (see `docs/live-shakedown.md` §1). The proof must run the *shipped* code.
+   toolchain (see `docs/runbooks/live-shakedown.md` §1). The proof must run the *shipped* code.
 2. **Pick 10 real tickets** from ≥2 projects' actual backlogs (not synthetic). Put them in a
    basket file — copy `evals/baskets/v01-proof.example.json`, one entry per ticket with its
    own `repo_url` + `verify_cmd` (so one run spans multiple projects). Tell each engineer to

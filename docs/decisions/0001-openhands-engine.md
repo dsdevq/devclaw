@@ -1,6 +1,10 @@
 # DevClaw Architecture v2
 
-**Status:** Live. This is the current architecture; it superseded and replaced the v1 skill-based + cron-driven approach, which has been removed (see git history for the prior art).
+**Status:** Decision record — accepted 2026-06, frozen as **ADR 0001** on 2026-07-13.
+The decision stands (OpenHands as the execution engine; devclaw as thin orchestration)
+and superseded the v1 skill-based + cron-driven approach (removed; see git history).
+System descriptions below are point-in-time and NOT maintained for drift — the current
+system is [`../architecture.md`](../architecture.md). Factual corrections only.
 **Decision:** Adopt OpenHands as the execution engine. DevClaw is a thin orchestration layer.
 
 ---
@@ -123,7 +127,7 @@ OpenHands supports ACP (Agent Communication Protocol), which lets it delegate LL
 
 ## DevClaw internals
 
-The layer contracts live in [`architecture-layers.md`](./architecture-layers.md); this
+The layer contracts live in [`architecture.md`](../architecture.md); this
 is the decision-record summary of what devclaw owns around the OpenHands worker.
 
 ### 1. MCP server — the interface
@@ -178,10 +182,10 @@ goal_steering · goal_log · goal_deliveries · goal_docs · goal_phase_history 
 
 **Single-writer per table family:** only the `TaskQueue` mutates task rows; `events` is
 append-only and the status views are projections. Goal state (Tranche 1, see
-[`architecture-layers.md`](./architecture-layers.md)) is owned by `GoalStore`, wired
+[`architecture.md`](../architecture.md)) is owned by `GoalStore`, wired
 onto this SAME `StateStore` — `goal_status`'s phase/lifecycle/in_flight changes go
 through a CAS'd `GoalStore.transition()`, not a single-caller assumption, because
-`steer_goal`/`cancel_goal` can write concurrently with the heartbeat. There is **no**
+`steer_goal`/`resume_goal`/`cancel_goal` can write concurrently with the heartbeat. There is **no**
 `openhands_run_id` — devclaw doesn't track a remote run, because there is no remote
 run; the sandbox is ephemeral and its whole output is the stdout stream.
 
@@ -229,7 +233,7 @@ The OpenClaw waiter reaches DevClaw at `http://devclaw-mcp:8000/mcp`. Each task 
 transient `docker run --rm devclaw-sandbox:latest '<payload>'` spawned by
 `sandcastle.py` — it appears in `docker ps` only while the task runs, then vaporizes.
 Access to the docker socket (and its GID) is what lets devclaw-mcp spawn siblings; see
-[`task-execution-flow.md`](./task-execution-flow.md) for the node-by-node detail.
+[`flows/task-execution.md`](../flows/task-execution.md) for the node-by-node detail.
 
 ---
 

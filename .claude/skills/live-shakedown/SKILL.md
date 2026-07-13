@@ -8,7 +8,7 @@ description: Run the devclaw live shakedown — exercise the REAL pipeline (logg
 Exercises the actual engine seam: a logged-in `claude` driving OpenHands inside a
 real docker sandbox. Work the layers strictly in order — each builds on the last,
 so the first failing layer names the broken seam. Narrative background:
-[`docs/live-shakedown.md`](../../../docs/live-shakedown.md).
+[`docs/runbooks/live-shakedown.md`](../../../docs/runbooks/live-shakedown.md).
 
 **Cost guardrail.** Every run spends Denys's Claude Pro/Max session (OAuth, no API
 key — by design). Keep goals *tiny*. Default scope is **L1–L3 + L5**; run L4 (a

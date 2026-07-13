@@ -12,7 +12,7 @@ because it reads well; only because its checkable claims checked out.
 
 ## Scope
 
-`docs/*.md` + `README.md` + `CLAUDE.md` + the path→doc map in
+`docs/**/*.md` + `README.md` + `CLAUDE.md` + the path→doc map in
 `.claude/hooks/docs-reminder.py` (`DOC_MAP`). Explicitly out of scope:
 `.agent/skills/` (devclaw's worker layer — product, not harness) and generated
 views (`STATUS.md`/`log.md`/`deliveries.md` — projections, never hand-edited).
@@ -21,7 +21,7 @@ views (`STATUS.md`/`log.md`/`deliveries.md` — projections, never hand-edited).
 
 ### 1. Inventory against INDEX
 
-Read `docs/INDEX.md`, then `ls docs/*.md`. Every file needs a row; every row
+Read `docs/INDEX.md`, then `find docs -name '*.md'`. Every file needs a row; every row
 needs a file. An unlisted doc is invisible (nobody trusts a doc that isn't in
 the manifest); a ghost row is a broken promise. Fix both immediately.
 
@@ -48,7 +48,7 @@ check each against the source of truth:
 |---|---|
 | MCP tool names | `grep "@mcp.tool" -A2 devclaw/server/tools.py` |
 | File paths, module names | `ls` / `test -e` |
-| Env vars | grep the codebase; cross-check `docs/env-vars.md` |
+| Env vars | grep the codebase; cross-check `docs/reference/env-vars.md` |
 | CLI commands, entry points | `pyproject.toml` scripts, `--help` |
 | Flow/sequence statements | read the named functions (tick, dispatch, settle) |
 | Invariants quoted from CLAUDE.md | the enforcing code + its named regression test |

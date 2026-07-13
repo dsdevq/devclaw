@@ -30,7 +30,7 @@ DevClaw (the chef — this repo, FastMCP)
 
 ### Layered view — where the agent harness actually lives
 
-> The canonical layer reference, with per-layer contracts and invariants, is **[`docs/architecture-layers.md`](./docs/architecture-layers.md)**. This README section is the high-level summary. Architectural changes are judged against the doc.
+> The canonical layer reference, with per-layer contracts and invariants, is **[`docs/architecture.md`](./docs/architecture.md)**. This README section is the high-level summary. Architectural changes are judged against the doc.
 
 Five distinct layers below the user, and only one of them is an agent harness in the technical sense (a turn-loop hosting tool calls).
 
@@ -78,7 +78,7 @@ The day we swap claude-code for another harness, the entire skill/hook system su
 | Durable hosting / handoff | DevClaw deploy (Tailscale, reboot-surviving) |
 | Interface to the waiter | DevClaw FastMCP server |
 
-The full rationale — including why OpenHands and sandbox isolation are **orthogonal** layers (the agent vs. the box it runs in), and why this calls `docker run` directly instead of depending on `@ai-hero/sandcastle` — lives in [`docs/architecture-v2.md`](./docs/architecture-v2.md).
+The full rationale — including why OpenHands and sandbox isolation are **orthogonal** layers (the agent vs. the box it runs in), and why this calls `docker run` directly instead of depending on `@ai-hero/sandcastle` — lives in [`docs/decisions/0001-openhands-engine.md`](./docs/decisions/0001-openhands-engine.md).
 
 ## Layout
 
@@ -129,7 +129,7 @@ devclaw/
 openhands-runner/runner.py  # OpenHands SDK inside the sandbox; emits event/result lines
 .sandcastle/Dockerfile      # per-task sandbox image
 tests/                      # pytest — stubbed engine; no docker, no claude
-docs/architecture-v2.md     # architectural contract — read before touching the runner/store/sandbox
+docs/architecture.md        # the system doc — read before touching the runner/store/sandbox
 ```
 
 DevClaw is all Python. The only language boundary left is the process boundary: `openhands-runner/runner.py` runs the OpenHands SDK *inside* the sandbox container, isolated from the long-running host process — it talks to the host over a line-delimited JSON protocol on stdout.
@@ -224,6 +224,7 @@ Tailscale wiring is best-effort + graceful-degradation: `deploy_project` attempt
 Built to run unattended, and to ship code worth merging:
 
 - **Survives usage limits.** A quota / rate-limit pause is *classified*, not treated as a failure: the task is requeued and a single account-wide `paused_until` gates **both** the task queue and the goal heartbeat, which auto-resume when the cap resets — zero tokens while paused, the owner pinged once.
+- **Mechanical blocks self-heal.** Every block carries a structured `blocked_kind`; the two re-checkable mechanical kinds auto-heal with zero LLM cost (a corrupt contract file heals when it parses again; an unreachable repo re-checks via `git ls-remote` on capped exponential backoff), damped by a per-goal heal budget so a flapping condition can't burn quota. Question/bug blocks stay human-gated: `resume_goal` re-attempts the same contract once you've fixed the blocker; `steer_goal` changes direction.
 - **No-progress watchdog.** An executing goal that ships nothing for `DEVCLAW_GOAL_NO_PROGRESS_S` (default 6h) pings the owner once — a zero-token wall-clock check that complements the per-task timeout.
 - **In-house quality gate (no third-party QC).** The engineer is briefed to *audit before extending*, and the verify gate runs a **test-integrity** check that fails the gate on deleted / skipped / weakened tests, closing the "go green by gutting the tests" path.
 - **Pre-PR review gate — green means *reviewed*.** A green gate proves behaviour, not quality; it can't see a dead-code line or a frontend change it never exercises. So after the gate + test-integrity pass and **before** the PR opens, a separate `claude` pass *reads the diff* against the ticket + quality bar and returns `approve` / `request_changes`. A `request_changes` verdict feeds its located issues back through the same retry loop as a gate failure (then escalates).
@@ -258,7 +259,7 @@ DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
 
 ### Environment variables
 
-Copy [`.env.example`](./.env.example) to `.env` (gitignored) and uncomment what you need — devclaw loads it on startup, and shell/systemd env always wins over it. Every var organized by purpose (transport, state, sandbox, goals, model tiering, deploy, review gate) lives in [`docs/env-vars.md`](./docs/env-vars.md). The most common ones to know:
+Copy [`.env.example`](./.env.example) to `.env` (gitignored) and uncomment what you need — devclaw loads it on startup, and shell/systemd env always wins over it. Every var organized by purpose (transport, state, sandbox, goals, model tiering, deploy, review gate) lives in [`docs/reference/env-vars.md`](./docs/reference/env-vars.md). The most common ones to know:
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -270,7 +271,7 @@ Copy [`.env.example`](./.env.example) to `.env` (gitignored) and uncomment what 
 | `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | the in-sandbox coding agent's model (full id) |
 | `GITHUB_TOKEN` / `GH_TOKEN` | — | repo push + PR access for `open_pr` delivery |
 
-For the full table (~60 vars), see [`docs/env-vars.md`](./docs/env-vars.md).
+For the full table (~60 vars), see [`docs/reference/env-vars.md`](./docs/reference/env-vars.md).
 
 ## Tests
 
@@ -279,7 +280,7 @@ pip install -e ".[dev]"
 pytest          # planner + state store + queue/DAG + goal layer, all stubbed — no docker, no claude
 ```
 
-To validate the **real** pipeline (a logged-in `claude` driving OpenHands in a docker sandbox), follow the layered runbook in [`docs/live-shakedown.md`](./docs/live-shakedown.md).
+To validate the **real** pipeline (a logged-in `claude` driving OpenHands in a docker sandbox), follow the layered runbook in [`docs/runbooks/live-shakedown.md`](./docs/runbooks/live-shakedown.md).
 
 ## Status
 

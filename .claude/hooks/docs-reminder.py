@@ -17,14 +17,15 @@ import sys
 import time
 
 DOC_MAP = [
-    ("devclaw/server/", ["docs/architecture-layers.md (layer 1: MCP surface)"]),
-    ("devclaw/goal/", ["docs/architecture-layers.md (layers 2-3)", "docs/task-execution-flow.md"]),
-    ("devclaw/engine/", ["docs/task-execution-flow.md", "docs/engine-decision.md", "docs/live-shakedown.md"]),
-    ("openhands-runner/", ["docs/task-execution-flow.md (layer 5)", "docs/live-shakedown.md"]),
-    (".sandcastle/", ["docs/live-shakedown.md"]),
-    ("devclaw/delivery/", ["docs/delivery-flows.md"]),
-    ("devclaw/task_queue.py", ["docs/architecture-layers.md (layer 4)", "docs/task-execution-flow.md"]),
-    ("devclaw/state_store.py", ["docs/architecture-layers.md (single-writer invariant)"]),
+    ("devclaw/server/", ["docs/architecture.md (layer 1: MCP surface)"]),
+    ("devclaw/goal/", ["docs/architecture.md (layers 2-3)", "docs/flows/task-execution.md"]),
+    ("devclaw/engine/", ["docs/flows/task-execution.md", "docs/decisions/0002-engine-mode.md", "docs/runbooks/live-shakedown.md"]),
+    ("openhands-runner/", ["docs/flows/task-execution.md (layer 5)", "docs/runbooks/live-shakedown.md"]),
+    (".sandcastle/", ["docs/runbooks/live-shakedown.md"]),
+    ("devclaw/delivery/", ["docs/flows/delivery.md"]),
+    ("devclaw/task_queue.py", ["docs/architecture.md (layer 4)", "docs/flows/task-execution.md"]),
+    ("devclaw/task_git.py", ["docs/flows/task-execution.md", "docs/flows/delivery.md"]),
+    ("devclaw/state_store/", ["docs/architecture.md (single-writer invariant)"]),
     ("devclaw/cli.py", ["README.md (usage narrative)"]),
 ]
 
@@ -75,7 +76,7 @@ def main() -> None:
         + "; ".join(docs)
         + ". Per CLAUDE.md, if this change makes any doc statement wrong, fix the doc "
         "in this same PR and update its currency tag in docs/INDEX.md (also consider "
-        "README.md's narrative, and docs/env-vars.md if env vars were added/renamed). "
+        "README.md's narrative, and docs/reference/env-vars.md if env vars were added/renamed). "
         "If the commit has no doc impact, state that in one line and move on."
     )
     print(json.dumps({
