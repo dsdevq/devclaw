@@ -22,6 +22,10 @@ from typing import Awaitable, Callable
 from .loom import trace as _trace
 from .state_store import TaskKind
 
+# Imported as a module global (not called via task_git.) so tests can patch it
+# on THIS namespace — same convention as task_queue's git wrappers.
+from .task_git import _review_repo_context_sync  # noqa: F401
+
 #: default ceiling for any cognition call when the caller doesn't supply its
 #: own. Each role's ``default_caller`` may pass a larger value via
 #: :func:`claude_with_model` when its expected output volume warrants — the
@@ -63,15 +67,32 @@ class PlannerError(Exception):
         self.raw = raw
 
 
-def build_planner_prompt(goal: str, workspace_dir: str) -> str:
+async def _plan_repo_context(workspace_dir: str) -> str:
+    """Async wrapper — runs the blocking snapshot in a thread so it never blocks
+    the event loop (same thread-offload rationale as task_queue's git wrappers).
+    Looks up :func:`_review_repo_context_sync` as a module global so tests can
+    patch it here."""
+    return await asyncio.to_thread(_review_repo_context_sync, workspace_dir)
+
+
+def build_planner_prompt(
+    goal: str, workspace_dir: str, repo_context: str | None = None
+) -> str:
     from .prompts import load_prompt
 
-    return (
-        f"{load_prompt('plan-goal')}\n\n"
+    parts = [load_prompt("plan-goal")]
+    if repo_context and repo_context.strip():
+        parts.append(
+            "REPOSITORY CONTEXT (facts from the task workspace — the source of "
+            "truth for repo identity and which files/dirs exist):\n"
+            + repo_context.strip()
+        )
+    parts.append(
         f"Workspace: {workspace_dir}\n"
         f"Goal: {goal}\n\n"
         "Return the JSON now."
     )
+    return "\n\n".join(parts)
 
 
 def extract_json(text: str) -> str:
@@ -459,8 +480,23 @@ async def plan_goal(
     workspace_dir: str,
     claude_caller: Callable[[str], Awaitable[str]] = _planner_caller,
 ) -> list[PlannedTask]:
-    """Plan a bare goal string (the small-bounded `start_program` case)."""
-    raw = await claude_caller(build_planner_prompt(goal, workspace_dir))
+    """Plan a bare goal string (the small-bounded `start_program` case).
+
+    The prompt is grounded in a snapshot of the ACTUAL workspace (remote,
+    key-file presence, tracked layout — :func:`~devclaw.task_git._review_repo_context_sync`,
+    the #227 pattern): without it the prompt was byte-invariant between a
+    populated repo and an empty scaffold target, and host-side ``claude``
+    inherits devclaw's own checkout as cwd — the wrong-codebase contamination
+    channel #227 closed for the review gate. Strictly best-effort: a snapshot
+    hiccup degrades to an ungrounded prompt, it never fails planning."""
+    try:
+        repo_context: str | None = await _plan_repo_context(workspace_dir)
+    except Exception as exc:  # noqa: BLE001 — best-effort, never fail planning
+        sys.stderr.write(
+            f"devclaw: planner repo snapshot failed (planning ungrounded): {exc}\n"
+        )
+        repo_context = None
+    raw = await claude_caller(build_planner_prompt(goal, workspace_dir, repo_context))
     return _parse_plan(raw)
 
 

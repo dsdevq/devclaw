@@ -1,11 +1,14 @@
 """Planner unit tests — extract_json, validate_plan (topo/cycles/refs), plan_goal."""
 
 import json
+import subprocess
 
 import pytest
 
+from devclaw import planner
 from devclaw.planner import (
     PlannerError,
+    build_planner_prompt,
     extract_json,
     plan_goal,
     plan_spec,
@@ -184,3 +187,105 @@ async def test_plan_goal_full_dag_roundtrip_preserves_order():
 
     out = await plan_goal("goal", "/ws", stub)
     assert [t.key for t in out] == ["one", "two"]
+
+
+# ---- plan_goal grounding (triage F6 — the planner sibling of #227) ----
+
+_ONE_TASK = '{"tasks":[{"key":"t1","goal":"do it"}]}'
+
+
+def _capture_prompt(seen: dict):
+    """A stub caller that records the wire prompt and returns a valid plan."""
+
+    async def stub(prompt):
+        seen["prompt"] = prompt
+        return _ONE_TASK
+
+    return stub
+
+
+async def test_plan_prompt_includes_repo_context_from_actual_workspace(tmp_path):
+    """The wire prompt carries a REPOSITORY CONTEXT snapshot collected from the
+    task's ACTUAL workspace — remote, key-file probes, tracked layout — so the
+    planner decomposes against the real repo, never the control-plane repo that
+    host-side claude was launched from (triage F6, planner sibling of the #227
+    wrong-codebase review)."""
+
+    def _git(*args):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    repo = tmp_path / "closeloop"
+    repo.mkdir()
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    _git("remote", "add", "origin",
+         "https://github.com/dsdevq/closeloop-bench-2026-07-13.git")
+    (repo / "global.json").write_text('{"sdk":{"version":"9.0.315"}}\n')
+    (repo / "backend").mkdir()
+    (repo / "backend" / "Program.cs").write_text("// entry\n")
+    (repo / "frontend").mkdir()
+    (repo / "frontend" / "angular.json").write_text("{}\n")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "init")
+
+    seen: dict = {}
+    out = await plan_goal("add CI", str(repo), _capture_prompt(seen))
+    assert len(out) == 1
+
+    p = seen["prompt"]
+    # match the injected section HEADING, not the prompt's own grounding
+    # instruction (which always mentions "REPOSITORY CONTEXT").
+    assert "REPOSITORY CONTEXT (facts" in p
+    assert "closeloop-bench-2026-07-13.git" in p   # the ACTUAL repo, not devclaw
+    assert "global.json: file" in p                # .NET marker probed on disk
+    assert "pyproject.toml: missing" in p          # and it is NOT a python repo
+    assert "tracked_top_level:" in p and "backend" in p
+
+
+async def test_plan_prompt_distinguishes_empty_scaffold_target(tmp_path):
+    """An empty directory renders a visibly-empty snapshot — the prompt is no
+    longer byte-invariant between a populated repo and a bare scaffold target,
+    so the model has grounds to decide whether a scaffold task belongs."""
+    empty = tmp_path / "bare"
+    empty.mkdir()
+
+    seen: dict = {}
+    await plan_goal("build a web app", str(empty), _capture_prompt(seen))
+    p = seen["prompt"]
+    assert "REPOSITORY CONTEXT (facts" in p
+    assert "global.json: missing" in p and "package.json: missing" in p
+    assert "tracked_top_level:" not in p          # nothing tracked — visibly empty
+
+    # A not-yet-created workspace shows the "(not present)" marker — the
+    # snapshot output that legitimately licenses a scaffold task.
+    seen2: dict = {}
+    await plan_goal("build a web app", str(tmp_path / "ghost"), _capture_prompt(seen2))
+    assert "(not present)" in seen2["prompt"]
+
+
+def test_plan_goal_prompt_carries_grounding_prohibition():
+    """The rendered plan-goal prompt forbids inferring repo facts from the
+    planner process's cwd/host context: facts come only from REPOSITORY
+    CONTEXT, absent means unknown, and scaffold tasks are licensed only by an
+    empty/not-present snapshot."""
+    p = build_planner_prompt("goal", "/ws")
+    assert "Do NOT infer repository facts" in p
+    assert "unknown rather than substituting another codebase" in p
+    assert "must not name a different language, framework" in p
+    assert "empty or not-present workspace" in p
+
+
+async def test_plan_goal_snapshot_is_best_effort(monkeypatch):
+    """A crashing snapshot collector degrades to an ungrounded prompt — it can
+    never fail planning (same best-effort contract as task_git's helpers)."""
+
+    async def boom(_workspace_dir):
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr(planner, "_plan_repo_context", boom)
+
+    seen: dict = {}
+    out = await plan_goal("goal", "/ws", _capture_prompt(seen))
+    assert len(out) == 1 and out[0].goal == "do it"
+    assert "REPOSITORY CONTEXT (facts" not in seen["prompt"]  # degraded, not fabricated
