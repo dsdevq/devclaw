@@ -76,11 +76,16 @@ def build_prompt(
     *,
     discovery_brief: str = "",
     repo_digest: str = "",
+    repo_context: "str | None" = None,
 ) -> str:
     """Compose the full decomposer prompt. The system prompt
     (``prompts/decomposer.md``) is concatenated with the goal's facts +
     prior-pass discovery brief + the curated repo digest. The digest is the
-    decomposer's GROUND TRUTH for what services already exist."""
+    decomposer's GROUND TRUTH for what services already exist.
+    ``repo_context`` (optional — older call sites byte-unaffected) is the
+    mechanical workspace snapshot (#227's collector: remote, branch,
+    key-file probes, tracked layout), rendered as a REPOSITORY CONTEXT
+    block so repo IDENTITY stays grounded even when the digest is thin."""
     from ..prompts import load_prompt
 
     backlog = "\n".join(f"  - {b}" for b in goal.backlog) or "  (none listed)"
@@ -112,6 +117,12 @@ def build_prompt(
             "\n## Repo digest (curated read — your GROUND TRUTH for what exists)",
             repo_digest.strip(),
         ]
+    if repo_context and repo_context.strip():
+        parts += [
+            "\n## REPOSITORY CONTEXT (mechanical facts from the actual workspace "
+            "— the source of truth for repo identity and which files/dirs exist)",
+            repo_context.strip(),
+        ]
     parts.append("\nReturn the YAML now.")
     return "\n".join(parts)
 
@@ -122,12 +133,18 @@ async def decompose(
     claude_caller: ClaudeCaller,
     discovery_brief: str = "",
     repo_digest: str = "",
+    repo_context: "str | None" = None,
 ) -> Checklist:
     """Run the decomposer cognition call → validated :class:`Checklist`.
     ``claude_caller`` is injected so tests stub the LLM. Raises
     :class:`GoalDecomposerError` if the model returns nothing usable or its
     YAML fails the schema contract."""
-    prompt = build_prompt(goal, discovery_brief=discovery_brief, repo_digest=repo_digest)
+    prompt = build_prompt(
+        goal,
+        discovery_brief=discovery_brief,
+        repo_digest=repo_digest,
+        repo_context=repo_context,
+    )
     raw = await claude_caller(prompt)
     try:
         return parse_checklist(raw)

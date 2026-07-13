@@ -78,17 +78,42 @@ def test_build_prompt_includes_brief_and_digest_when_present():
         _goal(),
         discovery_brief="## Current state\nThe repo has X.\n",
         repo_digest="Module Foo exposes GetFooQuery.",
+        repo_context="git_remote_origin: https://github.com/x/y.git\nglobal.json: file",
     )
     assert "Discovery brief" in prompt
     assert "The repo has X." in prompt
     assert "Repo digest" in prompt
     assert "Module Foo exposes GetFooQuery." in prompt
+    # the mechanical snapshot renders as its own section (heading match — the
+    # prompt's grounding rule also SAYS "REPOSITORY CONTEXT", so match the
+    # injected heading, not the phrase)
+    assert "## REPOSITORY CONTEXT (mechanical" in prompt
+    assert "https://github.com/x/y.git" in prompt
+    assert "global.json: file" in prompt
 
 
 def test_build_prompt_omits_brief_section_when_empty():
     prompt = build_prompt(_goal())
     assert "Discovery brief" not in prompt
     assert "Repo digest" not in prompt
+    # no injected section when context is absent or blank — older call sites
+    # byte-unaffected
+    assert "## REPOSITORY CONTEXT (mechanical" not in prompt
+    blank = build_prompt(_goal(), repo_context="   ")
+    assert "## REPOSITORY CONTEXT (mechanical" not in blank
+
+
+def test_decomposer_prompt_carries_no_inventing_rule():
+    """The grounding clauses render: with an absent/thin digest the model must
+    cite only REPOSITORY CONTEXT paths and raise open_questions instead of
+    inventing paths/symbols/stack; `scaffold: true` is only valid when the
+    digest/context shows the scaffold does not already exist (a hallucinated
+    scaffold tag strips the adversarial review gate, #225, off its diff)."""
+    prompt = build_prompt(_goal())
+    assert "Ground every repo fact in what you are given" in prompt
+    assert "raise `open_questions` instead of inventing" in prompt
+    assert "NEVER infer the stack from the host process" in prompt
+    assert "the scaffold does NOT already" in prompt
 
 
 def test_build_prompt_handles_empty_backlog_without_crashing():

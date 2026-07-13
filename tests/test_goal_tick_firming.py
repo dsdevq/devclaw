@@ -192,3 +192,159 @@ async def test_discovery_lands_in_firming_when_enabled(tmp_path, monkeypatch):
     after = store.load_status("g")
     assert after.lifecycle == "firming"
     assert after.phase == "idle"
+
+
+# ---- decomposer grounding (triage F2, 2026-07-13) ---------------------------
+# On the firming path (the active dogfood config) _fire_decomposer used to call
+# decompose() WITHOUT repo_digest — the raw review_repository output was
+# unrecoverable by then (record_settlement keeps only ref/kind/status; only the
+# tight prose brief survives) while decomposer.md still commanded "THIS IS YOUR
+# GROUND TRUTH". These pin: the raw analysis persists at discovery settle, the
+# firming-path decomposer reads it back, and BOTH paths carry the mechanical
+# workspace snapshot.
+
+# A minimal valid checklist for capture callers — must survive parse_checklist.
+DECOMPOSER_CHECKLIST_YAML = """\
+checklist:
+  - id: cf-impl
+    requirement: implement CashflowReportService groups Transaction by month
+    evidence_target: backend/src/CashflowReportService.cs:GetMonthly
+    status: not_started
+"""
+
+REVIEW_DETAIL = (
+    "the repo exposes AccountsService.GetMonthly and LedgerDbContext "
+    "under backend/src — no reporting module yet"
+)
+
+
+def _in_flight_discovery_status() -> GoalStatus:
+    return GoalStatus(
+        lifecycle="investigating", phase="in_flight",
+        in_flight=InFlight(
+            "devclaw", "review_repository", "t-disc", "task",
+            "analysis brief", is_discovery=True,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_repo_analysis_persisted_at_discovery_settle_and_readable(tmp_path, monkeypatch):
+    """Discovery settle persists the RAW review detail as a goal_docs row
+    (kind repo_analysis), readable long after poll.detail is gone — on the
+    legacy (non-firming) path too, since the write is unconditional."""
+    from devclaw.goal.phases import firming as firming_mod
+
+    monkeypatch.setattr(firming_mod, "FIRMING_ENABLED", False)
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _in_flight_discovery_status())
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail=REVIEW_DETAIL))
+    researcher = FakeClaude("## Current state\ntight brief", role="goal_evaluator")
+
+    out = await _tick(store, "g", FakeClaude(), researcher, engine, RecordingNotifier())
+
+    assert out is Outcome.ADVANCED
+    assert store.load_status("g").lifecycle == "executing"
+    assert store.read_repo_analysis("g") == REVIEW_DETAIL
+
+
+@pytest.mark.asyncio
+async def test_firming_path_decomposer_receives_persisted_repo_digest(tmp_path, monkeypatch):
+    """END TO END on the firming path: discovery settles with a real review
+    detail → the goal lands in firming → firming fires the decomposer — and
+    the decomposer prompt carries the persisted raw analysis as its
+    '## Repo digest' ground truth (it used to receive NOTHING there)."""
+    from devclaw.goal.phases import firming as firming_mod
+
+    monkeypatch.setattr(firming_mod, "FIRMING_ENABLED", True)
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _in_flight_discovery_status())
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail=REVIEW_DETAIL))
+    researcher = FakeClaude("## Current state\ntight brief", role="goal_evaluator")
+
+    out = await _tick(store, "g", FakeClaude(), researcher, engine, RecordingNotifier())
+    assert out is Outcome.ADVANCED
+    assert store.load_status("g").lifecycle == "firming"
+
+    captured: dict = {}
+
+    async def capture_decomposer(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return DECOMPOSER_CHECKLIST_YAML
+
+    registry.register(
+        "firming",
+        FirmingHandler(
+            caller=FakeClaude(DRAFT_FIRMED, role="goal_firming"),
+            decomposer_caller=capture_decomposer,
+        ),
+    )
+    out2 = await _tick(
+        store, "g", FakeClaude(role="goal_planner"), FakeClaude(role="goal_evaluator"),
+        FakeEngine(), RecordingNotifier(),
+    )
+
+    assert out2 is Outcome.ADVANCED
+    assert "## Repo digest" in captured["prompt"]
+    assert REVIEW_DETAIL in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_decomposer_prompt_carries_mechanical_repo_context_on_both_paths(tmp_path, monkeypatch):
+    """BOTH decomposer call sites — legacy _resolve_discovery and the firming
+    path's _fire_decomposer — collect the workspace snapshot, so repo
+    identity (remote, stack markers) is grounded even when the digest is
+    thin. Uses a REAL on-disk .NET/Angular git repo."""
+    from devclaw.goal.phases import firming as firming_mod
+    from devclaw.goal.tick import TickContext
+    from tests.test_firming_handler import _dotnet_angular_workspace
+
+    repo = _dotnet_angular_workspace(tmp_path)
+    captured: dict = {}
+
+    # -- legacy path: decompose_enabled tick, firming disabled ---------------
+    monkeypatch.setattr(firming_mod, "FIRMING_ENABLED", False)
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g", workspace_dir=str(repo))
+    store.save_status("g", _in_flight_discovery_status())
+
+    async def capture_legacy(prompt: str) -> str:
+        captured["legacy"] = prompt
+        return DECOMPOSER_CHECKLIST_YAML
+
+    out = await tick_goal(
+        "g", store=store,
+        engine=FakeEngine(poll_result=PollResult(terminal=True, status="done", detail=REVIEW_DETAIL)),
+        planner_caller=FakeClaude(role="goal_planner"),
+        evaluator_caller=FakeClaude("## Current state\ntight brief", role="goal_evaluator"),
+        notifier=RecordingNotifier(), notify_url="", prepare_ws=fake_prepare,
+        eval_every=99, decompose_enabled=True, decomposer_caller=capture_legacy,
+    )
+    assert out is Outcome.ADVANCED
+    assert "## REPOSITORY CONTEXT (mechanical" in captured["legacy"]
+    assert "cashflow-bench.git" in captured["legacy"]
+
+    # -- firming path: _fire_decomposer off a firmed draft -------------------
+    seed_goal(tmp_path, "g2", workspace_dir=str(repo))
+    store.save_status("g2", GoalStatus(lifecycle="firming"))
+
+    async def capture_firming(prompt: str) -> str:
+        captured["firming"] = prompt
+        return DECOMPOSER_CHECKLIST_YAML
+
+    handler = FirmingHandler(
+        caller=FakeClaude(DRAFT_FIRMED, role="goal_firming"),
+        decomposer_caller=capture_firming,
+    )
+    ctx = TickContext(
+        store=store, engine=FakeEngine(), planner_caller=FakeClaude(),
+        evaluator_caller=FakeClaude(), notifier=RecordingNotifier(),
+        prepare_ws=fake_prepare,
+    )
+    await handler.run("g2", store.load_goal("g2"), store.load_status("g2"), ctx)
+
+    assert "## REPOSITORY CONTEXT (mechanical" in captured["firming"]
+    assert "cashflow-bench.git" in captured["firming"]
+    assert "global.json: file" in captured["firming"]
