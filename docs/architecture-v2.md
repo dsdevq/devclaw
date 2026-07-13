@@ -135,7 +135,7 @@ instead of polling. The real surface (see `devclaw/server/tools.py`):
 ```
 dispatch_task(kind, workspace_dir, goal, …)   → task_id   (kind ∈ implement_feature / fix_bug / review_repository)
 create_goal(goal_id, objective, workspace_dir, done_when, …)   register a durable goal
-get_goal / list_goals / steer_goal / answer_unknowns / cancel_goal   drive a goal
+get_goal / list_goals / steer_goal / resume_goal / answer_unknowns / cancel_goal   drive a goal
 start_program(workspace_dir, goal, …)         → program_id   (decompose into a task DAG)
 get_status(task_id) / list_tasks(…) / get_events(…)           task history + live SSE
 register_project / list_projects / link_goal / …             the control-plane registry
@@ -334,10 +334,11 @@ review run with `DEVCLAW_GOAL_VERIFY_DONE=0` for an artifact-only done eval.)
 
 ### Steer / observe surface
 
-MCP tools `create_goal` / `get_goal` / `list_goals` / `steer_goal` / `evaluate_goal`
-let an operator register a goal, ask what's going on / what direction, correct it, or
-force a direction evaluation on demand — so there is always one thing to talk to for
-a piece of software: *"DevClaw, take care of this project."*
+MCP tools `create_goal` / `get_goal` / `list_goals` / `steer_goal` / `resume_goal` /
+`evaluate_goal` let an operator register a goal, ask what's going on / what direction,
+correct it, resume a blocked one after clearing its blocker, or force a direction
+evaluation on demand — so there is always one thing to talk to for a piece of
+software: *"DevClaw, take care of this project."*
 
 ## What this is NOT
 

@@ -40,3 +40,40 @@ async def test_empty_brief_raises():
 
     with pytest.raises(GoalResearchError):
         await discovery_brief(_goal(), "analysis", caller=caller)
+
+
+@pytest.mark.asyncio
+async def test_repo_context_block_included_when_provided():
+    """A mechanically-collected workspace snapshot rides into the prompt as a
+    REPOSITORY CONTEXT section — the grounding channel for a failed/empty
+    analysis (triage F4 GAP A, 2026-07-13)."""
+    seen = {}
+
+    async def caller(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return "## Current state\nok"
+
+    await discovery_brief(
+        _goal(), "review failed (no analysis captured)", caller=caller,
+        repo_context="git_remote_origin: https://example.com/x.git\nglobal.json: file",
+    )
+    assert "REPOSITORY CONTEXT (facts collected mechanically" in seen["prompt"]
+    assert "global.json: file" in seen["prompt"]
+    assert "https://example.com/x.git" in seen["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_repo_context_section_omitted_when_absent():
+    """Default None → no REPOSITORY CONTEXT section header (existing call
+    sites unaffected); the honesty rules are part of the template regardless."""
+    seen = {}
+
+    async def caller(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return "## Current state\nok"
+
+    await discovery_brief(_goal(), "analysis", caller=caller)
+    assert "REPOSITORY CONTEXT (facts collected mechanically" not in seen["prompt"]
+    # the anti-inference rules hold even without a snapshot:
+    assert "missing or failed" in seen["prompt"]
+    assert "working directory" in seen["prompt"]

@@ -64,8 +64,8 @@ Two properties make the heartbeat cheap and safe, and both are load-bearing:
    state write goes through `GoalStore.transition()` — a compare-and-swap against the
    `LEGAL` table in `goal/transitions.py`. A stale-snapshot write raises
    `TransitionConflict` and is abandoned, not silently clobbered. This is what lets
-   `steer_goal`/`cancel_goal` (from the MCP path) write **concurrently** with the
-   heartbeat without corruption.
+   `steer_goal`/`resume_goal`/`cancel_goal` (from the MCP path) write **concurrently**
+   with the heartbeat without corruption.
 
 Since this tranche, `tick.py` is a thin spine plus five modules that split by
 concern: `tick_context` (primitives), `tick_guards` (watchdog + block-on-corrupt),

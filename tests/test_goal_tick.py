@@ -422,6 +422,134 @@ def test_steer_goal_resets_dispatch_counter_on_blocked(tmp_path):
         db.close()
 
 
+# ---- resume_goal (the recovery verb — F7) -----------------------------------
+
+
+def _resume_service(tmp_path):
+    """A GoalService over the shared StateStore for resume_goal tests — mirrors
+    test_steer_goal_resets_dispatch_counter_on_blocked's construction (status
+    lives in the shared DB since Tranche 1, so tests must read back through the
+    service's OWN store)."""
+    from devclaw.goal.service import GoalConfig, GoalService
+    from devclaw.state_store import StateStore
+    from devclaw.task_queue import TaskQueue
+
+    goals_dir = tmp_path / "goals"
+    db = StateStore(str(tmp_path / "state.db"))
+    cfg = GoalConfig(goals_dir=goals_dir, notify_url="", tick_seconds=900, eval_every=99, verify_done=False)
+    return GoalService(TaskQueue(db), db, config=cfg), db, goals_dir
+
+
+@pytest.mark.asyncio
+async def test_resume_goal_unblocks_without_steering_and_replans_next_tick(tmp_path):
+    """resume_goal is the recovery verb: it must fire UNBLOCK without appending
+    a goal_steering row (a pure "blocker cleared" must never become a planner
+    direction override — that was the F7 gap with steer_goal-as-only-unstick)
+    AND guarantee a re-plan on the very next tick even with a fresh
+    last_plan_at + a long cadence — a bare UNBLOCK would park the goal until
+    cadence (should_plan = work OR cadence_due, and resume adds no work)."""
+    svc, db, goals_dir = _resume_service(tmp_path)
+    try:
+        seed_goal(goals_dir, "g", cadence="30d")
+        store = svc._goal_store
+        store.save_status("g", GoalStatus(
+            phase="blocked", blocked_on="sandbox image missing",
+            actions_dispatched=5, last_plan_at=store.now_iso(),
+        ))
+
+        out = svc.resume_goal("g")
+
+        assert out["resumed"] is True
+        assert out["was_blocked_on"] == "sandbox image missing"
+        saved = store.load_status("g")
+        assert saved.phase == "idle"
+        assert not saved.blocked_on                    # stale block reason cleared
+        assert saved.actions_dispatched == 0           # cap won't re-fire on the first re-plan
+        assert saved.last_plan_at is None              # cadence_due → True on the next tick
+        assert store.unread_steering_rows("g") == []   # NO steering row appended
+
+        planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+        tick_out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+        assert tick_out is Outcome.DISPATCHED          # re-planned despite fresh last_plan_at + 30d cadence
+        assert planner.calls == 1
+        assert "NEW steering" not in planner.last_prompt
+    finally:
+        db.close()
+
+
+def test_resume_goal_noops_legibly_when_not_blocked(tmp_path):
+    """No UNBLOCK edge exists from non-blocked states — resume_goal on an idle
+    goal must no-op with a legible message, never raise IllegalTransition, and
+    leave the status untouched (idempotency: a second resume is a no-op)."""
+    svc, db, goals_dir = _resume_service(tmp_path)
+    try:
+        seed_goal(goals_dir, "g")
+        svc._goal_store.save_status("g", GoalStatus(phase="idle", actions_dispatched=2))
+
+        out = svc.resume_goal("g")
+
+        assert out["resumed"] is False
+        assert "not blocked" in out["message"]
+        saved = svc._goal_store.load_status("g")
+        assert saved.phase == "idle"
+        assert saved.actions_dispatched == 2           # untouched — a true no-op
+        assert svc._goal_store.unread_steering_rows("g") == []
+    finally:
+        db.close()
+
+
+def test_resume_goal_refuses_firming_blocked_and_points_to_answer_unknowns(tmp_path):
+    """A firming-blocked goal waits on owner answers only answer_unknowns can
+    supply — a bare unblock would strand it in FIRMING_IDLE limbo (round-1
+    firming already wrote the draft, so FirmingHandler.can_run stays False and
+    no event ever fires). resume_goal must refuse WITHOUT transitioning."""
+    svc, db, goals_dir = _resume_service(tmp_path)
+    try:
+        seed_goal(goals_dir, "g")
+        svc._goal_store.save_status("g", GoalStatus(
+            phase="blocked", lifecycle="firming", blocked_on="2 unknowns need owner answers",
+        ))
+
+        out = svc.resume_goal("g")
+
+        assert out["resumed"] is False
+        assert "answer_unknowns" in out["message"]
+        saved = svc._goal_store.load_status("g")
+        assert saved.phase == "blocked" and saved.lifecycle == "firming"   # no transition fired
+        assert saved.blocked_on == "2 unknowns need owner answers"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_blocked_goal_costs_zero_cognition_until_resume_goal(tmp_path):
+    """The zero-token guard holds around the new verb: a blocked goal costs 0
+    planner/evaluator calls tick after tick, and only resume_goal reopens the
+    cognition path."""
+    svc, db, goals_dir = _resume_service(tmp_path)
+    try:
+        seed_goal(goals_dir, "g", cadence="30d")
+        store = svc._goal_store
+        store.save_status("g", GoalStatus(
+            phase="blocked", blocked_on="cap hit", last_plan_at=store.now_iso(),
+        ))
+        planner, evaluator, engine, notifier = FakeClaude(ACT), FakeClaude(), FakeEngine(), RecordingNotifier()
+
+        for _ in range(3):
+            out = await _tick(store, "g", planner, evaluator, engine, notifier)
+            assert out is Outcome.IDLE
+        assert planner.calls == 0 and evaluator.calls == 0   # blocked = 0 tokens
+
+        svc.resume_goal("g")
+        out = await _tick(store, "g", planner, evaluator, engine, notifier)
+
+        assert out is Outcome.DISPATCHED
+        assert planner.calls == 1
+    finally:
+        db.close()
+
+
 @pytest.mark.asyncio
 async def test_done_goal_is_skipped(tmp_path):
     store = _store(tmp_path, Clock())

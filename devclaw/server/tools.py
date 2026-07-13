@@ -685,6 +685,26 @@ async def steer_goal(goal_id: str, message: str) -> str:
 
 
 @mcp.tool
+async def resume_goal(goal_id: str) -> str:
+    """Resume a BLOCKED goal whose blocker has been cleared out-of-band — the
+    recovery verb. Fires the goal's existing UNBLOCK transition and forces a
+    re-plan on the next heartbeat tick (poked immediately), re-attempting the
+    SAME contract: no steering is recorded and the objective/done_when/backlog
+    are untouched. This does NOT change direction (use steer_goal for that)
+    and is NOT a field-patch/update tool — nothing about the goal is edited.
+
+    Idempotent: on a goal that is not blocked it no-ops with a message. A goal
+    blocked in FIRMING (awaiting owner answers) is refused — those answers can
+    only come through answer_unknowns."""
+    if not goal_id:
+        raise ToolError("resume_goal requires goal_id")
+    try:
+        return json.dumps(goals.resume_goal(goal_id), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
 async def evaluate_goal(goal_id: str) -> str:
     """Force an on-demand direction evaluation NOW, grounded in the goal's
     artifacts. Reads recent deliveries + log + spec, runs the evaluator, and

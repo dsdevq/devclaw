@@ -29,6 +29,7 @@ See ~/memory/projects/devclaw/chain-map-2026-06-30.md row 9.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from .models import Goal
@@ -57,16 +58,27 @@ class WorldResearchError(RuntimeError):
 def should_fire(goal: Goal) -> bool:
     """Decision rule for whether to fire world-research on this goal.
 
-    v1 rule: from-scratch only. A goal with a ``repo_url`` (or any
-    pre-existing workspace) has an actual codebase to analyze and runs the
-    existing repo-research path instead.
+    v1 rule: from-scratch only — no ``repo_url`` AND no pre-existing checkout.
+    A goal with a ``repo_url``, or a real ``.git`` checkout already sitting in
+    ``workspace_dir`` (the documented ``repo_url=None`` "must pre-exist"
+    config — see :class:`Goal`), has an actual codebase to analyze and runs
+    the existing repo-research path instead. Pure filesystem fact, zero LLM.
+    (Triage F4 GAP B, 2026-07-13: the old repo_url-only rule misrouted real
+    local checkouts to world-research, whose prompt asserts the project does
+    not exist yet — ``review_repository`` was never dispatched and the real
+    code was never analyzed.)
 
     The decision lives here (not in the caller) so the lifecycle layer can
     grow more conditions over time without spreading rules across callers
     — e.g. a future "fire on existing-repo when the planner's first action
     introduces a category the repo doesn't already have" rule lives here.
     """
-    return goal.repo_url is None or not goal.repo_url.strip()
+    if goal.repo_url is not None and goal.repo_url.strip():
+        return False
+    workspace = (goal.workspace_dir or "").strip()
+    if workspace and (Path(workspace) / ".git").exists():
+        return False
+    return True
 
 
 async def world_brief(goal: Goal, spec: str, *, caller: ClaudeCaller) -> str:
