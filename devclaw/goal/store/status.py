@@ -121,6 +121,7 @@ class GoalStatusMixin:
             blocked_on=fm.get("blocked_on") or None,
             blocked_kind=fm.get("blocked_kind", "") or "",
             heal_attempts=int(fm.get("heal_attempts", 0) or 0),
+            next_heal_at=fm.get("next_heal_at") or None,
             next=fm.get("next", "") or "",
             last_plan_at=fm.get("last_plan_at") or None,
             last_tick_at=fm.get("last_tick_at") or None,
@@ -268,7 +269,8 @@ class GoalStatusMixin:
         """Column-only telemetry update — ``last_tick_at`` / ``last_plan_at`` /
         ``last_progress_at`` / ``no_progress_notified`` / ``last_eval_verdict``
         / ``last_eval_at`` / ``last_eval_note`` / ``deliveries_since_eval`` /
-        ``heal_attempts`` ONLY (see :data:`GoalState.STATUS_FIELD_COLUMNS`). NEVER a full-row
+        ``heal_attempts`` / ``next_heal_at`` ONLY (see
+        :data:`GoalState.STATUS_FIELD_COLUMNS`). NEVER a full-row
         rewrite, so it can never be the write that clobbers a concurrent
         phase/lifecycle/in_flight transition — this is the mechanism half of
         the fix .transition()'s CAS is the guard half of: bookkeeping writes
@@ -364,6 +366,7 @@ class GoalStatusMixin:
             "blocked_on": status.blocked_on,
             "blocked_kind": status.blocked_kind,
             "heal_attempts": status.heal_attempts,
+            "next_heal_at": status.next_heal_at,
             "next": status.next,
             "last_plan_at": status.last_plan_at,
             "last_tick_at": status.last_tick_at,

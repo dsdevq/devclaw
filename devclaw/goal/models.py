@@ -156,6 +156,14 @@ class GoalStatus:
     #: lifts a block (steer_goal) and on a productive settle (the same
     #: stability signal that refunds the dispatch cap).
     heal_attempts: int = 0
+    #: ISO ts before which the prep-block auto-heal must NOT recheck the
+    #: remote — its recheck is a git subprocess (unlike the corrupt-doc
+    #: probe, which is free), so it runs on a persisted exponential backoff
+    #: (30min · 2^heal_attempts, capped at 6h; see tick_guards._autoheal_prep).
+    #: ``None`` = due now. Cleared on every heal and on a human unblock;
+    #: between windows a blocked goal stays a zero-subprocess,
+    #: zero-cognition tick.
+    next_heal_at: Optional[str] = None
     #: human note of the intended next step
     next: str = ""
     #: ISO ts of the last time the plan step (LLM) ran

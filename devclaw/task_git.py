@@ -145,6 +145,31 @@ def _git_head_sync(host_dir: str) -> str:
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
+def _ls_remote_ok_sync(repo_url: str) -> bool:
+    """Is ``repo_url`` reachable right now? One blocking ``git ls-remote``
+    (refs listing only — no clone, no checkout), the cheapest end-to-end
+    reachability probe git offers: it exercises DNS + auth + repo existence,
+    the exact failure surface ``prepare_workspace``'s clone/fetch dies on.
+    Used by the goal tick's prep-block auto-heal recheck.
+
+    Blocking subprocess.run with a short timeout — same child-watcher
+    rationale as :func:`_git_diff_sync`; the tick offloads it to a thread.
+    ``GIT_TERMINAL_PROMPT=0`` forces a credential prompt (private/nonexistent
+    https repo on a headless host) to fail fast instead of hanging to the
+    timeout. Strictly best-effort: NEVER raises — any failure (timeout, git
+    missing, non-zero exit) reads as "still unreachable" and the caller's
+    backoff continues."""
+    try:
+        p = subprocess.run(
+            ["git", "ls-remote", "--heads", repo_url],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
 def _wip_snapshot_sync(host_dir: str, task_id: str) -> str:
     """Commit the interrupted attempt's uncommitted work as a WIP snapshot
     before a usage-limit requeue. The workspace survives the requeue untouched

@@ -10,7 +10,10 @@ from tick.py.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from dataclasses import replace
+from datetime import datetime, timedelta
 
 from .tick_context import NotifyLevel, Outcome, TickContext, _notify
 from .engine import GoalEngineError
@@ -20,6 +23,7 @@ from .planner import ClaudeCaller
 from .store import GoalDocCorrupt, GoalStore
 from .transitions import Event
 from ..engine.workspace import WorkspaceError
+from ..task_git import _ls_remote_ok_sync
 
 
 def _progress_window_active(status: GoalStatus) -> bool:
@@ -243,39 +247,141 @@ async def _autoheal_corrupt_doc(
         # sentinel bump below) — stay blocked, zero cost, until a human lifts it.
         return None
     if status.heal_attempts >= CORRUPT_DOC_HEAL_CAP:
-        # Cap reached: park. Mark FIRST (column-only write — the goal stays
-        # blocked, so this must not be a phase transition), then log + one
-        # plain owner ping.
-        store.update_status_fields(goal_id, heal_attempts=CORRUPT_DOC_HEAL_CAP + 1)
-        store.append_log(
-            goal_id,
-            f"auto-recovery gave up after {CORRUPT_DOC_HEAL_CAP} attempts — "
-            "the contract file keeps flapping between corrupt and fixed; needs you",
-        )
-        await _notify(
-            notifier, NotifyLevel.OWNER,
-            f"🟡 [{goal_id}] auto-recovery gave up after {CORRUPT_DOC_HEAL_CAP} attempts — "
-            "the goal contract file keeps re-corrupting after each fix; needs you (steer to resume)",
+        await _heal_give_up(
+            goal_id, store=store, notifier=notifier, cap=CORRUPT_DOC_HEAL_CAP,
+            reason="the contract file keeps re-corrupting after each fix",
         )
         return None
     n = status.heal_attempts + 1
-    # A preserved in-flight ref (corrupt-doc blocks keep it — see
-    # _block_on_corrupt_doc) goes back to its polling phase so it settles
-    # normally; otherwise idle, ready to re-plan.
-    if status.in_flight is not None:
-        restored_phase = "verifying" if status.in_flight.is_done_check else "in_flight"
-    else:
-        restored_phase = "idle"
-    healed = store.transition(
-        goal_id, Event.UNBLOCK,
-        replace(
-            status, phase=restored_phase, blocked_on="",
-            actions_dispatched=0, last_plan_at=None, heal_attempts=n,
-        ),
-        expect=status,
-    )
+    healed = _heal_unblock(goal_id, status, store, heal_attempts=n)
     store.append_log(
         goal_id,
         f"auto-resumed: contract file parses again (heal {n}/{CORRUPT_DOC_HEAL_CAP})",
     )
     return healed
+
+
+#: Prep-heal budget. Larger than the corrupt-doc cap on purpose: a transient
+#: remote outage (GitHub incident, DNS blip) legitimately takes several
+#: backoff windows to clear, while a contract file that keeps re-corrupting
+#: after 3 fixes is somebody actively fighting the store.
+PREP_HEAL_CAP = 5
+
+#: Exponential backoff for the prep recheck: 30min · 2^heal_attempts, capped.
+#: The corrupt-doc recheck is FREE (the tick's contract probe runs anyway);
+#: this one is a git subprocess, so between windows a blocked goal must stay
+#: a zero-subprocess tick — the persisted ``next_heal_at`` window enforces it.
+PREP_BACKOFF_BASE_S = 30 * 60
+PREP_BACKOFF_MAX_S = 6 * 3600
+
+
+async def _prep_recheck_ok(goal: Goal) -> bool:
+    """The mechanical prep recheck — no LLM, best-effort, never raises.
+
+    With a ``repo_url``: one ``git ls-remote`` (offloaded to a thread — it can
+    block up to its 10s timeout) probing the exact surface prepare_workspace's
+    clone/fetch fails on. Without one (pre-existing-workspace config, where
+    prep only resets the checkout): does ``<workspace_dir>/.git`` exist —
+    a stat, no subprocess."""
+    if not goal.repo_url:
+        return os.path.isdir(os.path.join(goal.workspace_dir, ".git"))
+    return await asyncio.to_thread(_ls_remote_ok_sync, goal.repo_url)
+
+
+async def _autoheal_prep(
+    goal_id: str, goal: Goal, status: GoalStatus,
+    *, store: GoalStore, notifier: Notifier,
+) -> "GoalStatus | None":
+    """Mechanically lift a ``mechanical:prep`` block once the repo is reachable
+    again — the sibling of :func:`_autoheal_corrupt_doc` (same scope rules,
+    same damping contract, same plain-ping-only-on-give-up notification
+    policy; see its docstring), with one difference: the recheck COSTS a git
+    subprocess, so it runs on a persisted exponential backoff instead of every
+    tick. ``next_heal_at`` gates it — before that instant the tick returns
+    immediately (zero subprocess, zero cognition); a FAILED recheck pushes the
+    window out (30min · 2^attempts, capped at 6h) and spends one attempt.
+
+    A successful recheck fires the same resume-shaped UNBLOCK as the
+    corrupt-doc heal: the next dispatch runs the REAL prepare_ws — ls-remote
+    proves reachability, not that the clone will succeed — and if prep still
+    fails it re-blocks loudly and the backoff continues where it left off
+    (``heal_attempts`` persists across the heal; only a human unblock or a
+    productive settle resets it).
+
+    Returns the healed status, or ``None`` (parked / window not open /
+    still unreachable)."""
+    if status.heal_attempts > PREP_HEAL_CAP:
+        return None  # parked — the gave-up ping already went out
+    if status.heal_attempts >= PREP_HEAL_CAP:
+        await _heal_give_up(
+            goal_id, store=store, notifier=notifier, cap=PREP_HEAL_CAP,
+            reason="the workspace still can't be prepared",
+        )
+        return None
+    # Backoff window: no recheck — not even the subprocess — before it opens.
+    remaining = store.seconds_since(status.next_heal_at)
+    if status.next_heal_at and remaining is not None and remaining < 0:
+        return None
+    if not await _prep_recheck_ok(goal):
+        backoff_s = min(PREP_BACKOFF_MAX_S, PREP_BACKOFF_BASE_S * (2 ** status.heal_attempts))
+        next_at = (
+            datetime.fromisoformat(store.now_iso()) + timedelta(seconds=backoff_s)
+        ).isoformat(timespec="seconds")
+        n = status.heal_attempts + 1
+        store.update_status_fields(goal_id, heal_attempts=n, next_heal_at=next_at)
+        store.append_log(
+            goal_id,
+            f"prep recheck: repo still unreachable (attempt {n}/{PREP_HEAL_CAP}) — "
+            f"next recheck at {next_at}",
+        )
+        return None
+    n = status.heal_attempts + 1
+    healed = _heal_unblock(goal_id, status, store, heal_attempts=n)
+    store.append_log(
+        goal_id,
+        f"auto-resumed: repo reachable again (heal {n}/{PREP_HEAL_CAP}) — "
+        "next dispatch retries the real workspace prep",
+    )
+    return healed
+
+
+def _heal_unblock(
+    goal_id: str, status: GoalStatus, store: GoalStore, *, heal_attempts: int,
+) -> GoalStatus:
+    """The shared resume-shaped UNBLOCK write both mechanical heals fire:
+    actions + plan cadence reset so the tick actually re-plans, the backoff
+    window cleared, and a preserved in-flight ref (corrupt-doc blocks keep it
+    — see :func:`_block_on_corrupt_doc`) restored to its polling phase so it
+    settles normally instead of being orphaned."""
+    if status.in_flight is not None:
+        restored_phase = "verifying" if status.in_flight.is_done_check else "in_flight"
+    else:
+        restored_phase = "idle"
+    return store.transition(
+        goal_id, Event.UNBLOCK,
+        replace(
+            status, phase=restored_phase, blocked_on="",
+            actions_dispatched=0, last_plan_at=None,
+            heal_attempts=heal_attempts, next_heal_at=None,
+        ),
+        expect=status,
+    )
+
+
+async def _heal_give_up(
+    goal_id: str, *, store: GoalStore, notifier: Notifier, cap: int, reason: str,
+) -> None:
+    """Park a mechanical block whose heal budget is spent: mark FIRST (the
+    sentinel bump one past the cap — a column-only write, the goal stays
+    blocked, so this must not be a phase transition; it is what keeps the
+    ping to exactly one, the pause_notified pattern), then log, then ONE
+    plain owner ping — never through the summarizer LLM."""
+    store.update_status_fields(goal_id, heal_attempts=cap + 1)
+    store.append_log(
+        goal_id, f"auto-recovery gave up after {cap} attempts — {reason}; needs you",
+    )
+    await _notify(
+        notifier, NotifyLevel.OWNER,
+        f"🟡 [{goal_id}] auto-recovery gave up after {cap} attempts — "
+        f"{reason}; needs you (steer to resume)",
+    )

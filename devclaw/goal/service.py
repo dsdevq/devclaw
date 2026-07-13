@@ -632,13 +632,15 @@ class GoalService:
         # practically unreachable since nothing awaits between them.
         s = self._goal_store.load_status(goal_id)
         if s.phase == "blocked":
-            # heal_attempts=0: a HUMAN lifting the block restores the full
-            # mechanical auto-heal budget (see tick_guards._autoheal_corrupt_doc)
-            # — the damping cap protects against unattended flapping, and the
-            # owner just attended.
+            # heal_attempts=0 / next_heal_at=None: a HUMAN lifting the block
+            # restores the full mechanical auto-heal budget and clears the
+            # prep-recheck backoff window (see tick_guards._autoheal_corrupt_doc
+            # / _autoheal_prep) — the damping cap protects against unattended
+            # flapping, and the owner just attended.
             self._goal_store.transition(
                 goal_id, Event.UNBLOCK,
-                replace(s, phase="idle", actions_dispatched=0, heal_attempts=0),
+                replace(s, phase="idle", actions_dispatched=0,
+                        heal_attempts=0, next_heal_at=None),
                 expect=s,
             )
         self.poke()
