@@ -18,13 +18,15 @@ from devclaw.goal.world_research import (
 )
 
 
-def _goal(repo_url: str | None = None, done_when: str = "") -> Goal:
+def _goal(
+    repo_url: str | None = None, done_when: str = "", workspace_dir: str = "/tmp/x",
+) -> Goal:
     return Goal(
         id="g",
         objective="Build a minimal CRM for one user.",
         cadence="1d",
         engine="openhands",
-        workspace_dir="/tmp/x",
+        workspace_dir=workspace_dir,
         repo_url=repo_url,
         verify_cmd=None,
         open_pr=True,
@@ -53,6 +55,21 @@ def test_skips_for_existing_repo():
     """Existing-repo goals run the existing repo-research path; firing
     world-research on them would burn quota for no added grounding."""
     assert should_fire(_goal(repo_url="https://github.com/x/y.git")) is False
+
+
+def test_fires_for_from_scratch_workspace_without_checkout(tmp_path):
+    """An existing but EMPTY workspace dir (no ``.git``) is still from-scratch
+    — the workspace check must not over-trigger on a mere directory."""
+    assert should_fire(_goal(repo_url=None, workspace_dir=str(tmp_path))) is True
+
+
+def test_skips_when_workspace_checkout_pre_exists(tmp_path):
+    """``repo_url=None`` + a real ``.git`` in ``workspace_dir`` (the documented
+    "None → must pre-exist" config) is an EXISTING-repo goal: repo-research,
+    not world-research — the world prompt asserts the project does not exist
+    yet (triage F4 GAP B, 2026-07-13)."""
+    (tmp_path / ".git").mkdir()
+    assert should_fire(_goal(repo_url=None, workspace_dir=str(tmp_path))) is False
 
 
 # ---- world_brief cognition wiring ------------------------------------------
