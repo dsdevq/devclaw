@@ -50,7 +50,12 @@ from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 # Leaf concerns split out of this module. The git ``_sync`` helpers are re-exported
 # here because tests import them from ``task_queue`` and patch ``_wip_snapshot_sync``
 # on this namespace; the async wrappers below look them up as module globals.
-from .task_git import _git_diff_sync, _git_head_sync, _wip_snapshot_sync  # noqa: F401
+from .task_git import (  # noqa: F401
+    _git_diff_sync,
+    _git_head_sync,
+    _review_repo_context_sync,
+    _wip_snapshot_sync,
+)
 from .task_notify import _NotifyMixin
 
 NOTIFY_BACKOFF_MS = (1000, 2000, 4000)
@@ -147,6 +152,13 @@ async def _git_head(host_dir: str) -> str:
 async def _wip_snapshot(host_dir: str, task_id: str) -> str:
     """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
     return await asyncio.to_thread(_wip_snapshot_sync, host_dir, task_id)
+
+
+async def _review_repo_context(host_dir: str) -> str:
+    """Async wrapper — same thread-offload rationale as :func:`_git_diff`. Looks
+    up :func:`_review_repo_context_sync` as a module global so tests can patch it
+    here."""
+    return await asyncio.to_thread(_review_repo_context_sync, host_dir)
 
 
 def _integrity_failure(diff: str) -> Optional[str]:
@@ -1108,8 +1120,17 @@ class TaskQueue(_NotifyMixin):
             return None
         if not diff.strip():
             return None
+        # Ground the reviewer in the ACTUAL task workspace so it judges the real
+        # repo, not the control-plane repo host-side claude was launched from
+        # (live-found 2026-07-13: a lone ci.yml diff on the .NET/Angular
+        # closeloop-bench got reviewed as if it were devclaw's Python/React repo).
+        # Best-effort and collected OUTSIDE the try: it never raises, so a git
+        # hiccup gathering context can't trip the fail-closed reviewer path below.
+        repo_context = await _review_repo_context(workspace_dir)
         try:
-            review = await self._reviewer(goal=goal, kind=kind, diff=diff)
+            review = await self._reviewer(
+                goal=goal, kind=kind, diff=diff, repo_context=repo_context
+            )
         except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
             sys.stderr.write(f"task-queue: {_REVIEW_CRASH_MARKER} {err}\n")
             return (

@@ -13,7 +13,81 @@ their module-global lookup of these names stays patchable there.
 
 from __future__ import annotations
 
+import os
 import subprocess
+
+#: Generic manifest / entrypoint files worth grounding the reviewer on — one per
+#: common ecosystem (Python, Node, .NET, Go, Rust, Java) plus the repo's own
+#: convention docs and a verify entrypoint. Deliberately NOT tuned to any single
+#: target repo: the point is to tell the reviewer WHICH stack it is looking at,
+#: and the ``tracked_top_level`` listing covers anything these miss.
+_REPO_CONTEXT_PROBES = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "scripts/verify.sh",
+    "Makefile",
+    "pyproject.toml",
+    "setup.py",
+    "package.json",
+    "global.json",
+    "go.mod",
+    "Cargo.toml",
+    "pom.xml",
+    "build.gradle",
+)
+
+
+def _run_git_context(host_dir: str, *args: str) -> str:
+    """One best-effort ``git -C host_dir <args>`` → trimmed stdout, or a short
+    ``<...>`` marker on any failure. Never raises — same best-effort contract as
+    the diff/head helpers, so a git hiccup while gathering review context can
+    never fail a task."""
+    try:
+        p = subprocess.run(
+            ["git", "-C", host_dir, *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"<git error: {exc.__class__.__name__}>"
+    if p.returncode != 0:
+        return f"<git exited {p.returncode}>"
+    return (p.stdout or "").strip()
+
+
+def _review_repo_context_sync(host_dir: str) -> str:
+    """A small, grounded snapshot of the task's ACTUAL repo for the host-side
+    review gate. The reviewer sees only the ticket + diff, never the sandbox
+    filesystem; for a tiny diff (e.g. a lone CI YAML) it otherwise has no way to
+    know which repo it is judging and can substitute the control-plane repo that
+    host-side ``claude`` was launched from. These facts — remote, branch, head,
+    key-file presence, tracked top-level layout — anchor it to the real
+    workspace.
+
+    Strictly best-effort like the rest of this module: any failure degrades to a
+    partial or omitted line and it NEVER raises, so it cannot fail a task closed
+    through the reviewer's fail-closed path."""
+    if not os.path.isdir(host_dir):
+        return f"workspace_dir: {host_dir} (not present)"
+    facts = [
+        f"workspace_dir: {host_dir}",
+        f"git_remote_origin: {_run_git_context(host_dir, 'remote', 'get-url', 'origin')}",
+        f"git_branch: {_run_git_context(host_dir, 'branch', '--show-current')}",
+        f"git_head: {_run_git_context(host_dir, 'log', '-1', '--oneline')}",
+    ]
+    for rel in _REPO_CONTEXT_PROBES:
+        try:
+            path = os.path.join(host_dir, rel)
+            kind = "dir" if os.path.isdir(path) else "file" if os.path.isfile(path) else "missing"
+        except (OSError, TypeError):
+            kind = "unknown"
+        facts.append(f"{rel}: {kind}")
+    files = _run_git_context(host_dir, "ls-files")
+    if files and not files.startswith("<"):
+        top = sorted({line.split("/", 1)[0] for line in files.splitlines() if line.strip()})
+        if top:
+            facts.append("tracked_top_level: " + ", ".join(top[:40]))
+    return "\n".join(facts)
 
 
 def _git_diff_sync(host_dir: str, base: str = "") -> str:
