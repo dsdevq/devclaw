@@ -95,6 +95,31 @@ class Clock:
         self.t = self.t + timedelta(seconds=seconds)
 
 
+def seed_marker_repo(base_dir):
+    """A real on-disk git repo with .NET/Angular markers (the closeloop-bench
+    shape — cf. test_review_gate.py's grounding regression) so a repo-context
+    snapshot collected from it carries real probe lines (``global.json: file``,
+    ``pyproject.toml: missing``, a ``frontend`` top-level dir). Returns the
+    repo path — pass it as ``seed_goal(..., workspace_dir=str(repo))``."""
+    import subprocess
+
+    repo = base_dir / "marker-repo"
+    repo.mkdir(parents=True)
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+    _git("init", "-q", "-b", "main")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    (repo / "global.json").write_text('{"sdk": {"version": "9.0.315"}}\n')
+    (repo / "frontend").mkdir()
+    (repo / "frontend" / "angular.json").write_text("{}\n")
+    _git("add", "-A")
+    _git("commit", "-q", "-m", "init")
+    return repo
+
+
 def seed_goal(
     goals_dir, goal_id: str = "demo", *, cadence: str = "1d", backlog: list[str] | None = None,
     repo_url: str | None = "https://example.com/demo.git",

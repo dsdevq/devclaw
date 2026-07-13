@@ -15,7 +15,7 @@ from devclaw.goal.models import GoalStatus
 from devclaw.goal.service import GoalConfig, GoalService
 from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
-from tests.goal_fakes import FakeClaude, seed_goal
+from tests.goal_fakes import FakeClaude, seed_goal, seed_marker_repo
 
 
 @pytest.fixture()
@@ -90,6 +90,54 @@ async def test_evaluate_goal_unknown_id_raises(tmp_path, db):
     svc, _ = _svc(tmp_path, db)
     with pytest.raises(KeyError):
         await svc.evaluate_goal("nonexistent-goal")
+
+
+@pytest.mark.asyncio
+async def test_on_demand_evaluate_passes_spec_and_repo_context(tmp_path, db):
+    """service.evaluate_goal used to omit BOTH the agreed spec and any repo
+    grounding — the tick path passed ``spec=`` while the on-demand path judged
+    direction without the contract, and neither carried first-hand repo facts
+    (triage F3 gaps 2+3). Both now reach the prompt."""
+    svc, goals_dir = _svc(tmp_path, db)
+    repo = seed_marker_repo(tmp_path)
+    seed_goal(goals_dir, "g", workspace_dir=str(repo))
+    svc._goal_store.save_status("g", GoalStatus(phase="executing"))
+    svc._goal_store.write_spec("g", "SPEC-MARKER: only the flux capacitor is in scope")
+
+    caller = FakeClaude(json.dumps({"verdict": "on_track", "rationale": "ok"}), role="evaluator")
+    svc._evaluator_caller = caller
+
+    result = await svc.evaluate_goal("g")
+
+    assert result["verdict"] == "on_track"
+    prompt = caller.last_prompt
+    assert "## Agreed spec" in prompt and "SPEC-MARKER" in prompt
+    assert "## Repository context" in prompt
+    assert "global.json: file" in prompt   # a real probe line from the ACTUAL workspace
+
+
+@pytest.mark.asyncio
+async def test_evaluator_snapshot_is_best_effort_never_fatal(tmp_path, db, monkeypatch):
+    """A crash collecting the workspace snapshot degrades to an ungrounded
+    prompt (the section is omitted) — it must NEVER fail the evaluation. Same
+    best-effort contract as the review gate's collector (#227). Patched on the
+    evaluator module, where the async wrapper looks it up as a module global."""
+    from devclaw.goal import evaluator as goal_evaluator
+
+    def _boom(workspace_dir):
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr(goal_evaluator, "_review_repo_context_sync", _boom)
+    svc, goals_dir = _svc(tmp_path, db)
+    seed_goal(goals_dir, "g")
+    svc._goal_store.save_status("g", GoalStatus(phase="executing"))
+    caller = FakeClaude(json.dumps({"verdict": "on_track", "rationale": "ok"}), role="evaluator")
+    svc._evaluator_caller = caller
+
+    result = await svc.evaluate_goal("g")
+
+    assert result["verdict"] == "on_track"
+    assert "## Repository context" not in caller.last_prompt   # empty → omitted, not fatal
 
 
 @pytest.mark.asyncio

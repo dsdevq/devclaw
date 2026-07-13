@@ -26,12 +26,18 @@ The verdict drives the loop, it doesn't just report:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 from typing import Awaitable, Callable, Optional
 
 from .models import ClauseVerdict, EvalResult, Goal, GoalStatus, is_standing
+
+# The review gate's workspace-snapshot collector (#227), reused to ground the
+# evaluator. Imported as a module global so tests patch it on THIS module —
+# same convention as task_queue's re-export of the git ``_sync`` helpers.
+from ..task_git import _review_repo_context_sync  # noqa: F401
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
 
@@ -48,6 +54,27 @@ class GoalEvalError(Exception):
     def __init__(self, message: str, raw: str | None = None) -> None:
         super().__init__(message)
         self.raw = raw
+
+
+async def _repo_context(workspace_dir: str) -> str:
+    """A small grounded snapshot of the goal's ACTUAL workspace — remote,
+    branch, head, key-file presence, tracked top-level layout — for the
+    evaluator prompt. Without it the evaluator has zero first-hand repo facts
+    on the artifact-only done path and on mid-flight/on-demand evals, and can
+    substitute the control-plane repo host-side ``claude`` was launched from
+    (the review-gate sibling of this bug shipped as #227).
+
+    Same async-wrapper convention as ``task_queue._git_diff``: the blocking
+    collector runs in a thread, and ``_review_repo_context_sync`` is looked up
+    as a module global so tests patch it here. Strictly best-effort — returns
+    ``''`` on any hiccup and NEVER raises: grounding is a bonus; a git wobble
+    must not fail an evaluation (or the done-gate riding on it)."""
+    if not workspace_dir:
+        return ""
+    try:
+        return await asyncio.to_thread(_review_repo_context_sync, workspace_dir)
+    except Exception:  # noqa: BLE001 — best-effort by contract (see docstring)
+        return ""
 
 
 #: Headroom for the review report inside the evaluator prompt. The worker's
@@ -95,6 +122,7 @@ def build_prompt(
     review_report: Optional[str] = None,
     at_done_gate: bool = False,
     spec: str = "",
+    repo_context: Optional[str] = None,
 ) -> str:
     from ..prompts import load_prompt
 
@@ -162,6 +190,12 @@ def build_prompt(
                 "validator converts a stray ``achieved`` to ``needs_human`` — "
                 "don't invite it.)"
             )
+    if repo_context and repo_context.strip():
+        parts += [
+            "\n## Repository context (facts from the actual workspace — the "
+            "source of truth for repo identity and which files exist)",
+            repo_context.strip(),
+        ]
     parts += [
         "\n## What has actually shipped (grounded deliveries)",
         deliveries or "(nothing delivered yet)",
@@ -520,14 +554,17 @@ async def evaluate(
     review_report: Optional[str] = None,
     at_done_gate: bool = False,
     spec: str = "",
+    repo_context: Optional[str] = None,
 ) -> EvalResult:
     """Run the direction evaluation. ``claude_caller`` is injected so tests stub
     the LLM. Pass ``review_report`` + ``at_done_gate`` when judging a done proposal;
     ``spec`` (the waiter-provided scope contract) when one exists, so done is
-    judged against it."""
+    judged against it; ``repo_context`` (the :func:`_repo_context` workspace
+    snapshot) so repo identity is first-hand, never inferred."""
     prompt = build_prompt(
         goal, status, recent_log, deliveries,
         review_report=review_report, at_done_gate=at_done_gate, spec=spec,
+        repo_context=repo_context,
     )
     raw = await claude_caller(prompt)
     try:

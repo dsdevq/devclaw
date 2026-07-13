@@ -139,6 +139,27 @@ def test_done_gate_prompt_includes_spec_when_present():
     assert "Agreed spec" in prompt and "/ready" in prompt
 
 
+def test_evaluator_prompt_carries_anti_inference_clause():
+    """The grounding rule (review-gate.md's shape, #227) lives in the BASE
+    prompt — present on EVERY path, not just the done-gate: mid-flight and
+    on-demand evals write "corrections" into steering, and a wrong-stack
+    inference there becomes wasted tasks or a false stalled/needs_human block
+    (triage F3). The rendered `## Repository context` section carries the
+    first-hand facts; absent/empty context omits the section, never fakes it."""
+    plain = build_prompt(_goal(), GoalStatus(), "log", "deliveries")
+    gate = build_prompt(
+        _goal(), GoalStatus(), "log", "deliveries",
+        review_report="repo has /health", at_done_gate=True,
+        repo_context="workspace_dir: /ws\nglobal.json: file",
+    )
+    for prompt in (plain, gate):
+        assert "Do NOT infer repository facts" in prompt
+        assert "UNKNOWN" in prompt
+    assert "## Repository context" in gate
+    assert "global.json: file" in gate
+    assert "## Repository context" not in plain   # no snapshot → section omitted
+
+
 # ---- per-clause evidence contract (the 2026-06-25 trash-PR safety net) ----
 
 

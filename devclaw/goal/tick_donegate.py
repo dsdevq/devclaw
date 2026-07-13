@@ -232,11 +232,18 @@ async def _resolve_done_gate(
     sandbox gate was green and nothing ever looked at the repo's actual
     checks. ``unknown`` / ``no_workflows`` do NOT block (fail-open on infra
     uncertainty, fail-closed on evidence of a problem) but are logged."""
+    # Ground the evaluator in the goal's ACTUAL workspace (triage F3, the
+    # evaluator sibling of #227): on the verify_done=False fallthrough
+    # review_report is empty and the prompt otherwise carries ZERO first-hand
+    # repo facts. Best-effort and collected OUTSIDE the try — it never raises,
+    # so a git hiccup can't read as an eval error. No zero-token concern: this
+    # path already runs cognition; the git subprocess adds no LLM call.
+    repo_context = await _evaluator._repo_context(goal.workspace_dir)
     try:
         ev = await _evaluator.evaluate(
             goal, status, store.recent_log(goal_id), store.recent_deliveries(goal_id),
             claude_caller=evaluator_caller, review_report=review_report, at_done_gate=True,
-            spec=store.read_spec(goal_id),
+            spec=store.read_spec(goal_id), repo_context=repo_context,
         )
     except _evaluator.GoalEvalError as exc:
         store.append_log(goal_id, f"done-gate eval error: {exc}")
@@ -318,7 +325,16 @@ async def _resolve_done_gate(
         # closed ticket. Best-effort deploy the built app to a durable Tailscale URL.
         # NEVER let a deploy hiccup undo a verified-complete goal — the goal IS done.
         live = await _auto_deploy(goal_id, goal, store, enabled=autodeploy)
-        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] goal complete (verified) — {ev.rationale[:200]}{live}", summarize=summarize)
+        # Honest labeling (F3): "(verified)" is earned by a repo review that
+        # actually grounded the decision. On the verify_done=False fallthrough
+        # no review ran — same close, annotated honestly (cf. the ci-gate
+        # flexible annotation above); which verdicts close is unchanged.
+        label = (
+            "goal complete (verified)" if review_report.strip()
+            else "goal complete (artifact-only close — no repo review ran; "
+                 "verify_done is off for this project)"
+        )
+        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] {label} — {ev.rationale[:200]}{live}", summarize=summarize)
         return Outcome.DONE
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"

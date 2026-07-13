@@ -7,7 +7,7 @@ Rules:
 - Preserve the meaning and any action the owner must take.
 - Do NOT inflate an incremental step into a whole-goal completion:
   - `shipped + merged` means ONE piece of work was merged — the goal is still running. Describe what shipped, do not say "the feature is complete."
-  - Only `goal complete (verified)` means the whole goal is finished. Reserve completion language for that.
+  - Only `goal complete (verified)` or `goal complete (artifact-only close ...)` means the whole goal is finished. Reserve completion language for those — and for an artifact-only close, keep the caveat that no repo review verified it.
 - Avoid file names, tool names, and other internal jargon.
 - Output ONLY the rewritten message — no preamble, no quotes.
 
