@@ -144,7 +144,19 @@ LEGAL: dict[tuple[State, Event], frozenset[State]] = {
     (State.VERIFYING, Event.DONE_GATE_SETTLED): frozenset({State.EXECUTING_IDLE}),
     (State.VERIFYING, Event.BLOCK): frozenset({State.BLOCKED}),
     (State.VERIFYING, Event.CANCEL): frozenset({State.CANCELLED}),
-    (State.BLOCKED, Event.UNBLOCK): frozenset({State.EXECUTING_IDLE}),
+    # UNBLOCK may land back on an in-flight/verifying/discovery state, not just
+    # EXECUTING_IDLE: the corrupt-doc block deliberately PRESERVES a running
+    # in_flight ref (see tick_guards._block_on_corrupt_doc), so any unblock of
+    # such a goal — the F8 auto-heal, or a steer_goal on it — restores the ref
+    # to its polling state instead of orphaning it.
+    (State.BLOCKED, Event.UNBLOCK): frozenset(
+        {
+            State.EXECUTING_IDLE,
+            State.ACTION_IN_FLIGHT,
+            State.VERIFYING,
+            State.DISCOVERY_IN_FLIGHT,
+        }
+    ),
     (State.BLOCKED, Event.DISPATCH_ACTION): frozenset({State.ACTION_IN_FLIGHT}),
     (State.BLOCKED, Event.OPEN_DONE_GATE): frozenset({State.VERIFYING}),
     (State.BLOCKED, Event.RESUME_IDLE): frozenset({State.EXECUTING_IDLE}),

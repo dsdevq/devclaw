@@ -354,6 +354,13 @@ async def _resolve_polling_action(
         status, in_flight=None, phase="idle",
         deliveries_since_eval=status.deliveries_since_eval + delivered,
         actions_dispatched=max(0, status.actions_dispatched - productive),
+        # A productive settle also earns the mechanical auto-heal budget back
+        # (tick_guards._autoheal_corrupt_doc) — the SAME stability signal as
+        # the cap refund above, riding the same ACTION_SETTLED write (no extra
+        # write, atomic with the settle): a goal that ships real work again is
+        # stable, so a later mechanical block starts with a fresh heal budget
+        # instead of a stale flap count from a long-resolved incident.
+        heal_attempts=(0 if productive else status.heal_attempts),
         # a delivery is forward progress → reset the no-progress watchdog.
         last_progress_at=(ctx.store.now_iso() if delivered else status.last_progress_at),
         no_progress_notified=(False if delivered else status.no_progress_notified),

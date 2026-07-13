@@ -123,7 +123,9 @@ async def _block_on_corrupt_doc(
     the blocked-guard once it can tick again. A repeat tick on the SAME
     corruption idles quietly (no log spam, no re-ping) — this handler runs
     before the blocked-guard can gate it, so it dedupes on ``blocked_on``
-    itself. Recovery: fix (or delete) the file, then steer."""
+    itself. Recovery: fix (or delete) the file — the next tick's contract
+    probe auto-heals the block mechanically (:func:`_autoheal_corrupt_doc`,
+    damped by ``heal_attempts``) — or steer."""
     msg = str(exc)
     if status.phase == "blocked" and status.blocked_on == msg:
         store.update_status_fields(goal_id, last_tick_at=store.now_iso())
@@ -166,7 +168,16 @@ async def _block_on_lost_ref(
     — a fresh dispatch that silently contradicts the "paused; steer me" ping
     the owner just received. Catches :class:`GoalEngineError` ONLY — a real
     bug must still surface through the catch-all, not be absorbed as a lost
-    ref."""
+    ref.
+
+    DELIBERATELY HUMAN-GATED — never auto-healed. Unlike a corrupt doc (the
+    file can parse again) or a prep failure (the remote can come back), this
+    block is structurally unhealable by mechanism: ``in_flight`` is destroyed
+    right here at block time (the ``in_flight=None`` below), so the lost id
+    survives only in the ``blocked_on`` prose — there is nothing machine-
+    readable left for a recheck to re-poll, and re-attaching from prose would
+    be exactly the string-matching ``blocked_kind`` exists to forbid. The
+    owner decides how to proceed (typically steer_goal to re-plan)."""
     ref = status.in_flight
     msg = f"lost in-flight {ref.ref_kind} {ref.id} — {exc}"
     ctx.store.append_log(goal_id, f"poll failed — blocking for the owner: {msg}")
@@ -185,3 +196,86 @@ async def _block_on_lost_ref(
         summarize=ctx.summary_caller,
     )
     return Outcome.BLOCKED
+
+
+#: Max mechanical auto-heals for one goal before the loop hands the block back
+#: to a human. Damping is MANDATORY, not a nicety: the quota pause's auto-resume
+#: (tick_all) needed none because its heal signal is monotone (time only moves
+#: forward), but a mechanical condition can FLAP — block → heal → re-block —
+#: and an undamped heal would convert the zero-token blocked steady-state into
+#: a planner call (+ a block ping) per cycle. Past the cap the goal stays
+#: blocked at zero cost until a human lifts it (steer_goal), which restores the
+#: budget; a productive settle also earns it back (see tick_settle).
+CORRUPT_DOC_HEAL_CAP = 3
+
+
+async def _autoheal_corrupt_doc(
+    goal_id: str, status: GoalStatus,
+    *, store: GoalStore, notifier: Notifier,
+) -> "GoalStatus | None":
+    """Mechanically lift a ``mechanical:corrupt_doc`` block whose condition no
+    longer holds. The caller (the tick's contract-file choke point) has JUST
+    re-parsed the contract docs successfully — that probe runs every tick
+    anyway, so the recheck is free: zero LLM, zero subprocess, the exact
+    mirror of the quota pause's timestamp-compare auto-resume.
+
+    Fires ONLY on ``blocked_kind == "mechanical:corrupt_doc"`` (the caller
+    gates on it). Never on ``needs_answer`` (the owner must answer), ``bug``
+    (the force_block escape hatch), ``mechanical:lost_ref`` (structurally
+    unhealable — see :func:`_block_on_lost_ref`), or ``mechanical:dispatch_cap``
+    (a review-my-PRs backstop, a human decision by design).
+
+    Healing means RE-ATTEMPTING, not suppressing: the write mirrors
+    resume_goal's shape (actions + plan cadence reset so the tick actually
+    re-plans — the ensuing plan is the intended cost of a real heal), and a
+    preserved in-flight ref is restored to its polling phase instead of
+    orphaned. The block itself stays exactly as loud as today; the only
+    notification this path ever sends is the gave-up ping when the
+    ``heal_attempts`` budget (see :data:`CORRUPT_DOC_HEAL_CAP`) runs out —
+    sent PLAIN (never through the summarizer LLM), exactly once (the counter
+    is bumped one past the cap as the pause_notified-style once-marker).
+
+    Returns the healed (fresh-versioned) status, or ``None`` when it refused
+    to heal — the caller then proceeds with the still-blocked status, which
+    idles at zero cognition like any other blocked tick."""
+    if status.heal_attempts > CORRUPT_DOC_HEAL_CAP:
+        # Budget exhausted AND the owner already heard the gave-up ping (the
+        # sentinel bump below) — stay blocked, zero cost, until a human lifts it.
+        return None
+    if status.heal_attempts >= CORRUPT_DOC_HEAL_CAP:
+        # Cap reached: park. Mark FIRST (column-only write — the goal stays
+        # blocked, so this must not be a phase transition), then log + one
+        # plain owner ping.
+        store.update_status_fields(goal_id, heal_attempts=CORRUPT_DOC_HEAL_CAP + 1)
+        store.append_log(
+            goal_id,
+            f"auto-recovery gave up after {CORRUPT_DOC_HEAL_CAP} attempts — "
+            "the contract file keeps flapping between corrupt and fixed; needs you",
+        )
+        await _notify(
+            notifier, NotifyLevel.OWNER,
+            f"🟡 [{goal_id}] auto-recovery gave up after {CORRUPT_DOC_HEAL_CAP} attempts — "
+            "the goal contract file keeps re-corrupting after each fix; needs you (steer to resume)",
+        )
+        return None
+    n = status.heal_attempts + 1
+    # A preserved in-flight ref (corrupt-doc blocks keep it — see
+    # _block_on_corrupt_doc) goes back to its polling phase so it settles
+    # normally; otherwise idle, ready to re-plan.
+    if status.in_flight is not None:
+        restored_phase = "verifying" if status.in_flight.is_done_check else "in_flight"
+    else:
+        restored_phase = "idle"
+    healed = store.transition(
+        goal_id, Event.UNBLOCK,
+        replace(
+            status, phase=restored_phase, blocked_on="",
+            actions_dispatched=0, last_plan_at=None, heal_attempts=n,
+        ),
+        expect=status,
+    )
+    store.append_log(
+        goal_id,
+        f"auto-resumed: contract file parses again (heal {n}/{CORRUPT_DOC_HEAL_CAP})",
+    )
+    return healed

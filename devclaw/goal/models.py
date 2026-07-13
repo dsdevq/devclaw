@@ -146,6 +146,16 @@ class GoalStatus:
     #: ``phase == "blocked"`` — the store clears it on any write that lands on
     #: a non-blocked phase (see GoalStatusMixin._normalized_blocked_kind).
     blocked_kind: str = ""
+    #: auto-heal damping counter (F8): how many times the tick's mechanical
+    #: auto-heal has lifted a ``mechanical:*`` block for this goal since a
+    #: human last vouched for it. Persisted — a flapping condition
+    #: (block → heal → re-block) must not turn the zero-token blocked
+    #: steady-state into an LLM call per cycle, so the heal refuses past a
+    #: small cap and hands the goal back to the owner (one plain ping,
+    #: marked by bumping this one past the cap). Reset to 0 when a HUMAN
+    #: lifts a block (steer_goal) and on a productive settle (the same
+    #: stability signal that refunds the dispatch cap).
+    heal_attempts: int = 0
     #: human note of the intended next step
     next: str = ""
     #: ISO ts of the last time the plan step (LLM) ran
