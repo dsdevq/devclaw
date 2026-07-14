@@ -422,6 +422,34 @@ async def test_review_quota_crash_pauses_instead_of_failing(store, monkeypatch):
     assert until > 0 and "quota" in reason
 
 
+async def test_review_session_limit_in_planner_raw_pauses_instead_of_failing(store, monkeypatch):
+    """The live 2026-07-14 shape: the claude CLI answers a review call with
+    plain prose ("You've hit your session limit · resets 5:20pm") — no JSON —
+    so extract_json raises PlannerError('No JSON object found in planner
+    response') with the prose only in ``err.raw``. The quota guard classifies
+    the failure STRING; when the crash path dropped the raw text, a session
+    limit read as a permanent gate defect and the task failed with misleading
+    'split the diff' advice (7 tasks across two goals that day). The raw
+    response must travel with the crash so the limit pauses dispatch and
+    requeues, same as a quota hit anywhere else."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+
+    async def limit_prose_boom(*, goal, kind, diff, repo_context=None):
+        raise PlannerError(
+            "No JSON object found in planner response",
+            "You've hit your session limit · resets 5:20pm (Europe/Dublin)",
+        )
+
+    q = TaskQueue(store, runner=_ok_gate_runner([]), reviewer=limit_prose_boom)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    t = store.get_task(tid)
+    assert t.status == "pending"                       # requeued, NOT failed
+    assert "Not auto-retried" not in (t.error or "")   # no split-the-diff misdirection
+    until, reason = store.global_pause()
+    assert until > 0 and "quota" in reason
+
+
 async def test_review_skipped_when_disabled(store, monkeypatch):
     monkeypatch.setattr(task_queue, "REVIEW_GATE_ENABLED", False)
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)

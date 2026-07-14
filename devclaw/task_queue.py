@@ -1132,10 +1132,22 @@ class TaskQueue(_NotifyMixin):
                 goal=goal, kind=kind, diff=diff, repo_context=repo_context
             )
         except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
-            sys.stderr.write(f"task-queue: {_REVIEW_CRASH_MARKER} {err}\n")
+            # Carry the model's RAW response into the failure string: a usage
+            # limit comes back as plain prose ("You've hit your session limit ·
+            # resets 5:20pm"), which extract_json turns into a bare "No JSON
+            # object found" PlannerError with the prose only in err.raw. The
+            # caller's quota guard classifies the failure STRING — without the
+            # raw text it reads a quota hit as a permanent gate defect and fails
+            # the task ("split the diff") instead of pausing dispatch
+            # (live-found 2026-07-14: 7 tasks across two goals).
+            detail = f"{err.__class__.__name__}: {err}"
+            raw = getattr(err, "raw", None)
+            if isinstance(raw, str) and raw.strip():
+                detail += f" — model response: {raw.strip()[:500]}"
+            sys.stderr.write(f"task-queue: {_REVIEW_CRASH_MARKER} {detail}\n")
             return (
                 f"{_REVIEW_CRASH_MARKER} "
-                f"{err.__class__.__name__}: {err}. The diff was never reviewed, "
+                f"{detail}. The diff was never reviewed, "
                 "so it must not ship on the gate's silence."
             )
         if review.get("verdict") == "request_changes":
