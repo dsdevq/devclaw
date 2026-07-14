@@ -151,10 +151,15 @@ def test_create_task_inside_failed_transaction_is_rolled_back(store, db_path):
 
 
 def test_latest_task_for_goal(store, monkeypatch):
-    import devclaw.state_store as ss
+    # Patch the binding core.py actually calls (`from .rows import _now_ms`),
+    # not the package re-export — patching devclaw.state_store._now_ms leaves
+    # create_task on the real clock, and two creates in the same millisecond
+    # tie on created_at and come back in arbitrary order (flaked on the fast
+    # arm64 CI runner while passing locally).
+    import devclaw.state_store.core as ss_core
 
     ticks = iter(range(1000, 1_000_000, 1000))
-    monkeypatch.setattr(ss, "_now_ms", lambda: next(ticks))
+    monkeypatch.setattr(ss_core, "_now_ms", lambda: next(ticks))
 
     assert store.latest_task_for_goal("g1") is None
     _mk(store, "t1", goal_id="g1")
