@@ -136,7 +136,7 @@ async def _dispatch_action(
     if action.tool != "review_repository":
         branch_for_dispatch = _delivery.resolve_strategy(store, goal_id).goal_branch(goal_id)
     try:
-        await prepare_ws(goal.workspace_dir, goal.repo_url, branch_for_dispatch, goal.skills_required)
+        await prepare_ws(goal.workspace_dir, goal.repo_url, branch_for_dispatch)
     except WorkspaceError as exc:
         return await _block_on_prep_failure(
             goal_id, base, exc, store=store, notifier=notifier, summarize=summarize,
@@ -335,7 +335,7 @@ async def _open_investigation(
     # review_repository, await terminal, _resolve_discovery turns it into a
     # brief).
     try:
-        await prepare_ws(goal.workspace_dir, goal.repo_url, None, goal.skills_required)
+        await prepare_ws(goal.workspace_dir, goal.repo_url, None)
     except WorkspaceError as exc:
         return await _block_on_prep_failure(
             goal_id, status, exc, store=store, notifier=notifier, summarize=summarize,

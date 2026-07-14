@@ -43,7 +43,6 @@ default; copy it to `.env` and uncomment what you want to change.
 | `DEVCLAW_MAX_RETRIES` | `1` | Re-runs of a gate-failing task before escalation. Each retry feeds the failure back as steering. Timeouts are never retried. `0` disables. |
 | `DEVCLAW_TASK_TIMEOUT_S` | `1800` | Per-task wall-clock cap. Exceeded → cancelled, sandbox torn down, task `failed`. `<=0` disables. |
 | `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | Wall-clock cap for the `verify_cmd` step (the gate that runs after the agent finishes). |
-| `DEVCLAW_SKILL_LIBRARY` | `/opt/devclaw/skill-library` | Host-side curated skill library; `Goal.skills_required` slugs are provisioned from here into the workspace's `.agent/skills/`. The repo ships the curated content in `skill-library/`. Missing library degrades soft (warning, not rejection). |
 
 ## Engine selection
 

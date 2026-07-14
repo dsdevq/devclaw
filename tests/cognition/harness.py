@@ -66,7 +66,6 @@ def _build_goal(raw: dict) -> Goal:
         done_when=str(raw.get("done_when", "")),
         backlog=list(raw.get("backlog") or []),
         stub_acceptable=list(raw.get("stub_acceptable") or []),
-        skills_required=list(raw.get("skills_required") or []),
     )
 
 

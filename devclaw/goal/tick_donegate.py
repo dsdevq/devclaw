@@ -381,7 +381,7 @@ async def _open_done_gate(
         # (otherwise it judges done_when against an empty diff).
         done_gate_branch = _delivery.resolve_strategy(store, goal_id).goal_branch(goal_id)
         try:
-            await prepare_ws(goal.workspace_dir, goal.repo_url, done_gate_branch, goal.skills_required)
+            await prepare_ws(goal.workspace_dir, goal.repo_url, done_gate_branch)
         except WorkspaceError as exc:
             store.append_log(goal_id, f"done-gate workspace prep failed: {exc}")
             store.transition(

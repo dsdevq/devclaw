@@ -197,52 +197,6 @@ def _check_scope_anchor_for_from_scratch(
     )
 
 
-def _check_skills_required(skills_required: list[str]) -> list[AdmissionCondition]:
-    """Validate declared skill slugs against the host library.
-
-    Three cases:
-      - Caller declared no skills → no conditions.
-      - Caller declared skills, library exists → reject if any slug is unknown.
-      - Caller declared skills, library doesn't exist → warn (not reject) so
-        dev environments without a populated library still work; the operator
-        sees the warning and either populates the library or drops the
-        declaration.
-    """
-    if not skills_required:
-        return []
-    from ..skill_library import list_available, library_path
-
-    out: list[AdmissionCondition] = []
-    available = list_available()
-    lib = library_path()
-    if not lib.is_dir():
-        out.append(AdmissionCondition(
-            code="skill_library_missing",
-            message=(
-                f"skills_required declared {skills_required!r} but the skill "
-                f"library at {lib} does not exist. Skills will be silently "
-                f"skipped at workspace prep. Populate the library or set "
-                f"DEVCLAW_SKILL_LIBRARY to a directory of <slug>.md files."
-            ),
-            severity="warn",
-            field="skills_required",
-        ))
-        return out
-    unknown = [s for s in skills_required if s not in available]
-    if unknown:
-        out.append(AdmissionCondition(
-            code="unknown_skill_required",
-            message=(
-                f"skills_required references unknown skills: {unknown!r}. "
-                f"Available in the library: {available!r}. Drop the unknown "
-                f"slugs or add the skill files to {lib}."
-            ),
-            severity="reject",
-            field="skills_required",
-        ))
-    return out
-
-
 def _check_standing_done_when(done_when: str) -> Optional[AdmissionCondition]:
     """Warn (not reject) when done_when disclaims boundedness. Standing goals
     are a legitimate shape (the closeloop missions are exactly this), but the
@@ -297,7 +251,6 @@ def verify_goal(
     repo_url: Optional[str] = None,
     verify_cmd: Optional[str] = None,
     spec: str = "",
-    skills_required: Optional[list[str]] = None,
 ) -> AdmissionResult:
     """Run all admission checks against a candidate goal's parameters. Pure
     function — does NOT touch the store, does NOT raise. Returns the full
@@ -341,11 +294,7 @@ def verify_goal(
     if anchor is not None:
         conditions.append(anchor)
 
-    # 4. skill validation — mixed severity (reject for unknown slugs, warn
-    # when the library is missing entirely).
-    conditions.extend(_check_skills_required(list(skills_required or [])))
-
-    # 5. warnings (do not block admission).
+    # 4. warnings (do not block admission).
     for w in (
         _check_standing_done_when(done_when),
         _check_bare_verify_cmd(verify_cmd),

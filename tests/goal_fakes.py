@@ -71,12 +71,10 @@ class RecordingNotifier:
 
 async def fake_prepare(
     workspace_dir: str, repo_url: str | None = None, branch: str | None = None,
-    skills_required: list[str] | None = None,
 ) -> str:
     """No-op workspace prep for tick tests. Returns the requested branch when
     one is passed (mirrors the real prepare_workspace return for goal-branch
-    mode) so a settle-side assertion can check what branch was prepped.
-    ``skills_required`` accepted for protocol parity; the fake never provisions."""
+    mode) so a settle-side assertion can check what branch was prepped."""
     return branch or "main"
 
 

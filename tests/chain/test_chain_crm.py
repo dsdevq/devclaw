@@ -294,51 +294,11 @@ async def _walk_chain(gaps: list[str]) -> None:
             "for from-scratch goals — deferred until that module exists.)"
         )
 
-    # ---- Link 6: skills install ---------------------------------------------
-    print(_hr("LINK 6: per-project skills install"))
-    # Exercise the mechanism end-to-end against a tmp library — the chain
-    # test doesn't run real workspace prep, but provisioning is pure I/O so
-    # we can demonstrate the same code path the tick uses.
-    import os as _os
-    import tempfile as _tempfile
-    from pathlib import Path as _Path
-    from devclaw.skill_library import list_available as _list_skills, provision as _provision
-
-    with _tempfile.TemporaryDirectory() as _td:
-        _lib = _Path(_td) / "skill-library"
-        _lib.mkdir()
-        (_lib / "dotnet.md").write_text("# .NET engineering brief\n- xUnit\n- EF Core\n")
-        (_lib / "react.md").write_text("# React engineering brief\n- Vite\n- Tailwind\n")
-        _orig = _os.environ.get("DEVCLAW_SKILL_LIBRARY")
-        _os.environ["DEVCLAW_SKILL_LIBRARY"] = str(_lib)
-        try:
-            print(f"\n  library: {_lib}")
-            print(f"  available: {_list_skills()}")
-            _ws = _Path(_td) / "ws"
-            _ws.mkdir()
-            result = _provision(_ws, ["dotnet", "react"])
-            print(f"  goal declared: ['dotnet', 'react']")
-            print(f"  provisioned:   {result.provisioned}")
-            print(f"  missing:       {result.missing}")
-            _files = sorted((_ws / ".agent" / "skills").glob("*.md"))
-            print(f"  files landed:  {[p.name for p in _files]}")
-            if result.missing or set(result.provisioned) != {"dotnet", "react"}:
-                gaps.append(
-                    "skill provisioning landed the wrong files on the CRM fixture — "
-                    f"provisioned={result.provisioned}, missing={result.missing}"
-                )
-            else:
-                print(
-                    "\n  Per-project skill provisioning works end-to-end. The goal's\n"
-                    "  `skills_required` field is round-tripped via goal.yaml and the\n"
-                    "  runner picks them up from <workspace>/.agent/skills/ on every\n"
-                    "  task dispatch (the prep step copies them in after git clean)."
-                )
-        finally:
-            if _orig is None:
-                _os.environ.pop("DEVCLAW_SKILL_LIBRARY", None)
-            else:
-                _os.environ["DEVCLAW_SKILL_LIBRARY"] = _orig
+    # ---- Link 6: skills install — RETIRED 2026-07-13 -------------------------
+    # The host-side skill-library tier (Goal.skills_required + provisioning at
+    # workspace prep) was removed as inert: nothing in production ever set the
+    # field and no deploy step populated the host library path. Per-repo
+    # skills remain the repo's own <workspace>/.agent/skills/ (runner-loaded).
 
     # ---- Links 5/7/8: repo init, AGENTS.md, CI/CD ---------------------------
     print(_hr("LINKS 5/7/8: create_repo, onboard (AGENTS.md), CI/CD task"))
