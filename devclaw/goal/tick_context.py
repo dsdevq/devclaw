@@ -36,7 +36,7 @@ from ..loom import trace as _trace
 #: ``"goal/<id>"`` branch is passed when checklist mode wants every item to
 #: stack on the same branch instead of forking off main. Injected so tests
 #: pass a no-op.
-WorkspacePrep = Callable[[str, "str | None", "str | None", "list[str] | None"], Awaitable[str]]
+WorkspacePrep = Callable[[str, "str | None", "str | None"], Awaitable[str]]
 
 
 #: deliveries between periodic direction evaluations (0 → only at the done-gate)

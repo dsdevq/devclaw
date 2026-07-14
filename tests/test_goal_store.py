@@ -65,6 +65,37 @@ def test_load_goal_defaults_stub_acceptable_to_empty_when_absent(tmp_path):
     assert g.stub_acceptable == []
 
 
+def test_goal_yaml_with_legacy_skills_required_key_still_loads(tmp_path):
+    # The skill-library feature (Goal.skills_required) was removed 2026-07-13,
+    # but goal.yaml files written before the removal — deployed VPS goals —
+    # may still carry the key. Loading must tolerate it silently: ignore the
+    # key, never crash.
+    import yaml
+
+    d = tmp_path / "legacy-skills"
+    d.mkdir(parents=True)
+    (d / "goal.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "objective": "Drive the demo repo to done.",
+                "cadence": "1d",
+                "engine": "devclaw",
+                "workspace_dir": "/repos/demo",
+                "repo_url": "https://example.com/demo.git",
+                "verify_cmd": "pytest -q",
+                "open_pr": True,
+                "done_when": "all backlog items merged",
+                "backlog": ["add a /health endpoint"],
+                "skills_required": ["tdd"],  # the legacy shape
+            }
+        )
+    )
+    g = GoalStore(tmp_path).load_goal("legacy-skills")
+    assert g.objective == "Drive the demo repo to done."
+    assert g.backlog == ["add a /health endpoint"]
+    assert not hasattr(g, "skills_required")  # the field is gone, key ignored
+
+
 # ---- load_effective_goal — firmed overlay (2026-06-27 gap closure) --------
 
 

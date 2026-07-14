@@ -405,7 +405,7 @@ class GoalService:
         cadence: str = "1d", repo_url: Optional[str] = None,
         verify_cmd: Optional[str] = None, open_pr: bool = True,
         done_when: str = "", backlog: Optional[list[str]] = None,
-        spec: str = "", skills_required: Optional[list[str]] = None,
+        spec: str = "",
     ) -> dict:
         # Chef admission ("verified on all sides"). Goals that fail structural
         # checks are REJECTED with a structured condition list — the caller
@@ -416,7 +416,6 @@ class GoalService:
         admission = _verify(
             objective=objective, workspace_dir=workspace_dir, done_when=done_when,
             backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
-            skills_required=skills_required,
         )
         if not admission.admitted:
             raise GoalAdmissionRejected(admission)
@@ -425,7 +424,6 @@ class GoalService:
             goal_id, objective=objective, workspace_dir=workspace_dir, cadence=cadence,
             repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
             done_when=done_when, backlog=backlog,
-            skills_required=skills_required,
         )
         # The waiter may have grilled scope before filing the order — persist the
         # spec it landed on so the evaluator judges done against the shared contract.
@@ -448,7 +446,7 @@ class GoalService:
         self, *, objective: str, workspace_dir: str,
         repo_url: Optional[str] = None, verify_cmd: Optional[str] = None,
         done_when: str = "", backlog: Optional[list[str]] = None,
-        spec: str = "", skills_required: Optional[list[str]] = None,
+        spec: str = "",
     ) -> dict:
         """Pre-flight check the waiter calls before ``create_goal`` so the
         customer sees fixable conditions BEFORE thinking the order was filed.
@@ -459,7 +457,6 @@ class GoalService:
         return _verify(
             objective=objective, workspace_dir=workspace_dir, done_when=done_when,
             backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
-            skills_required=skills_required,
         ).to_dict()
 
     def get_goal(self, goal_id: str) -> dict:

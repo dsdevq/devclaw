@@ -253,7 +253,6 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
         done_when: str = "",
         backlog: list[str] | None = None,
         stub_acceptable: list[str] | None = None,
-        skills_required: list[str] | None = None,
     ) -> Goal:
         """Write a new goal.yaml. Raises FileExistsError if the id is taken."""
         if self.exists(goal_id):
@@ -273,7 +272,6 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
                     "done_when": done_when.strip(),
                     "backlog": list(backlog or []),
                     "stub_acceptable": list(stub_acceptable or []),
-                    "skills_required": list(skills_required or []),
                 },
                 sort_keys=False,
             )
@@ -281,6 +279,9 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
         return self.load_goal(goal_id)
 
     def load_goal(self, goal_id: str) -> Goal:
+        # NOTE: unknown keys in goal.yaml are ignored by construction — every
+        # field is read explicitly below. Legacy files written before a field
+        # was removed (e.g. the retired ``skills_required``) must keep loading.
         raw = yaml.safe_load((self._dir(goal_id) / "goal.yaml").read_text()) or {}
         return Goal(
             id=goal_id,
@@ -294,7 +295,6 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
             done_when=str(raw.get("done_when", "")).strip(),
             backlog=[str(x).strip() for x in (raw.get("backlog") or [])],
             stub_acceptable=[str(x).strip() for x in (raw.get("stub_acceptable") or []) if str(x).strip()],
-            skills_required=[str(x).strip() for x in (raw.get("skills_required") or []) if str(x).strip()],
         )
 
     # ---- helpers -----------------------------------------------------------
