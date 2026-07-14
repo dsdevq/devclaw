@@ -47,6 +47,9 @@ evals/runs/
 !.claude/settings.json
 !.claude/skills/
 !.claude/hooks/
+!.claude/rules/
+!.claude/agents/
+!.claude/commands/
 
 # Console build output — the Vite+React SPA is built at image-build time
 # (compose/devclaw-mcp/Dockerfile), not vendored. hatchling force-includes it
