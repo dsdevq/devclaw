@@ -289,3 +289,105 @@ def test_validate_sleep_and_done():
 def test_validate_bad_decision():
     with pytest.raises(GoalPlannerError):
         validate({"decision": "explode"})
+
+
+# ---- engine-result cap (planner-prompt budget, 2026-07-14 236KB prompt) -----
+
+
+def test_oversized_engine_result_is_tail_kept_with_truncation_marker():
+    """Production planner prompt 20260714T181447219Z (finance-sentry-ui-library)
+    hit 236 KB because the engine-result section embedded a whole
+    review_repository result — worker prompt echo and all — verbatim (#133
+    keeps up to 200 KB upstream ON PURPOSE for the done-gate; the planner must
+    not inherit that whole). Oversized results are tail-kept (verdicts/gate
+    lines live at the end, per the #132 shape) behind an explicit marker, with
+    the settle header line preserved."""
+    from devclaw.goal.planner import (
+        _ENGINE_RESULT_KEEP,
+        _ENGINE_RESULT_TRUNCATION_MARKER,
+    )
+
+    header = "tool=review_repository id=t-9 status=done — sandbox gate=passed"
+    early = "WORKER-PROMPT-ECHO-EARLY-SENTINEL"
+    late = "FINAL-VERDICT-TAIL-SENTINEL"
+    detail = (
+        header
+        + "\nAgent summary:\n"
+        + early
+        + "\n"
+        + ("x" * (3 * _ENGINE_RESULT_KEEP))
+        + "\n"
+        + late
+    )
+    p = build_prompt(_goal(), GoalStatus(), "", "", detail)
+    assert "## The action that just finished (engine result)" in p
+    # settle facts + the tail survive, behind an explicit marker
+    assert header in p
+    assert _ENGINE_RESULT_TRUNCATION_MARKER in p
+    assert late in p
+    # the head of the transcript (the worker's prompt echo) is elided
+    assert early not in p
+    assert detail not in p
+
+
+def test_small_engine_result_passes_through_byte_identical():
+    """Blank-safe kwarg convention: results under the budget must reach the
+    prompt untouched — existing call sites and test stubs stay byte-unaffected.
+    Marker absence is proven against the raw template FIRST (a template match
+    would make the prompt assertion vacuous, per the #234 lesson)."""
+    from devclaw.goal.planner import (
+        _ENGINE_RESULT_TRUNCATION_MARKER,
+        _cap_engine_result,
+    )
+    from devclaw.prompts import load_prompt
+
+    assert _ENGINE_RESULT_TRUNCATION_MARKER not in load_prompt("goal-planner")
+
+    small = (
+        "tool=fix_bug id=t-2 status=done — sandbox gate=passed"
+        " pr_state=open (unmerged — owner review pending)\n"
+        "PR: https://example.test/pr/1\n\nAgent summary:\nfixed the thing"
+    )
+    assert _cap_engine_result(small) == small
+    p = build_prompt(_goal(), GoalStatus(), "", "", small)
+    assert small in p
+    assert _ENGINE_RESULT_TRUNCATION_MARKER not in p
+
+
+def test_empty_engine_result_still_omits_section():
+    """"" skips the section entirely (same convention as repo_context/trends).
+    The exact section header must be absent — proven non-vacuous: the raw
+    template mentions "the action that just finished" in prose but never the
+    "(engine result)" header form."""
+    from devclaw.prompts import load_prompt
+
+    assert "(engine result)" not in load_prompt("goal-planner")
+    p = build_prompt(_goal(), GoalStatus(), "", "", "")
+    assert "(engine result)" not in p
+
+
+def test_engine_result_cap_boundary_and_degenerate_single_line():
+    """Exactly-at-budget passes through unchanged; one char over truncates.
+    A degenerate one-huge-line result (no settle header to preserve) still
+    tail-keeps behind the marker instead of riding through whole."""
+    from devclaw.goal.planner import (
+        _ENGINE_RESULT_KEEP,
+        _ENGINE_RESULT_TRUNCATION_MARKER,
+        _cap_engine_result,
+    )
+
+    at_budget = "h\n" + "x" * (_ENGINE_RESULT_KEEP - 2)
+    assert len(at_budget) == _ENGINE_RESULT_KEEP
+    assert _cap_engine_result(at_budget) == at_budget
+
+    over = at_budget + "Z"
+    capped = _cap_engine_result(over)
+    assert _ENGINE_RESULT_TRUNCATION_MARKER in capped
+    assert capped.startswith("h\n")
+    assert capped.endswith("Z")
+
+    one_line = "y" * (2 * _ENGINE_RESULT_KEEP) + "TAIL-END"
+    capped_line = _cap_engine_result(one_line)
+    assert capped_line.startswith(_ENGINE_RESULT_TRUNCATION_MARKER)
+    assert capped_line.endswith("TAIL-END")
+    assert len(capped_line) < len(one_line)

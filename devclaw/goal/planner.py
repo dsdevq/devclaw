@@ -41,6 +41,49 @@ class GoalPlannerError(Exception):
         self.raw = raw
 
 
+#: Cap (chars) for the "engine result" section of the plan prompt. The
+#: ``finished_detail`` the tick hands in embeds the engine's task detail
+#: verbatim, and for ``review_repository`` that detail deliberately carries up
+#: to 200 KB of raw agent transcript (#133 keeps it whole so the done-gate
+#: evaluator's per-clause extractor can find the filled report at its END).
+#: The planner needs the settle facts and the conclusions, not the transcript:
+#: production planner prompt 20260714T181447219Z (finance-sentry-ui-library)
+#: hit 236 KB / ~49k tokens (normal is ~8.5–10k) because this section embedded
+#: an entire engine result — the worker's own prompt echo included — whole.
+#: 12 KB sits between #133's 6 KB non-review keep and #132's 20 KB evaluator
+#: headroom: enough for any real summary/verdict, never transcript-sized.
+_ENGINE_RESULT_KEEP = 12_000
+
+#: Rendered as its own line where content was elided, so the model knows it is
+#: reading the TAIL of a larger engine result, not the whole thing.
+_ENGINE_RESULT_TRUNCATION_MARKER = (
+    "[…engine result truncated to fit the planning budget: earlier content "
+    "elided, tail kept — summaries/verdicts live at the end; the full output "
+    "is in the task record / deliveries]"
+)
+
+
+def _cap_engine_result(detail: str) -> str:
+    """Bound the just-finished engine result before it rides into the plan
+    prompt. Small results pass through UNTOUCHED (byte-identical — existing
+    call sites and test stubs see no change). Oversized results are
+    tail-kept — ``_task_detail`` appends the verify-gate verdict and gate
+    output AFTER the agent summary, and a review report's own conclusions land
+    at its end, so the tail is where the signal lives (#132's fallback
+    direction; a header-anchored extract would drop those trailing gate
+    lines). The settle header line (``tool=… id=… status=…`` with gate/PR
+    evidence, built in ``tick_settle``) is preserved so the planner keeps the
+    grounded facts of WHAT finished, with an explicit marker where the middle
+    was elided."""
+    if len(detail) <= _ENGINE_RESULT_KEEP:
+        return detail
+    head, sep, body = detail.partition("\n")
+    if sep and len(head) <= 400:
+        return "\n".join((head, _ENGINE_RESULT_TRUNCATION_MARKER, body[-_ENGINE_RESULT_KEEP:]))
+    # Degenerate shape (one huge line / oversized first line): plain tail-keep.
+    return "\n".join((_ENGINE_RESULT_TRUNCATION_MARKER, detail[-_ENGINE_RESULT_KEEP:]))
+
+
 async def _collect_repo_context(workspace_dir: str) -> str:
     """Live workspace snapshot for the plan prompt — the same grounded facts the
     review gate gets (remote, branch, head, key-file probes, tracked top-level
@@ -183,7 +226,10 @@ def build_prompt(
             _render_checklist_section(checklist),
         ]
     if finished_detail:
-        parts += ["\n## The action that just finished (engine result)", finished_detail]
+        parts += [
+            "\n## The action that just finished (engine result)",
+            _cap_engine_result(finished_detail),
+        ]
     if steering:
         parts += ["\n## NEW steering (honor this)", steering]
     parts.append("\nReturn the JSON now.")
