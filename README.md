@@ -88,7 +88,7 @@ devclaw/
 │   ├── __init__.py     #   re-exports + load-order
 │   ├── _state.py       #   FastMCP instance + long-lived services + env
 │   ├── tools.py        #   every @mcp.tool decorator (the chef's menu)
-│   ├── http.py         #   every @mcp.custom_route (dashboard, SSE, /goals/answer)
+│   ├── http.py         #   every @mcp.custom_route (dashboard, SSE, /goals/answer, /traces.json)
 │   └── lifecycle.py    #   main() + serve loops + bearer-token auth middleware
 ├── goal/               # the durable goal layer (folded-in goalclaw):
 │   ├── service.py      #   GoalService — the facade the server wires up
@@ -125,7 +125,7 @@ devclaw/
 ├── state_store/       # SQLite: programs, tasks, append-only events (rows · control · core)
 ├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
 ├── project_registry.py # control plane: repos → driving goals → live status rollup
-└── cli.py              # devclaw projects … (terminal face of the control plane)
+└── cli.py              # devclaw projects/trace/scorecard/schedule … (terminal face of the control plane)
 openhands-runner/runner.py  # OpenHands SDK inside the sandbox; emits event/result lines
 .sandcastle/Dockerfile      # per-task sandbox image
 tests/                      # pytest — stubbed engine; no docker, no claude
@@ -222,6 +222,21 @@ devclaw projects link todo-fullstack-demo todo-quality-audit
 ```
 
 …and a portfolio view at **`/projects`** on the HTTP dashboard.
+
+The traces telemetry table (every cognition call, dispatch, delivery,
+notification, trend check the heartbeat emits) is readable the same ways — no
+hand-written sqlite against a DB snapshot to answer "what happened overnight":
+
+```bash
+devclaw trace list --since 24h --errors-only   # every event, filtered in SQL (--goal/--kind/--role/--limit/--json)
+devclaw trace report --since 24h               # deterministic day-report: tasks by status + error class, cognition
+                                               # latency p50/p90/max + timeouts by role, retry storms, OWNER pings,
+                                               # trend-check volume — pure SQL aggregation, no LLM
+```
+
+…plus `GET /traces.json?since=24h&errors_only=1&…` on the HTTP server (same
+filters; default 200 rows, max 1000, newest-first) and the goal-scoped
+`get_trace` MCP tool.
 
 ### Durable deploy hosting
 

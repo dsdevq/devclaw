@@ -27,7 +27,7 @@ docs/
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`architecture.md`](./architecture.md) | **Start here.** Part I: the one-sitting mental model (five layers, two chains, the heartbeat, one task's journey, where state lives). Part II: the **locked contract** — per-layer contracts, the invariants (incl. grounded cognition, auto-heal), testability/replaceability, the question tree, the code map. | **CURRENT** — *written 2026-07-13* by merging `how-it-really-works.md` + `architecture-layers.md` (both deleted; invariants now stated once). Every load-bearing claim re-verified against main @ `8f9a59e` during the 2026-07-13 docs audit (5-agent sweep after the #228–#238 harden-loop tranche). |
+| [`architecture.md`](./architecture.md) | **Start here.** Part I: the one-sitting mental model (five layers, two chains, the heartbeat, one task's journey, where state lives). Part II: the **locked contract** — per-layer contracts, the invariants (incl. grounded cognition, auto-heal), testability/replaceability, the question tree, the code map. | **CURRENT** — *written 2026-07-13* by merging `how-it-really-works.md` + `architecture-layers.md` (both deleted; invariants now stated once). Every load-bearing claim re-verified against main @ `8f9a59e` during the 2026-07-13 docs audit (5-agent sweep after the #228–#238 harden-loop tranche). *Updated 2026-07-15*: layer-1 tested-by row now names the telemetry read surface (`GET /traces.json` + `devclaw trace list/report`, pinned by `tests/test_trace_read_surface.py`). |
 
 ## Flows
 
@@ -40,7 +40,7 @@ docs/
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: `DEVCLAW_COGNITION_TIMEOUT_S` row added (cognition-timeout headroom PR; default 180s replaces the hardcoded 90s cap). Prior audit 2026-07-13 (#228–#238 added zero env vars; `DEVCLAW_SKILL_LIBRARY` row removed with the inert skill-library subtraction). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
+| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: `DEVCLAW_COGNITION_TIMEOUT_S` row added (cognition-timeout headroom PR; default 180s replaces the hardcoded 90s cap) and `DEVCLAW_TRACE_RETENTION_DAYS` (trace-retention prune). Prior audit 2026-07-13 (#228–#238 added zero env vars; `DEVCLAW_SKILL_LIBRARY` row removed). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
 
 ## Runbooks
 

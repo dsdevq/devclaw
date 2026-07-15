@@ -287,49 +287,56 @@ class TrendDetector:
         signals: list[Signal],
     ) -> None:
         """Iterate signals through the pre-filter, then fire the
-        highest-priority candidate (per-heartbeat fire cap of 1)."""
+        highest-priority candidate (per-heartbeat fire cap of 1).
+
+        Trace volume hygiene (2026-07-15): only a FIRING check gets its own
+        ``trend_check`` row. Every non-fired outcome (below_threshold /
+        cooldown / disabled / fingerprint_dupe / error) collapses into ONE
+        compact ``trend_sweep`` summary row per sweep — production evidence
+        showed 5,100 ``fired: false, reason: below_threshold`` no-op rows in
+        10 hours bloating devclaw.db to 402MB. The summary's per-signal
+        ``skipped`` map keeps the calibration question ("why didn't R2 fire?")
+        answerable from the traces table."""
         candidates: list[tuple[Signal, SignalResult]] = []
+        skipped: dict[str, str] = {}
         for signal in signals:
             if not self._is_signal_enabled(signal):
-                _trace.record_trend_check(
-                    signal=signal.id, scope=scope_label,
-                    fired=False, reason="disabled",
-                )
+                skipped[signal.id] = "disabled"
                 continue
             if self._in_cooldown(scope_key, signal):
-                _trace.record_trend_check(
-                    signal=signal.id, scope=scope_label,
-                    fired=False, reason="cooldown",
-                )
+                skipped[signal.id] = "cooldown"
                 continue
             try:
                 result = signal.check(ctx)
             except Exception as exc:
                 # Signal failures must never break the heartbeat.
-                _trace.record_trend_check(
-                    signal=signal.id, scope=scope_label,
-                    fired=False, reason=f"error:{exc.__class__.__name__}",
-                )
+                skipped[signal.id] = f"error:{exc.__class__.__name__}"
                 continue
             fingerprint_dupe = (
                 result.fired
                 and self._fingerprint_matches_last(scope_key, signal, result)
             )
-            _trace.record_trend_check(
-                signal=signal.id, scope=scope_label,
-                fired=result.fired and not fingerprint_dupe,
-                actual=result.actual_value,
-                threshold=result.threshold_value,
-                reason=(
-                    "fingerprint_dupe"
-                    if fingerprint_dupe
-                    else "fired"
-                    if result.fired
-                    else "below_threshold"
-                ),
-            )
             if result.fired and not fingerprint_dupe:
+                _trace.record_trend_check(
+                    signal=signal.id, scope=scope_label, fired=True,
+                    actual=result.actual_value,
+                    threshold=result.threshold_value,
+                    reason="fired",
+                )
                 candidates.append((signal, result))
+            elif fingerprint_dupe:
+                skipped[signal.id] = "fingerprint_dupe"
+            else:
+                skipped[signal.id] = (
+                    f"below_threshold actual={result.actual_value} "
+                    f"threshold={result.threshold_value}"
+                )
+
+        if skipped:
+            _trace.record_trend_sweep(
+                scope=scope_label, checked=len(signals),
+                fired=len(candidates), skipped=skipped,
+            )
 
         if not candidates:
             return

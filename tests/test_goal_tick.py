@@ -30,6 +30,24 @@ ACT_FEATURE = json.dumps(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_deploys(monkeypatch):
+    """Deploys are out of scope for tick tests, but every done-gate close runs
+    the best-effort ``_auto_deploy`` with ``enabled=True`` by default — and it
+    swallows ``Exception``, so on a docker-enabled host the achieved-verdict
+    tests here silently launched a REAL ``devclaw-deploy-g`` container that
+    outlived pytest (the 2026-07-14 leak; conftest's ``_block_real_docker``
+    now fails such an escape loudly). Stub the seam module-wide with the same
+    raiser shape individual tests already used; a test that wants to assert
+    deploy behavior patches ``deploy_project`` itself."""
+    from devclaw.delivery import deploy as deploy_mod
+
+    async def _no_deploy(workspace_dir, slug):
+        raise RuntimeError("no deploys under test")
+
+    monkeypatch.setattr(deploy_mod, "deploy_project", _no_deploy)
+
+
 def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 
@@ -2827,3 +2845,108 @@ async def test_planner_snapshot_only_collected_when_planning(tmp_path, monkeypat
     out = await _tick(store, "g", planner, evaluator, engine, notifier)
     assert out is Outcome.DISPATCHED
     assert calls["n"] == 1 and planner.calls == 1
+
+
+# ---- trace volume hygiene (harden/trace-retention, 2026-07-15) --------------
+
+
+class RecordingTrendDetector:
+    """Trend-detector double — records which goals got a per-goal sweep."""
+
+    def __init__(self):
+        self.per_goal: list[str] = []
+        self.harness_self = 0
+
+    async def run_per_goal(self, *, goal_id: str, workspace_dir: str) -> None:
+        self.per_goal.append(goal_id)
+
+    async def run_harness_self(self) -> None:
+        self.harness_self += 1
+
+
+@pytest.mark.asyncio
+async def test_trend_sweep_skips_cancelled_and_done_goals(tmp_path):
+    """Dead goals get no trend sweep. Production 2026-07-15: the detector wrote
+    ~350 trend rows per goal per night across 17 goals of which 15 were
+    cancelled/done — the sweep must select only live goals. The harness-self
+    pass (which observes devclaw itself, not any goal) still runs once."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "live", workspace_dir="/repos/live")
+    seed_goal(tmp_path, "dead", workspace_dir="/repos/dead")
+    seed_goal(tmp_path, "finished", workspace_dir="/repos/finished")
+    store.save_status("live", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+    store.save_status("dead", GoalStatus(phase="cancelled"))
+    store.save_status("finished", GoalStatus(phase="done"))
+
+    td = RecordingTrendDetector()
+    planner, evaluator = FakeClaude(ACT), FakeClaude()
+    engine, notifier = FakeEngine(), RecordingNotifier()
+
+    await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+        trend_detector=td,
+    )
+
+    assert td.per_goal == ["live"]      # terminal goals not swept
+    assert td.harness_self == 1         # the global pass still ran
+    assert planner.calls == 0           # idle live goal → still zero tokens
+    assert evaluator.calls == 0
+
+
+class PruningEngine(FakeEngine):
+    """FakeEngine that exposes the trace-retention prune seam."""
+
+    def __init__(self):
+        super().__init__()
+        self.prunes = 0
+
+    def prune_traces(self) -> int:
+        self.prunes += 1
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_tick_all_runs_trace_prune_on_cheap_path_with_zero_tokens(tmp_path):
+    """tick_all invokes the engine's daily trace-retention prune once per
+    sweep, AFTER the cheap gates — and it costs zero LLM calls (the zero-token
+    idle guard is untouched: prune is pure SQLite)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    engine = PruningEngine()
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert engine.prunes == 1
+    assert out["g"] is Outcome.IDLE
+    assert planner.calls == 0          # <-- the quota guardrail holds
+    assert evaluator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_trace_prune_failure_never_breaks_the_heartbeat(tmp_path):
+    """A prune crash (db locked, whatever) is swallowed — maintenance must not
+    take down the sweep; goals still tick."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    class ExplodingPruneEngine(FakeEngine):
+        def prune_traces(self) -> int:
+            raise RuntimeError("database is locked")
+
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=ExplodingPruneEngine(), planner_caller=planner,
+        evaluator_caller=evaluator, notifier=notifier,
+        notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert out["g"] is Outcome.IDLE    # the sweep survived the prune crash

@@ -7,6 +7,9 @@ the registry's SQLite table (``DEVCLAW_DB``) and the durable goals
 server running and never needs the queue/engine spun up.
 
 Usage:
+  python -m devclaw.cli trace list [--goal G] [--kind K] [--role R] [--since 24h|<iso>]
+                                   [--errors-only] [--limit N] [--json]
+  python -m devclaw.cli trace report [--since 24h|<iso>] [--json]
   python -m devclaw.cli projects list [--status active|paused|archived] [--json]
   python -m devclaw.cli projects show <id> [--json]
   python -m devclaw.cli projects register <id> <name> [--repo-url U] [--workspace-dir D]
@@ -31,7 +34,13 @@ from typing import Optional
 from .goal.store import GoalStore
 from .project_registry import ProjectExists, ProjectRegistry, project_rollup
 from .state_store import StateStore
-from .telemetry import compute_scorecard, format_scorecard
+from .telemetry import (
+    compute_scorecard,
+    compute_trace_report,
+    format_scorecard,
+    format_trace_report,
+    parse_since,
+)
 
 
 def _db_path() -> str:
@@ -229,6 +238,106 @@ def _cmd_scorecard(args) -> int:
     return 0
 
 
+def _trace_ts_iso(ms: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(int(ms or 0) / 1000, tz=timezone.utc).isoformat(
+        timespec="seconds"
+    )
+
+
+def _fmt_trace_event(row: dict) -> str:
+    """One trace event → one greppable line. Kind-specific detail mirrors
+    ``Tracer.render_timeline`` but stays single-line for terminal scanning."""
+    p = row.get("payload") or {}
+    kind = row.get("kind", "?")
+    goal = row.get("goal_id") or "-"
+    if kind == "cognition":
+        err = p.get("error") or ""
+        detail = f"{p.get('role', '?')} ({p.get('model', '?')}, {p.get('latency_ms', 0)}ms)"
+        if err:
+            detail += f" ERROR: {err}"
+    elif kind == "tick":
+        detail = f"lifecycle={p.get('lifecycle', '')} phase={p.get('phase', '')} -> {p.get('outcome', '')}"
+    elif kind == "dispatch":
+        detail = f"{p.get('tool', '')} ref={p.get('ref_id', '')} engine={p.get('engine', '') or '-'}"
+    elif kind == "subprocess":
+        err = p.get("error") or ""
+        detail = f"{p.get('cmd', '')} ({p.get('latency_ms', 0)}ms, exit={p.get('exit_code')})"
+        if err:
+            detail += f" ERROR: {err}"
+    elif kind == "delivery":
+        gp = p.get("gate_passed")
+        gate = "pass" if gp is True else ("FAIL" if gp is False else "-")
+        detail = f"gate={gate} {p.get('pr_url') or ''} {p.get('action_label', '')}".rstrip()
+    elif kind == "notify":
+        detail = f"[{p.get('level', '')}] {str(p.get('text', ''))[:120]}"
+    elif kind == "trend_check":
+        detail = (
+            f"{p.get('signal', '')} ({p.get('scope', '')}) "
+            f"{'FIRED' if p.get('fired') else p.get('reason', '')}"
+        )
+    else:
+        detail = json.dumps({k: v for k, v in p.items() if k != "kind"}, default=str)[:120]
+    return f"{_trace_ts_iso(row.get('ts', 0))}  #{row.get('id', '?'):<7} {kind:<11} goal={goal:<24} {detail}"
+
+
+def _cmd_trace_list(args) -> int:
+    """List trace events — the general telemetry read the owner used to
+    hand-write sqlite for. All filtering happens in SQL inside read_traces;
+    output is chronological (we fetch the newest N, then reverse)."""
+    since_ms = None
+    if args.since:
+        try:
+            since_ms = parse_since(args.since)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+    store = StateStore(_db_path())
+    try:
+        rows = store.read_traces(
+            goal_id=args.goal,
+            kind=args.kind,
+            role=args.role,
+            since_ms=since_ms,
+            errors_only=args.errors_only,
+            limit=int(args.limit),
+            newest_first=True,
+        )
+    finally:
+        store.close()
+    rows.reverse()  # fetch newest N, print oldest-first for reading order
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+        return 0
+    if not rows:
+        print("no trace events match")
+        return 0
+    for r in rows:
+        print(_fmt_trace_event(r))
+    return 0
+
+
+def _cmd_trace_report(args) -> int:
+    """Deterministic day-report over tasks + traces. Pure SQL aggregation —
+    NO LLM anywhere on this path."""
+    try:
+        since_ms = parse_since(args.since)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    store = StateStore(_db_path())
+    try:
+        rep = compute_trace_report(store, since_ms=since_ms)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(rep, indent=2))
+    else:
+        print(format_trace_report(rep))
+    return 0
+
+
 def _fmt_schedule(s: dict) -> str:
     state = "enabled" if s.get("enabled") else "disabled"
     return f"{state}  {s.get('start')}–{s.get('end')} {s.get('tz')}"
@@ -322,6 +431,32 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="lookback window in hours (default 168 = 1 week)")
     p_score.add_argument("--json", action="store_true")
     p_score.set_defaults(func=lambda reg, get, a: _cmd_scorecard(a))
+
+    p_trace = sub.add_parser(
+        "trace",
+        help="query the traces telemetry table (list events, day-report)",
+    )
+    tsub = p_trace.add_subparsers(dest="cmd", required=True)
+
+    t_list = tsub.add_parser("list", help="list trace events, newest N, filtered in SQL")
+    t_list.add_argument("--goal", help="only this goal's events")
+    t_list.add_argument("--kind", help="event kind (cognition, tick, dispatch, subprocess, delivery, notify, trend_check)")
+    t_list.add_argument("--role", help="cognition role (planner, evaluator, ...)")
+    t_list.add_argument("--since", help="lower bound: 30m/24h/7d or an ISO timestamp (naive=UTC)")
+    t_list.add_argument("--errors-only", action="store_true",
+                        help="only events whose payload carries a non-empty error")
+    t_list.add_argument("--limit", default=100, type=int, help="max events (default 100)")
+    t_list.add_argument("--json", action="store_true")
+    t_list.set_defaults(func=lambda reg, get, a: _cmd_trace_list(a))
+
+    t_rep = tsub.add_parser(
+        "report",
+        help="deterministic day-report: tasks, cognition latency by role, retry storms, notifications — no LLM",
+    )
+    t_rep.add_argument("--since", default="24h",
+                       help="window start: 30m/24h/7d or an ISO timestamp (default 24h)")
+    t_rep.add_argument("--json", action="store_true")
+    t_rep.set_defaults(func=lambda reg, get, a: _cmd_trace_report(a))
 
     p_sched = sub.add_parser(
         "schedule",

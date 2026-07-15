@@ -605,3 +605,116 @@ def test_read_trends_text_tail_truncates_when_over_limit(tmp_path):
     assert len(text) == 100
     assert "TAIL_MARKER" in text
     assert "X" * 5000 not in text
+
+
+# ---- trace volume hygiene (harden/trace-retention, 2026-07-15) --------------
+# Production evidence: 5,100 `fired: false, reason: below_threshold` no-op
+# trend_check rows in 10 hours. Non-fired outcomes must collapse into ONE
+# compact per-sweep summary row; fired checks keep their own rows.
+
+
+class _ErroringSignal(Signal):
+    """A signal whose check always raises — the error must land in the sweep
+    summary, never break the heartbeat."""
+
+    id = "ERR"
+    scope = "per_project"  # type: ignore[assignment]
+    category = "drift"  # type: ignore[assignment]
+
+    def check(self, ctx: SignalContext) -> SignalResult:
+        raise ValueError("boom")
+
+
+@pytest.mark.asyncio
+async def test_below_threshold_checks_collapse_to_single_sweep_summary_row(tmp_path):
+    """Non-fired pre-filter passes leave NO per-signal trend_check rows — just
+    one trend_sweep summary whose skipped map still answers the calibration
+    question (per-signal reason + actual/threshold)."""
+    from devclaw.loom import trace as _trace
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    caller = _CountingCaller()
+    detector, store, _, _ = _detector_for(
+        tmp_path=tmp_path,
+        signals=[
+            _StubSignal("S1", will_fire=False),
+            _StubSignal("S2", will_fire=False, actual=1.0, threshold=9.0),
+        ],
+        caller=caller,
+    )
+    tracer = _trace.Tracer()
+    with _trace.tracer_scope(tracer):
+        await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+
+    assert tracer.by_kind("trend_check") == []  # no per-signal no-op rows
+    (sweep,) = tracer.by_kind("trend_sweep")
+    assert sweep["scope"] == "per_project"
+    assert sweep["checked"] == 2
+    assert sweep["fired"] == 0
+    assert sweep["skipped"]["S1"].startswith("below_threshold")
+    assert "actual=1.0" in sweep["skipped"]["S2"]
+    assert "threshold=9.0" in sweep["skipped"]["S2"]
+    assert caller.calls == 0  # nothing fired → zero LLM calls, as before
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_fired_check_still_records_individual_trend_check_row(tmp_path):
+    """A FIRING check keeps its own trend_check row (persisted always); the
+    non-firing sibling lands only in the sweep summary."""
+    from devclaw.loom import trace as _trace
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    caller = _CountingCaller()
+    detector, store, _, _ = _detector_for(
+        tmp_path=tmp_path,
+        signals=[
+            _StubSignal("S1", will_fire=True),
+            _StubSignal("S2", will_fire=False),
+        ],
+        caller=caller,
+    )
+    tracer = _trace.Tracer()
+    with _trace.tracer_scope(tracer):
+        await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+
+    (check,) = tracer.by_kind("trend_check")
+    assert check["signal"] == "S1"
+    assert check["fired"] is True
+    assert check["reason"] == "fired"
+    assert check["actual"] == 42.0 and check["threshold"] == 10.0
+    (sweep,) = tracer.by_kind("trend_sweep")
+    assert sweep["fired"] == 1
+    assert set(sweep["skipped"]) == {"S2"}
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_cooldown_and_error_reasons_land_in_sweep_summary_not_rows(tmp_path):
+    """The other non-fired outcomes (cooldown after a fire, a crashing signal)
+    also collapse into the summary map instead of per-signal rows."""
+    from devclaw.loom import trace as _trace
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    caller = _CountingCaller()
+    detector, store, _, _ = _detector_for(
+        tmp_path=tmp_path,
+        signals=[_StubSignal("S1", will_fire=True), _ErroringSignal()],
+        caller=caller,
+    )
+    # First sweep: S1 fires (sets its cooldown), ERR errors.
+    await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+
+    # Second sweep, traced: S1 is now in cooldown; ERR errors again.
+    tracer = _trace.Tracer()
+    with _trace.tracer_scope(tracer):
+        await detector.run_per_goal(goal_id="g1", workspace_dir=str(workspace))
+
+    assert tracer.by_kind("trend_check") == []
+    (sweep,) = tracer.by_kind("trend_sweep")
+    assert sweep["skipped"]["S1"] == "cooldown"
+    assert sweep["skipped"]["ERR"] == "error:ValueError"
+    store.close()
