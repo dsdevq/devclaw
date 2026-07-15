@@ -52,12 +52,70 @@ def test_writes_code_tier_loads_for_code_writing_kinds_only(runner, skill_dir):
         bundle = runner._load_skills(kind)
         assert "Quality bar" in bundle
         assert "Verify-gate coverage" in bundle
-        assert "Playwright" in bundle  # e2e skill
         assert "Commit hygiene" in bundle
     for kind in ("review_repository", "onboard"):
         bundle = runner._load_skills(kind)
         assert "Quality bar" not in bundle
         assert "Commit hygiene" not in bundle
+
+
+# ---- doctrine (always-on) vs craft (self-selected) split --------------------
+
+
+def test_craft_frontend_design_absent_from_always_on_brief(runner, skill_dir):
+    """frontend-design is CRAFT (self-selected), not doctrine — its how-to body
+    must NOT be concatenated into the always-on brief for ANY kind. Absence is
+    only meaningful if the marker really exists in the craft file, so assert
+    both (per rules/testing.md)."""
+    marker = "Distinctive, not templated"
+    craft_file = skill_dir / "craft" / "frontend-design.md"
+    assert marker in craft_file.read_text(encoding="utf-8")  # marker is real
+    for kind in ("implement_feature", "fix_bug", "review_repository", "onboard"):
+        assert marker not in runner._load_skills(kind)
+
+
+def test_craft_playwright_howto_absent_from_always_on_brief(runner, skill_dir):
+    """The Playwright how-to moved out of the _writes-code doctrine tier into
+    craft/. Its reference body (the config layout, "What you have") must be
+    absent from the always-on brief; only the one-line pointer in the
+    verify-gate-coverage doctrine survives."""
+    marker = "playwright.config.ts"
+    craft_file = skill_dir / "craft" / "playwright.md"
+    assert marker in craft_file.read_text(encoding="utf-8")  # marker is real
+    for kind in ("implement_feature", "fix_bug"):
+        assert marker not in runner._load_skills(kind)
+
+
+def test_craft_self_selection_pointer_present_in_brief(runner, skill_dir):
+    """_common tells every task where the self-selected craft guides live so the
+    agent can `ls` + read the relevant one. Kept ls-based/dynamic so adding a
+    new craft file needs no brief edit."""
+    for kind in ("implement_feature", "fix_bug", "review_repository", "onboard"):
+        bundle = runner._load_skills(kind)
+        assert "/opt/devclaw/skills/craft/" in bundle
+        assert "frontend-design" in bundle  # named example
+        assert "playwright" in bundle       # named example
+
+
+def test_craft_files_exist_and_are_well_formed(runner, skill_dir):
+    """The craft dir ships the two reference guides, each a non-empty markdown
+    doc with a top-level heading."""
+    craft_dir = skill_dir / "craft"
+    names = {p.name for p in craft_dir.glob("*.md")}
+    assert {"frontend-design.md", "playwright.md"} <= names
+    for p in craft_dir.glob("*.md"):
+        text = p.read_text(encoding="utf-8").strip()
+        assert text, f"{p.name} is empty"
+        assert text.startswith("# "), f"{p.name} lacks a top-level heading"
+
+
+def test_always_on_brief_shrank_after_craft_split(runner, skill_dir):
+    """Headline of the doctrine/craft split: the implement_feature brief is
+    materially smaller than the pre-split ~9.1k chars — the Playwright how-to
+    left the tier and the doctrine was sharpened. This also guards against
+    craft/ silently getting re-concatenated (which would balloon it again)."""
+    brief = runner._load_skills("implement_feature")
+    assert len(brief) < 7500  # pre-split brief measured ~9166 chars
 
 
 def test_fix_bug_keeps_its_smallest_change_skill(runner, skill_dir):

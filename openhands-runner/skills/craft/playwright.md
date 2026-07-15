@@ -1,6 +1,6 @@
 # End-to-end browser testing with Playwright
 
-The sandbox image ships with Chromium pre-installed and the `@playwright/mcp` server available. Use it when the change touches a web UI — pages, forms, navigation, anything a user would click.
+Read this when the change touches a web UI — pages, forms, navigation, anything a user would click. The sandbox image ships Chromium pre-installed and the `@playwright/mcp` server available.
 
 ## What you have
 
@@ -10,7 +10,7 @@ The sandbox image ships with Chromium pre-installed and the `@playwright/mcp` se
 
 ## Two ways to use it
 
-1. **Via the MCP tool** (interactive, during your task): call the Playwright MCP to navigate, click, screenshot, dump console errors. Use this to *exercise* the UI yourself before claiming a flow works.
+1. **Via the MCP tool** (interactive, during your task): navigate, click, screenshot, dump console errors. Use this to *exercise* the UI yourself before claiming a flow works.
 2. **Via committed `@playwright/test` specs** (durable, gates regressions): write `.spec.ts` files in `e2e/` (or wherever the project's convention puts them) so the verify gate can re-run them.
 
 ## When the goal asks for E2E coverage
@@ -28,4 +28,4 @@ e2e/
 
 Always attach `page.on('pageerror')` and `page.on('console')` listeners that fail the test on uncaught JS errors or `console.error`. A test that passes with red console messages is a test that catches nothing.
 
-After adding browser tests, **read the verify-gate skill** — the gate must run `npx playwright test`, not just pytest.
+After adding browser tests, the verify gate must run `npx playwright test`, not just pytest — see the always-on verify-gate-coverage doctrine for the rule.

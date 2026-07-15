@@ -39,9 +39,17 @@ _VERIFY_TIMEOUT_S = int(os.environ.get("DEVCLAW_VERIFY_TIMEOUT_S", "900"))
 #   _common.md          → always prepended
 #   _writes-code/*.md   → for kinds that write code (implement_feature, fix_bug)
 #   <kind>/*.md         → kind-specific (review_repository, onboard, …)
-# Files inside a tier are sorted lexicographically so a leading number controls
-# order. Repo-specific guidance still lives in the target repo's AGENTS.md — the
-# skills carry devclaw's cross-repo doctrine; AGENTS.md carries this repo's facts.
+#   craft/*.md          → self-selected reference (NOT concatenated) — how-to
+#                         guides the agent discovers by `ls`/`cat` when a task
+#                         calls for them (frontend-design, playwright). Kept out
+#                         of the always-on brief on purpose: the globs below only
+#                         reach _common/_writes-code/<kind>/root-level *.md, so a
+#                         sibling subdir like craft/ is never pulled in.
+# The always-on tiers are DOCTRINE (follow every task); craft/ is CRAFT (read
+# when relevant). Files inside a tier are sorted lexicographically so a leading
+# number controls order. Repo-specific guidance still lives in the target repo's
+# AGENTS.md — the skills carry devclaw's cross-repo doctrine; AGENTS.md carries
+# this repo's facts.
 _SKILLS_DIR = os.environ.get("DEVCLAW_SKILLS_DIR", "/opt/devclaw/skills")
 _HOOKS_DIR = os.environ.get("DEVCLAW_HOOKS_DIR", "/opt/devclaw/hooks")
 _WRITES_CODE_KINDS = {"implement_feature", "fix_bug"}
