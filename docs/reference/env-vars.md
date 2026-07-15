@@ -50,7 +50,8 @@ default; copy it to `.env` and uncomment what you want to change.
 | Var | Default | Purpose |
 |---|---|---|
 | `DEVCLAW_ENGINE` | *(unset)* | `(unset)` → OpenHands in a per-task docker sandbox (production). `host` → OpenHands on the host with **no** sandbox (dev/CI, agent has full FS access). `stub` → deterministic stub (harness validation, no docker, no claude). `claude_sdk` → `claude --print` inside the sandcastle (spike; see [decisions/0002-engine-mode.md](../decisions/0002-engine-mode.md)). |
-| `DEVCLAW_COGNITION` | `claude` | Which `Cognition` impl every role's `default_caller` routes through. `claude` → `claude --print` over Pro/Max OAuth (production). `stub` → deterministic canned responses (offline harnesses + eval scaffolding). Unknown values fail loud at first use. |
+| `DEVCLAW_COGNITION` | `claude` | Which `Cognition` impl every role's `default_caller` routes through. `claude` → `claude --print` over Pro/Max OAuth (production). `stub` → deterministic canned responses (offline harnesses + eval scaffolding). `agent_sdk` → **OPT-IN** streaming backend over `claude-agent-sdk.query()` (same Pro/Max OAuth session, native liveness + structured usage/rate-limit events; requires the optional `agent-sdk` extra — `pip install -e ".[agent-sdk]"`). **Not yet live-shaken.** Unknown values fail loud at first use. |
+| `DEVCLAW_COGNITION_TIMEOUT_S` | `180` | Inactivity/overall budget (seconds) for the `agent_sdk` backend: each yielded message resets an inactivity window; no message within it closes the stream (killing the spawned `claude`) and raises a timed-out `PlannerError`. Invalid/unset → 180. A per-call `timeout_ms` overrides it. (The `claude` backend's timeout is `PLANNER_TIMEOUT_MS` in `call_claude`, not this var.) |
 
 ## Model tiering (cognition cost lever)
 
