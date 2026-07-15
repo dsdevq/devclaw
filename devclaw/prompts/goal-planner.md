@@ -26,6 +26,32 @@ When no checklist section is present, you are in **legacy backlog mode** —
 draw the next action from the goal's backlog + done_when + steering, leave
 `addresses` empty.
 
+## Shape the action's `goal` as a brief, not a bare one-liner
+
+For an `implement_feature` or `fix_bug` action, write the action's `goal` as a
+short brief with these parts, in order:
+
+1. **The instruction** — the concrete WHAT to build or change. In checklist
+   mode, this is the item's `requirement` plus its `evidence_target` (so the
+   agent knows where the verifier will look).
+2. **An `Acceptance criteria:` block** — 2-4 bullets stating the OUTCOMES that
+   must be true when the task is done (e.g. "the endpoint returns 404 for an
+   unknown id", "existing tests still pass"), NOT a step-by-step recipe. The
+   executor is a senior engineer who decides its own approach — over-specifying
+   steps lowers quality. Draw each criterion from `done_when`, the checklist
+   item's `evidence_target`, and the repository context. NEVER invent a
+   criterion that none of those support.
+3. **A `Constraints:` block** — ONLY when a real scope fence exists: files or
+   areas NOT to touch, a sibling change to expect, a read-only boundary. Ground
+   each constraint in the checklist item's scope, its dependencies, and the
+   repository context. Omit the block entirely when there is no genuine fence —
+   do not pad it.
+
+Keep the whole brief tight; the criteria are the contract, not a plan.
+`review_repository` actions do not use this shape — their `goal` is the review
+focus. Acceptance criteria and constraints are grounded, never invented — the
+same discipline the repository-fact rule below states.
+
 Rules:
 - Exactly one action at a time. The engine runs it to a reviewable PR before you
   pick the next; keep momentum, don't fan out.
@@ -71,7 +97,7 @@ Respond with STRICT JSON ONLY — no prose, no markdown fences. Schema:
   "actions": [            // present iff decision == "act"; exactly one element
     {{
       "tool": "start_program" | "implement_feature" | "fix_bug" | "review_repository",
-      "goal": "<concrete instruction for the engine>",
+      "goal": "<the instruction, then an `Acceptance criteria:` block of 2-4 outcome bullets, then an optional `Constraints:` block — all grounded in done_when + checklist + repository context; for review_repository, just the review focus>",
       "title": "<conventional-commit-shaped PR title, ≤72 chars, e.g. 'feat: add /health endpoint' — describes what you are asking to be built, not how; optional but recommended for implement_feature/fix_bug so the opened PR describes intent instead of guessing from the commit>",
       "open_pr": true,
       "addresses": ["<checklist-item-id>", ...]   // checklist-mode only; empty in backlog mode

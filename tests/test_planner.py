@@ -276,6 +276,45 @@ def test_plan_goal_prompt_carries_grounding_prohibition():
     assert "empty or not-present workspace" in p
 
 
+# ---- per-task acceptance criteria + constraints (task-brief structure) ------
+
+
+def test_plan_goal_prompt_asks_for_grounded_acceptance_criteria_and_constraints():
+    """Each task's `goal` must be briefed with acceptance criteria (OUTCOMES,
+    not a recipe) + optional constraints, grounded in the goal + REPOSITORY
+    CONTEXT and never invented — the same discipline as the repo-fact rule."""
+    p = build_planner_prompt("goal", "/ws")
+    assert "Acceptance criteria:" in p
+    assert "Constraints:" in p
+    assert "OUTCOMES" in p and "step-by-step recipe" in p
+    # grounded in the goal + REPOSITORY CONTEXT, never invented (newline-agnostic)
+    flat = " ".join(p.split())
+    assert "Do NOT invent a criterion or constraint that neither supports" in flat
+    assert "Ground every criterion and constraint in the goal and the REPOSITORY CONTEXT" in flat
+
+
+def test_validate_plan_carries_a_multiline_criteria_goal_verbatim():
+    """Shape B: acceptance criteria + constraints ride INSIDE the `goal` string
+    as delineated sections. validate_plan needs no schema change — it preserves
+    the multi-section goal byte-for-byte so it reaches the worker brief intact."""
+    goal_body = (
+        "Add a /health endpoint.\n\n"
+        "Acceptance criteria:\n"
+        "- GET /health returns 200 with {status: ok}\n"
+        "- existing tests still pass\n\n"
+        "Constraints:\n- do not touch the auth middleware"
+    )
+    out = validate_plan(_plan({"key": "t1", "goal": goal_body, "kind": "implement_feature"}))
+    assert out[0].goal == goal_body  # carried through unchanged
+
+
+def test_validate_plan_still_accepts_a_plain_goal_without_criteria():
+    """Blank-safe: a task whose `goal` is a bare sentence (no criteria sections)
+    validates exactly as before — the structure is additive, never required."""
+    out = validate_plan(_plan({"key": "t1", "goal": "fix the typo"}))
+    assert len(out) == 1 and out[0].goal == "fix the typo"
+
+
 async def test_plan_goal_snapshot_is_best_effort(monkeypatch):
     """A crashing snapshot collector degrades to an ungrounded prompt — it can
     never fail planning (same best-effort contract as task_git's helpers)."""

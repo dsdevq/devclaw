@@ -220,6 +220,31 @@ _QUALITY_BAR = (
     "(2) is the codebase healthier than before this change, or worse? A passing test "
     "suite is necessary but NOT sufficient. If either answer is no, fix it."
 )
+# The structured hand-back the engineer owes devclaw at the END of a code task.
+# Replaces the old bare "say DONE": the goal layer (and the direction evaluator
+# that reads deliveries.md next tick) needs a legible, parseable account of what
+# actually shipped — what changed, what was verified, which acceptance criteria
+# are met, what's still open — not a one-word signal. Rendered LAST so it's the
+# final thing the engineer reads before finishing. It reports the OUTCOME of the
+# work and never prescribes HOW to do it, so it does not fight _QUALITY_BAR's
+# "form your own opinion as a senior engineer." Vendor-neutral plain markdown —
+# the model-agnostic worker layer carries no vendor tool-wiring.
+_RETURN_CONTRACT = (
+    "## When you finish — hand back a structured summary\n\n"
+    "End your final message with a hand-back in exactly this shape — one line "
+    "per field, plain text, no code fence — so devclaw can read your result "
+    "without guessing:\n\n"
+    "STATUS: DONE  — or  BLOCKED: <one-line reason>  if you could not finish.\n"
+    "CHANGED: the files/areas you changed, one clause each, and what each change does.\n"
+    "VERIFIED: the checks you ACTUALLY ran and their result — tests, lint, "
+    "type-check, build (name the commands).\n"
+    "ACCEPTANCE: for each acceptance criterion stated in the Goal, whether it is "
+    "met and the evidence; write 'none stated' if the Goal listed none.\n"
+    "FOLLOW-UPS: anything you had to work around, left unfinished, or that needs "
+    "a human — or 'none'.\n\n"
+    "Report only checks you truly ran, not ones you intended to. If you write "
+    "BLOCKED, still fill CHANGED / VERIFIED / ACCEPTANCE with how far you got."
+)
 _VERIFY_CODA = (
     "Keep the change focused. Refactoring WHAT YOU TOUCH is part of the change — if "
     "you edit a god object to add a feature, splitting it is the work, not unrelated. "
@@ -316,9 +341,21 @@ def _wrap_goal(kind: str, goal: str, workspace_dir: str | None = None) -> str:
     """
     skills = _load_skills(kind, workspace_dir=workspace_dir)
     if skills:
-        return f"{skills}\n\n---\n\n## Goal\n\n{goal}"
-    template = _KIND_WRAPPERS.get(kind, _KIND_WRAPPERS["implement_feature"])
-    return template.format(goal=goal)
+        brief = f"{skills}\n\n---\n\n## Goal\n\n{goal}"
+        effective_kind = kind
+    else:
+        # An unknown kind falls back to the implement_feature template — so it
+        # must also inherit implement_feature's return contract (keeps the
+        # unknown-kind == implement_feature equivalence the fallback promises).
+        effective_kind = kind if kind in _KIND_WRAPPERS else "implement_feature"
+        brief = _KIND_WRAPPERS[effective_kind].format(goal=goal)
+    # Structured return contract — code-writing kinds only. review_repository and
+    # onboard already carry their own report contract (a written review / doc
+    # set), so appending the code hand-back would fight it. Rendered LAST so the
+    # engineer reads it right before finishing.
+    if effective_kind in _WRITES_CODE_KINDS:
+        brief = f"{brief}\n\n---\n\n{_RETURN_CONTRACT}"
+    return brief
 
 
 def _run_verify(cmd: str, workspace_dir: str, timeout: int = _VERIFY_TIMEOUT_S) -> dict:
