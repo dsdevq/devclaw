@@ -31,6 +31,7 @@ fires once the program terminates (one program in, one notify out).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -43,7 +44,7 @@ from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
-from .quality import format_feedback, review_diff
+from .quality import format_feedback, review_panel
 from .engine.sandcastle import run_sandcastle, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
@@ -223,8 +224,11 @@ class TaskQueue(_NotifyMixin):
         # silently mis-wired sandboxes can be spotted in the timeline.
         self._engine_kind: str = self._derive_engine_kind(self._runner)
         # The pre-PR review gate's cognition (diff → verdict). Injectable so tests
-        # stub the Claude call; defaults to the real review_diff (host-side claude).
-        self._reviewer: Callable[..., Awaitable[dict]] = reviewer or review_diff
+        # stub the Claude call; defaults to the real review_panel (host-side
+        # claude). review_panel is a drop-in for review_diff — with the default
+        # DEVCLAW_REVIEW_PANEL_N=1 it delegates to review_diff and is byte-
+        # identical to the single-reviewer gate; N>=2 fans out diverse lenses.
+        self._reviewer: Callable[..., Awaitable[dict]] = reviewer or review_panel
         # Optional in-process hook fired whenever a task/program reaches a
         # terminal state — the goal layer wires its heartbeat-wake here so a
         # finished engine run triggers an immediate goal tick (replacing the old
@@ -977,7 +981,8 @@ class TaskQueue(_NotifyMixin):
                         review_fb = (
                             None if integrity is not None
                             else await self._review_failure(
-                                kind, goal, diff, workspace_dir, scaffold=scaffold
+                                kind, goal, diff, workspace_dir, scaffold=scaffold,
+                                task_id=task_id, program_id=program_id,
                             )
                         )
                         if integrity is not None:
@@ -1087,9 +1092,45 @@ class TaskQueue(_NotifyMixin):
             workspace_dir, "review_gate", REVIEW_GATE_ENABLED
         )
 
+    def _reviewer_accepts_record_vote(self) -> bool:
+        """Whether the wired reviewer takes a ``record_vote`` sink (review_panel
+        does; a fixed-signature test stub does not). Probed via the signature so
+        we never pass an unexpected kwarg into an injected reviewer."""
+        try:
+            params = inspect.signature(self._reviewer).parameters
+        except (TypeError, ValueError):
+            return False
+        if "record_vote" in params:
+            return True
+        return any(p.kind is p.VAR_KEYWORD for p in params.values())
+
+    def _make_vote_recorder(
+        self, task_id: Optional[str], program_id: Optional[str]
+    ) -> Callable[[dict], None]:
+        """A best-effort sink that appends one review-panel vote to the
+        append-only event log (same mechanism as engine on_event — StateStore is
+        the single append-only log; this writes an event, it does NOT mutate a
+        task row). Each vote records lens/verdict/blocking_count/latency/error;
+        the aggregate verdict is a projection over these rows."""
+        def record(vote: dict) -> None:
+            try:
+                self._store.append_event(
+                    task_id=task_id or "",
+                    program_id=program_id,
+                    type="review_vote",
+                    source="review_panel",
+                    payload_json=json.dumps(vote),
+                )
+            except Exception as err:  # noqa: BLE001 — telemetry never breaks the gate
+                sys.stderr.write(
+                    f"task-queue: review_vote append failed task={task_id}: {err}\n"
+                )
+        return record
+
     async def _review_failure(
         self, kind: TaskKind, goal: str, diff: str, workspace_dir: str,
         *, scaffold: bool = False,
+        task_id: Optional[str] = None, program_id: Optional[str] = None,
     ) -> Optional[str]:
         """Run the pre-PR adversarial review gate on the change's diff. Returns the
         request-changes feedback (→ fed back into the retry loop like a gate fail),
@@ -1127,10 +1168,18 @@ class TaskQueue(_NotifyMixin):
         # Best-effort and collected OUTSIDE the try: it never raises, so a git
         # hiccup gathering context can't trip the fail-closed reviewer path below.
         repo_context = await _review_repo_context(workspace_dir)
-        try:
-            review = await self._reviewer(
-                goal=goal, kind=kind, diff=diff, repo_context=repo_context
+        # Persist each panelist's vote (durable analog of an ephemeral fan-out).
+        # Passed ONLY to reviewers that accept it — an injected stub with a fixed
+        # signature is left untouched, so the settle contract is unchanged.
+        reviewer_kwargs: dict = dict(
+            goal=goal, kind=kind, diff=diff, repo_context=repo_context
+        )
+        if self._reviewer_accepts_record_vote():
+            reviewer_kwargs["record_vote"] = self._make_vote_recorder(
+                task_id, program_id
             )
+        try:
+            review = await self._reviewer(**reviewer_kwargs)
         except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
             # Carry the model's RAW response into the failure string: a usage
             # limit comes back as plain prose ("You've hit your session limit ·

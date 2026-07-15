@@ -146,10 +146,13 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │     • if no result line → "sandbox exited 1 without a       │                      │
      │  │       result line" (the misleading error string)            │                      │
      │  │                                                             │                      │
-     │  │  Step I — review gate (quality/review_diff):                │                      │
+     │  │  Step I — review gate (quality/review_panel):               │                      │
      │  │     • git diff main..HEAD of the workspace                  │                      │
      │  │     • feed diff to `claude --print` for adversarial check   │                      │
      │  │     • + workspace snapshot as REPOSITORY CONTEXT (#227)     │                      │
+     │  │     • DEVCLAW_REVIEW_PANEL_N reviewers (default 1 = single;  │                      │
+     │  │       N≥2 = diverse lenses, blocking issues unioned, fails   │                      │
+     │  │       CLOSED on sub-quorum); each vote → review_vote event  │                      │
      │  │     • test-integrity guard: were tests deleted/weakened?    │                      │
      │  │     • either: ok / needs revision (kicked back to engineer) │                      │
      │  │                                                             │                      │
