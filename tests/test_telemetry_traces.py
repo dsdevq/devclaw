@@ -357,3 +357,101 @@ def test_trace_totals_prefers_real_tokens_and_sums_cost(store):
     # legacy pure-estimate sums kept for back-compat
     assert totals["cognition_tokens_in_est"] == 999 + 200
     assert totals["cognition_tokens_out_est"] == 999 + 30
+
+
+# ---- trace retention prune (harden/trace-retention, 2026-07-15) --------------
+# Production evidence: 402MB devclaw.db, 200k+ trace rows. The prune is
+# StateStore-owned maintenance: daily watermark in `meta`, bounded DELETE
+# batches so a huge first prune can never wedge a heartbeat tick.
+
+_DAY_MS = 24 * 3600 * 1000
+_NOW = 1_800_000_000_000
+
+
+def _old_row(store, *, age_days: int, tag: str = "old"):
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="note", payload={"tag": tag},
+        ts=_NOW - age_days * _DAY_MS,
+    )
+
+
+def test_trace_prune_deletes_old_rows_and_keeps_recent(store):
+    _old_row(store, age_days=31, tag="stale")
+    _old_row(store, age_days=1, tag="fresh")
+    deleted = store.maybe_prune_traces(now_ms=_NOW, retention_days=30)
+    assert deleted == 1
+    rows = store.read_traces(goal_id="g")
+    assert [r["payload"]["tag"] for r in rows] == ["fresh"]
+
+
+def test_trace_prune_runs_at_most_once_per_day(store):
+    _old_row(store, age_days=40)
+    assert store.maybe_prune_traces(now_ms=_NOW, retention_days=30) == 1
+    # New stale rows appear, but the daily watermark gates the next cycle...
+    _old_row(store, age_days=40)
+    assert store.maybe_prune_traces(now_ms=_NOW + 3600 * 1000, retention_days=30) == 0
+    assert len(store.read_traces(goal_id="g")) == 1
+    # ...until a day has passed.
+    assert store.maybe_prune_traces(now_ms=_NOW + 25 * 3600 * 1000, retention_days=30) == 1
+    assert store.read_traces(goal_id="g") == []
+
+
+def test_trace_prune_drains_backlog_in_batches_across_ticks(store):
+    """A batch that comes back FULL leaves the watermark alone, so the next
+    tick continues the drain immediately — a 200k-row first prune spreads
+    across ticks instead of blocking one tick for the whole table."""
+    for i in range(5):
+        _old_row(store, age_days=40, tag=f"stale-{i}")
+    assert store.maybe_prune_traces(now_ms=_NOW, retention_days=30, batch_limit=2) == 2
+    assert store.maybe_prune_traces(now_ms=_NOW + 1, retention_days=30, batch_limit=2) == 2
+    # Short batch → drained → watermark stamps, daily gate takes over.
+    assert store.maybe_prune_traces(now_ms=_NOW + 2, retention_days=30, batch_limit=2) == 1
+    assert store.read_traces(goal_id="g") == []
+    _old_row(store, age_days=40)
+    assert store.maybe_prune_traces(now_ms=_NOW + 3600 * 1000, retention_days=30, batch_limit=2) == 0
+
+
+def test_trace_prune_disabled_by_zero_negative_or_invalid_env(store, monkeypatch):
+    """0 / negative / unparseable DEVCLAW_TRACE_RETENTION_DAYS disables the
+    prune gracefully — a typo must never crash the heartbeat or delete rows."""
+    _old_row(store, age_days=400)
+    for raw in ("0", "-5", "not-a-number"):
+        monkeypatch.setenv("DEVCLAW_TRACE_RETENTION_DAYS", raw)
+        assert store.maybe_prune_traces(now_ms=_NOW) == 0
+    assert len(store.read_traces(goal_id="g")) == 1  # nothing deleted
+
+
+def test_trace_retention_days_env_parsing(monkeypatch):
+    from devclaw.state_store.core import trace_retention_days
+
+    monkeypatch.delenv("DEVCLAW_TRACE_RETENTION_DAYS", raising=False)
+    assert trace_retention_days() == 30      # unset → default
+    monkeypatch.setenv("DEVCLAW_TRACE_RETENTION_DAYS", "7")
+    assert trace_retention_days() == 7
+    monkeypatch.setenv("DEVCLAW_TRACE_RETENTION_DAYS", "0")
+    assert trace_retention_days() == 0       # explicit off
+    monkeypatch.setenv("DEVCLAW_TRACE_RETENTION_DAYS", "-3")
+    assert trace_retention_days() == 0       # negative → off
+    monkeypatch.setenv("DEVCLAW_TRACE_RETENTION_DAYS", "thirty")
+    assert trace_retention_days() == 0       # unparseable → off, gracefully
+    monkeypatch.setenv("DEVCLAW_TRACE_RETENTION_DAYS", "   ")
+    assert trace_retention_days() == 30      # blank → default (unset-equivalent)
+
+
+def test_inprocess_engine_exposes_prune_seam(store, monkeypatch):
+    """The goal heartbeat reaches the prune through the engine (getattr seam,
+    same as the quota-pause accessors) — InProcessEngine must delegate to the
+    store's maybe_prune_traces."""
+    from devclaw.goal.engine import InProcessEngine
+    from devclaw.state_store import _now_ms
+    from devclaw.task_queue import TaskQueue
+
+    monkeypatch.delenv("DEVCLAW_TRACE_RETENTION_DAYS", raising=False)
+    # Age relative to the REAL clock — the engine seam takes no now_ms.
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="note", payload={"tag": "stale"},
+        ts=_now_ms() - 40 * _DAY_MS,
+    )
+    engine = InProcessEngine(TaskQueue(store), store)
+    assert engine.prune_traces() == 1
+    assert store.read_traces(goal_id="g") == []

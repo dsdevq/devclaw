@@ -168,6 +168,14 @@ class InProcessEngine:
             self._store.operator_hold(), self._store.get_run_schedule(), now_ms
         )
 
+    def prune_traces(self) -> int:
+        """Daily trace-retention prune (volume hygiene, 2026-07-15). Delegates
+        to :meth:`StateStore.maybe_prune_traces` — the store owns all trace
+        writes, so the engine is only the seam the goal heartbeat reaches it
+        through (same getattr pattern as the quota-pause accessors above;
+        test doubles without this method mean no prune, harmlessly)."""
+        return self._store.maybe_prune_traces()
+
     def goal_operator_block(self, goal_id: str, now_ms: int) -> tuple[bool, str]:
         """A single goal's OWN run-window gate — applied on top of the engine-wide
         :meth:`operator_block` so a goal dispatches only if the global controls AND
