@@ -262,6 +262,23 @@ class GoalStatusMixin:
                 blocked_kind=self._normalized_blocked_kind(new),
             )
             self._goal_state.write_status(goal_id, written)
+            # Observability: record the goal ENTERING a blocked state (deduped)
+            # — a block is a problem devclaw hit whether or not it later
+            # self-heals. Guarded on cur_state so a goal STAYING blocked (a
+            # re-block that lands on the same blocked state) doesn't re-record;
+            # the mechanical auto-heal + re-block cycle is thus counted once per
+            # genuine entry, never per tick. kind = blocked_kind, message =
+            # blocked_on. record_problem is best-effort (never raises), so this
+            # is safe inside the transaction. See state_store/problems.py.
+            _BLOCKED = (State.BLOCKED, State.FIRMING_BLOCKED)
+            if target in _BLOCKED and cur_state not in _BLOCKED:
+                self._state.record_problem(
+                    category="block",
+                    kind=written.blocked_kind or "block",
+                    message=written.blocked_on or "",
+                    recovered=False,
+                    goal_id=goal_id,
+                )
         self._flush_or_defer_status_view(goal_id, written)
         return written
 
@@ -340,6 +357,17 @@ class GoalStatusMixin:
                 new, phase_history=history, state=State.BLOCKED.value, version=fresh.version + 1,
             )
             self._goal_state.write_status(goal_id, written)
+            # Observability: the illegal-transition escape hatch is always a
+            # blocked-kind="bug" entry — record it (deduped), guarded so a goal
+            # already blocked isn't re-recorded. Best-effort; never raises.
+            if cur_state not in (State.BLOCKED, State.FIRMING_BLOCKED):
+                self._state.record_problem(
+                    category="block",
+                    kind="bug",
+                    message=blocked_on or "",
+                    recovered=False,
+                    goal_id=goal_id,
+                )
         self._flush_or_defer_status_view(goal_id, written)
         return True
 

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from .control import ControlPlaneMixin
+from .problems import ProblemsMixin
 from .rows import (
     SQLITE_BUSY_TIMEOUT_MS,
     Program,
@@ -71,7 +72,7 @@ def trace_retention_days() -> int:
     return days if days > 0 else 0
 
 
-class StateStore(ControlPlaneMixin):
+class StateStore(ControlPlaneMixin, ProblemsMixin):
     def __init__(self, db_path: str) -> None:
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(db_path, check_same_thread=False)
@@ -216,6 +217,31 @@ class StateStore(ControlPlaneMixin):
                   ts              INTEGER NOT NULL,
                   payload_json    TEXT NOT NULL
                 );
+
+                -- Self-observability: the deduplicated PROBLEMS catalog. One
+                -- row per DISTINCT failure devclaw hits (fingerprinted by
+                -- category + kind + normalized message), UPSERTed on recurrence
+                -- so `count` grows while the table stays bounded — NOT a row per
+                -- occurrence (the #250 lesson). Written ONLY by
+                -- StateStore.record_problem (single writer), from the failure
+                -- choke points. recovered_count vs terminal_count splits
+                -- carried-past failures (a limit that auto-resumes) from
+                -- terminal ones. The capture/dedup layer; the ranked report is
+                -- a deliberate follow-up. See state_store/problems.py.
+                CREATE TABLE IF NOT EXISTS problems (
+                  fingerprint     TEXT PRIMARY KEY,
+                  category        TEXT NOT NULL,
+                  kind            TEXT NOT NULL DEFAULT '',
+                  summary         TEXT NOT NULL DEFAULT '',
+                  sample_message  TEXT NOT NULL DEFAULT '',
+                  count           INTEGER NOT NULL DEFAULT 0,
+                  recovered_count INTEGER NOT NULL DEFAULT 0,
+                  terminal_count  INTEGER NOT NULL DEFAULT 0,
+                  first_seen_ms   INTEGER NOT NULL,
+                  last_seen_ms    INTEGER NOT NULL,
+                  last_goal_id    TEXT NOT NULL DEFAULT '',
+                  last_task_id    TEXT NOT NULL DEFAULT ''
+                );
                 """
             )
 
@@ -275,6 +301,8 @@ class StateStore(ControlPlaneMixin):
                 CREATE INDEX IF NOT EXISTS idx_traces_trace     ON traces(trace_id, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_kind      ON traces(kind, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_ts        ON traces(ts);
+                CREATE INDEX IF NOT EXISTS idx_problems_category ON problems(category);
+                CREATE INDEX IF NOT EXISTS idx_problems_count    ON problems(count);
                 """
             )
             self._commit()
@@ -365,12 +393,29 @@ class StateStore(ControlPlaneMixin):
 
     def mark_failed(self, task_id: str, error: str) -> None:
         with self._lock:
-            self._db.execute(
+            cur = self._db.execute(
                 "UPDATE tasks SET status = 'failed', error = ?, completed_at = ? "
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (error, _now_ms(), task_id),
             )
             self._commit()
+            moved = cur.rowcount == 1
+        # Observability: a task settling FAILED is a problem devclaw hit — record
+        # it (deduped) at this single choke point so every failure site
+        # (timeout, review-crash, pause-bound, all-attempts-exhausted) is
+        # covered by one call. Only when a row actually moved, so a no-op
+        # re-settle can't inflate the count. `kind` is the error's first line
+        # (the normalized full message is the fingerprint). Best-effort inside
+        # record_problem — never raises back into the settle.
+        if moved:
+            first_line = (error or "").strip().splitlines()[0] if (error or "").strip() else ""
+            self.record_problem(
+                category="task_fail",
+                kind=first_line[:120],
+                message=error or "",
+                recovered=False,
+                task_id=task_id,
+            )
 
     def mark_task_cancelled(self, task_id: str) -> bool:
         """Abort a task. Transitions pending/running -> cancelled (terminal).

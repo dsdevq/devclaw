@@ -130,6 +130,28 @@ views**: human- and rollback-readable, **never read back for decisions**. Only
 append-only event log and its views are projections. Goal state is owned by
 `GoalStore` and mutated only through the CAS'd `transition()`.
 
+**Self-observability — the `problems` catalog (capture/dedup layer).** Beside
+`traces`, a `problems` table turns "devclaw fails/stalls N times a day" into a
+ranked, countable set. `StateStore.record_problem(...)` — the **single writer**
+to that table, pure mechanism (no LLM, no subprocess, safe off the zero-token
+idle path because it fires only on a real failure) — UPSERTs one row per
+**distinct** problem keyed on a fingerprint (`category | kind |
+normalize(message)`), where `normalize()` strips the variable bits (uuids,
+paths, goal/task ids, numbers, timestamps) so the same root cause collapses.
+Recurrence increments `count` (and `recovered_count` vs `terminal_count`) rather
+than appending a row, so the table stays **bounded** — it holds distinct
+problems, not occurrences. It is wired at the failure choke points and captures
+failures **even when devclaw recovered from them**: a block entry
+(`GoalStore.transition()`/`force_block`, terminal), a task settling `failed`
+(`StateStore.mark_failed`, terminal), a usage-limit pause
+(`StateStore.set_global_pause`, **recovered** — it auto-resumes), and the
+error-bearing trace events centralized in `PersistentTracer`
+(cognition/subprocess errors, a review-gate-blocked delivery). Mechanical
+auto-heals do **not** re-record — the original block entry already counted it.
+This is the **capture + dedup + count** layer only; a ranked report over the
+table, and any dreaming / auto-approval on top, are deliberate follow-ups. See
+`devclaw/state_store/problems.py`.
+
 ---
 
 # Part II — the locked contract
