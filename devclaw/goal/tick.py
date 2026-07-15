@@ -199,10 +199,18 @@ async def tick_goal(
             outcome = Outcome.CONFLICT
         if trend_detector is not None:
             try:
-                goal = store.load_goal(goal_id)
-                await trend_detector.run_per_goal(
-                    goal_id=goal_id, workspace_dir=goal.workspace_dir,
-                )
+                # Volume hygiene (2026-07-15): a terminal goal gets no trend
+                # sweep — production showed ~350 trend_check rows per goal per
+                # night across 17 goals of which 15 were cancelled/done. The
+                # skip lives HERE (where the sweep selects goals), not inside
+                # the detector; re-read the status so a goal that went terminal
+                # DURING this very tick (done-gate closed it, cancel raced in)
+                # is skipped too. Cheap SQLite read — zero LLM either way.
+                if store.load_status(goal_id).phase not in ("done", "cancelled"):
+                    goal = store.load_goal(goal_id)
+                    await trend_detector.run_per_goal(
+                        goal_id=goal_id, workspace_dir=goal.workspace_dir,
+                    )
             except Exception as exc:  # noqa: BLE001 — telemetry must not break ticks
                 _trace.record_note(
                     f"trend_detector.run_per_goal failed for {goal_id}: "
@@ -671,6 +679,13 @@ async def tick_all(
     if blocked:
         return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
 
+    # Trace retention (volume hygiene, 2026-07-15): AFTER the cheap gates
+    # above, BEFORE any per-goal work — a daily, batched, pure-SQLite DELETE
+    # of trace rows past DEVCLAW_TRACE_RETENTION_DAYS. Zero LLM calls, so the
+    # zero-token idle guarantee is untouched; StateStore owns the actual
+    # write (single-writer invariant), the engine is just the seam.
+    _engine_prune_traces(engine)
+
     for goal_id in store.list_goal_ids():
         # Per-goal run-window: a goal can carry its OWN night/off-hours schedule
         # on top of the engine-wide gate above (e.g. a token-heavy standing loop
@@ -741,6 +756,20 @@ def _engine_pause(engine: GoalEngine) -> tuple[int, str]:
     in-process engine does; test doubles may not → treated as no pause)."""
     fn = getattr(engine, "global_pause", None)
     return fn() if callable(fn) else (0, "")
+
+
+def _engine_prune_traces(engine: GoalEngine) -> None:
+    """Run the daily trace-retention prune via the engine, if it exposes one
+    (the in-process engine does; test doubles may not → no prune). Best-effort:
+    a maintenance failure must never break the heartbeat — the traces table
+    just stays bigger until a later tick succeeds."""
+    fn = getattr(engine, "prune_traces", None)
+    if not callable(fn):
+        return
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — maintenance must not break the heartbeat
+        pass
 
 
 def _engine_clear_pause(engine: GoalEngine) -> None:
