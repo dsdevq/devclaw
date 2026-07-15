@@ -26,12 +26,38 @@ from .state_store import TaskKind
 # on THIS namespace — same convention as task_queue's git wrappers.
 from .task_git import _review_repo_context_sync  # noqa: F401
 
+#: fallback (seconds) for the default cognition ceiling when
+#: ``DEVCLAW_COGNITION_TIMEOUT_S`` is unset or unusable.
+_COGNITION_TIMEOUT_DEFAULT_S = 180
+
+
+def _cognition_timeout_ms_from_env(raw: str | None) -> int:
+    """Parse ``DEVCLAW_COGNITION_TIMEOUT_S`` (seconds) → milliseconds.
+    Fail-safe on purpose: an invalid or ``<= 0`` value falls back to the
+    default rather than crashing import — a typo in ``.env`` must never take
+    cognition down."""
+    try:
+        seconds = int(str(raw).strip())
+    except (TypeError, ValueError):
+        seconds = _COGNITION_TIMEOUT_DEFAULT_S
+    if seconds <= 0:
+        seconds = _COGNITION_TIMEOUT_DEFAULT_S
+    return seconds * 1000
+
+
 #: default ceiling for any cognition call when the caller doesn't supply its
-#: own. Each role's ``default_caller`` may pass a larger value via
+#: own. Env-configurable via ``DEVCLAW_COGNITION_TIMEOUT_S`` (seconds; default
+#: 180). The old hardcoded 90s left no headroom: in production (2026-07-14/15
+#: night) successful calls on MODERATE prompts ran 50–78s at peak hours with
+#: p90 hugging the cap, and five calls timed out at exactly 90s — each timeout
+#: burns a full model call plus a 15-minute tick. Each role's
+#: ``default_caller`` may still pass a larger value via
 #: :func:`claude_with_model` when its expected output volume warrants — the
 #: decomposer is the canonical example (opus generating multi-KB YAML
-#: routinely exceeds 90s).
-PLANNER_TIMEOUT_MS = 90_000
+#: routinely needs more than the default).
+PLANNER_TIMEOUT_MS = _cognition_timeout_ms_from_env(
+    os.environ.get("DEVCLAW_COGNITION_TIMEOUT_S")
+)
 CLAUDE_BIN = os.environ.get("DEVCLAW_CLAUDE_BIN", "claude")
 MAX_TASKS_PER_PLAN = 20
 

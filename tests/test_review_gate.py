@@ -265,15 +265,17 @@ async def test_review_diff_raises_on_unparseable():
         )
 
 
-async def test_review_caller_carries_timeout_above_the_90s_ceiling(monkeypatch):
-    """Regression: the review reads a diff up to 60 KB and reasons over the whole
-    thing on Sonnet — it was the one large-input cognition role left on the global
-    90s ceiling (PLANNER_TIMEOUT_MS), so a big benchmark diff timed out, failed the
-    gate closed, burned the retry budget, and escalated to the owner. The review
-    role must carry an explicit timeout above that ceiling (like decomposer/grill
-    already do) AND actually thread it through to the cognition call — not just
-    define a constant nobody passes."""
-    assert review_gate.REVIEW_TIMEOUT_MS > PLANNER_TIMEOUT_MS
+async def test_review_caller_carries_explicit_timeout_threaded_to_cognition(monkeypatch):
+    """Regression (#210): the review reads a diff up to 60 KB and reasons over the
+    whole thing on Sonnet — it was the one large-input cognition role left on the
+    then-90s global ceiling (PLANNER_TIMEOUT_MS), so a big benchmark diff timed
+    out, failed the gate closed, burned the retry budget, and escalated to the
+    owner. The review role must carry an explicit timeout no smaller than the
+    general default (the default has since risen to 180s and is env-tunable via
+    DEVCLAW_COGNITION_TIMEOUT_S, so strict `>` no longer holds by design) AND
+    actually thread it through to the cognition call — not just define a constant
+    nobody passes."""
+    assert review_gate.REVIEW_TIMEOUT_MS >= PLANNER_TIMEOUT_MS
 
     seen = {}
 

@@ -40,7 +40,7 @@ docs/
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: added `DEVCLAW_TRACE_RETENTION_DAYS` (trace-retention prune, harden/trace-retention). Previous audit 2026-07-13 (#228–#238 tranche; `DEVCLAW_SKILL_LIBRARY` removed). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
+| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: `DEVCLAW_COGNITION_TIMEOUT_S` row added (cognition-timeout headroom PR; default 180s replaces the hardcoded 90s cap) and `DEVCLAW_TRACE_RETENTION_DAYS` (trace-retention prune). Prior audit 2026-07-13 (#228–#238 added zero env vars; `DEVCLAW_SKILL_LIBRARY` row removed). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
 
 ## Runbooks
 
