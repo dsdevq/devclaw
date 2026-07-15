@@ -189,6 +189,14 @@ append-only event log and its views are projections. Goal state is owned by
 - **Tested by:** `tests/test_cognition.py`, `tests/test_goal_decomposer.py`,
   `tests/test_goal_evaluator.py` — prompt rendering + response parsing in
   isolation, LLM call stubbed.
+- **Operator inspection:** `devclaw cognition plan "<goal>" [--repo D]` and
+  `devclaw cognition decompose "<obj>" --done-when "<text>" [--repo D]` dry-run
+  the DAG planner / decomposer — ONE real cognition call, rendered as a task
+  DAG / milestone checklist, with **no docker, no queue, no state mutation**
+  (it constructs neither the registry nor a `GoalStore`). Reuses this layer's
+  own `build_prompt`/`validate_plan`/`parse_checklist`; `--json` scripts the
+  parsed output, `-v` prints the exact prompt. Tested by
+  `tests/test_cli_cognition.py`.
 
 ### Layer 4 — TaskQueue + Engine
 

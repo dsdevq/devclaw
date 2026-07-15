@@ -130,7 +130,7 @@ devclaw/
 ├── state_store/       # SQLite: programs, tasks, append-only events (rows · control · core)
 ├── task_queue.py       # async task lifecycle, concurrency, on-settle hook → goal poke
 ├── project_registry.py # control plane: repos → driving goals → live status rollup
-└── cli.py              # devclaw projects/trace/scorecard/schedule … (terminal face of the control plane)
+└── cli.py              # devclaw projects/trace/scorecard/schedule/cognition … (terminal face of the control plane)
 openhands-runner/runner.py  # OpenHands SDK inside the sandbox; emits event/result lines
 .sandcastle/Dockerfile      # per-task sandbox image
 tests/                      # pytest — stubbed engine; no docker, no claude
@@ -242,6 +242,26 @@ devclaw trace report --since 24h               # deterministic day-report: tasks
 …plus `GET /traces.json?since=24h&errors_only=1&…` on the HTTP server (same
 filters; default 200 rows, max 1000, newest-first) and the goal-scoped
 `get_trace` MCP tool.
+
+Dry-run the planner in isolation from execution — see how a big goal splits into
+a task DAG at the cost of ONE cognition call, with **no docker, no task queue,
+no state mutation**:
+
+```bash
+devclaw cognition plan "Build a fullstack accounts app" --repo ~/repos/accounts
+                          #   ^ one planner call → a rendered DAG: each task's key,
+                          #     kind, dependency edges (parallel vs sequential), and
+                          #     its acceptance-criteria/constraints brief. --repo grounds
+                          #     the plan in a REPOSITORY CONTEXT snapshot of that workspace.
+                          #     -v/--show-prompt prints the exact prompt; --json the raw plan.
+devclaw cognition decompose "Ship the accounts API" \
+        --done-when "GET /accounts returns real data" --repo ~/repos/accounts
+                          #   one decomposer call → the milestone checklist (items +
+                          #     evidence_target + deps + open_questions). Same -v/--json.
+```
+
+Both print latency + token usage from the call. Inspection-only: they construct
+no registry/GoalStore and never reach the queue or engine.
 
 ### Durable deploy hosting
 
