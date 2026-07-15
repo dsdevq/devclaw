@@ -15,6 +15,10 @@ devclaw = "devclaw.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+# OPT-IN alternative cognition backend (DEVCLAW_COGNITION=agent_sdk). NOT a
+# core/dev dependency — the stubbed suite imports devclaw.cognition WITHOUT it,
+# and the real query() is lazy-imported inside AgentSDKCognition.__call__.
+agent-sdk = ["claude-agent-sdk>=0.2.119"]
 
 [build-system]
 requires = ["hatchling"]
