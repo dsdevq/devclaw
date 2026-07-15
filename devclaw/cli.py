@@ -463,6 +463,24 @@ def _default_decomposer_caller() -> Callable[[str], Awaitable[str]]:
     return default_caller()
 
 
+def _default_grill_caller() -> Callable[[str], Awaitable[str]]:
+    """Production scope-grill caller (sonnet, role='grill'). The waiter's
+    interview step, reused for the `breakdown` dry-run's finalize turn. A module
+    global so tests patch it here (same seam as the planner/decomposer callers)."""
+    from .elicitation import default_caller
+
+    return default_caller()
+
+
+def _default_firming_caller() -> Callable[[str], Awaitable[str]]:
+    """Production firming caller (opus, role='goal_firming'). Structurally
+    completes the goal (derives done_when + firmed extras) between grill and
+    decompose. A module global so tests patch it here."""
+    from .goal.phases.firming import default_caller
+
+    return default_caller()
+
+
 async def _repo_context(workspace_dir: str) -> str:
     """Async wrapper around the best-effort workspace snapshot (the #227
     collector). Runs the blocking git probe in a thread; degrades to '' on any
@@ -726,6 +744,139 @@ def _cmd_cognition_decompose(args) -> int:
     return 0
 
 
+def _cmd_cognition_breakdown(args) -> int:
+    """Dry-run the FULL planning spine end-to-end: scope-grill (the waiter's
+    finalize turn) → firming round 1 → decomposer — rendering goal → milestones →
+    tasks. Where `plan` and `decompose` each expose ONE link, this walks the whole
+    natural chain a durable goal runs over time (create_goal drives the same
+    steps), so you can see how a goal composes into milestone-grouped, atomic,
+    evidence-targeted tasks. Same no-side-effects contract as `plan`/`decompose`:
+    2-3 cognition calls, NO docker / queue / state. Simulates the OpenClaw waiter
+    (scope-grill) + the investigating/firming loop, purely for inspection."""
+    from dataclasses import replace as _replace
+
+    from .elicitation import build_grill_prompt, validate_step
+    from .planner import PlannerError, extract_json
+    from .goal.decomposer import GoalDecomposerError, decompose
+    from .goal.firmed import derive_done_when
+    from .goal.models import Goal
+    from .goal.phases.firming import FirmingError, _firm_once, _firmed_extras_block
+
+    workspace_dir = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else os.getcwd()
+
+    async def _run() -> tuple:
+        repo_context = await _grounded_context(args.repo)
+        stages: list[tuple[str, str, int]] = []
+        total_ms = 0
+        calls = 0
+
+        # --- 1. spec: the scope-grill finalize turn, or a provided --spec file ---
+        if args.spec:
+            with open(os.path.expanduser(args.spec), encoding="utf-8") as fh:
+                spec = fh.read()
+            stages.append(("scope-grill", f"skipped (--spec, {len(spec)} chars)", 0))
+        else:
+            grill = _default_grill_caller()
+            raw, ms, _usage, n = await _traced(
+                grill(build_grill_prompt(args.idea, [], finalize=True))
+            )
+            step = validate_step(json.loads(extract_json(raw)))
+            if step["action"] != "done":
+                raise PlannerError("scope-grill did not finalize a spec")
+            spec = step["spec"]
+            total_ms += ms
+            calls += n
+            stages.append(("scope-grill", f"spec {len(spec)} chars", ms))
+
+        # --- 2. firming round 1 (best-effort — derives done_when + firmed extras) ---
+        goal_obj = Goal(
+            id="cli-dryrun", objective=args.idea, cadence="1d", engine="devclaw",
+            workspace_dir=workspace_dir, done_when=args.done_when or "",
+        )
+        done_when = args.done_when or ""
+        extras = ""
+        if not args.no_firm:
+            try:
+                draft, ms, _usage, n = await _traced(_firm_once(
+                    goal_obj, spec=spec, discovery_brief=spec, prior_draft=None,
+                    owner_answers=None, round_=1, caller=_default_firming_caller(),
+                    repo_context=repo_context or "",
+                ))
+                total_ms += ms
+                calls += n
+                done_when = derive_done_when(draft) or done_when
+                extras = _firmed_extras_block(draft)
+                stages.append(("firming", f"done_when derived ({len(done_when)} chars)", ms))
+            except FirmingError as exc:
+                stages.append(("firming", f"failed ({exc}); proceeding from spec", 0))
+
+        # --- 3. decompose (spec [+ firmed extras] as the discovery brief) ---
+        brief = spec + (("\n" + extras) if extras else "")
+        derived = _replace(goal_obj, done_when=done_when or goal_obj.done_when)
+        checklist, ms, _usage, n = await _traced(decompose(
+            derived, claude_caller=_default_decomposer_caller(),
+            discovery_brief=brief, repo_context=repo_context,
+        ))
+        total_ms += ms
+        calls += n
+        stages.append(("decompose", f"{len(checklist.items)} items", ms))
+
+        return spec, done_when, checklist, stages, total_ms, calls
+
+    try:
+        spec, done_when, checklist, stages, total_ms, calls = asyncio.run(_run())
+    except (PlannerError, GoalDecomposerError, OSError) as exc:
+        print(f"breakdown failed: {exc}", file=sys.stderr)
+        return 1
+
+    milestones: list[str] = []
+    for it in checklist.items:
+        m = it.milestone or "(none)"
+        if m not in milestones:
+            milestones.append(m)
+
+    if args.json:
+        print(json.dumps(
+            {
+                "idea": args.idea,
+                "spec": spec,
+                "done_when": done_when,
+                "chain": [{"stage": s, "detail": d, "latency_ms": ms} for s, d, ms in stages],
+                "cognition_calls": calls,
+                "latency_ms": total_ms,
+                "milestones": milestones,
+                "checklist": [
+                    {"id": it.id, "requirement": it.requirement,
+                     "evidence_target": it.evidence_target,
+                     "addresses_files": list(it.addresses_files),
+                     "depends_on": list(it.depends_on), "status": it.status,
+                     "milestone": it.milestone, "note": it.note,
+                     "scaffold": it.scaffold}
+                    for it in checklist.items
+                ],
+                "open_questions": list(checklist.open_questions),
+                "notes": list(checklist.notes),
+            },
+            indent=2,
+        ))
+        return 0
+
+    print(f"Idea: {args.idea}")
+    print(f"Repo: {args.repo or '(none — ungrounded)'}")
+    if args.show_spec:
+        print("\n=== SPEC (from scope-grill) ===")
+        print(spec)
+        print(f"\n=== derived done_when ===\n{done_when or '(none)'}")
+        print("=== END ===\n")
+    print("Chain: " + "  →  ".join(f"{s} ({ms} ms)" for s, _d, ms in stages))
+    print(f"Result: {len(checklist.items)} task(s) across {len(milestones)} milestone(s)"
+          f"   {total_ms} ms total   cognition_calls={calls}   containers=0")
+    print()
+    for line in _render_checklist(checklist):
+        print(line)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="devclaw", description="devclaw control-plane CLI")
     sub = parser.add_subparsers(dest="group", required=True)
@@ -761,6 +912,25 @@ def _build_parser() -> argparse.ArgumentParser:
     c_dec.add_argument("--json", action="store_true",
                        help="print the parsed checklist for scripting")
     c_dec.set_defaults(func=lambda reg, get, a: _cmd_cognition_decompose(a))
+
+    c_break = cog_sub.add_parser(
+        "breakdown",
+        help="walk the FULL spine — scope-grill → firming → decompose — and print "
+             "goal → milestones → tasks (2-3 cognition calls, no docker/state)",
+    )
+    c_break.add_argument("idea", help="the rough project idea / durable goal")
+    c_break.add_argument("--done-when", default="",
+                         help="seed completion criterion (else firming derives one)")
+    c_break.add_argument("--spec",
+                         help="skip scope-grill; read a finalized spec.md from this file")
+    c_break.add_argument("--no-firm", action="store_true",
+                         help="skip firming — go scope-grill → decompose directly")
+    c_break.add_argument("--repo", help="workspace dir to ground the chain (REPOSITORY CONTEXT)")
+    c_break.add_argument("-v", "--show-spec", action="store_true",
+                         help="also print the finalized spec + derived done_when")
+    c_break.add_argument("--json", action="store_true",
+                         help="print the spec + parsed checklist for scripting")
+    c_break.set_defaults(func=lambda reg, get, a: _cmd_cognition_breakdown(a))
 
     p_score = sub.add_parser(
         "scorecard",
