@@ -6,7 +6,19 @@ the registry's SQLite table (``DEVCLAW_DB``) and the durable goals
 (``DEVCLAW_GOALS_DIR``) — directly and read-mostly, so it works without the
 server running and never needs the queue/engine spun up.
 
+One family of subcommands is an EXCEPTION to "read-mostly against the stores":
+``cognition plan|decompose`` is a **no-side-effects planner dry-run**. It makes
+exactly ONE real cognition call (the same OAuth ``claude --print`` path the
+heartbeat uses, via :func:`devclaw.planner.call_claude`) to show how a big goal
+splits into a task DAG (or a decomposition checklist) WITHOUT dispatching
+anything: zero docker, zero task-queue, zero state mutation. It never touches
+the registry or GoalStore — an operator uses it to inspect planning in
+isolation from execution, at the cost of one model call.
+
 Usage:
+  python -m devclaw.cli cognition plan "<goal>" [--repo DIR] [-v] [--json]
+  python -m devclaw.cli cognition decompose "<objective>" --done-when "<text>"
+                                            [--repo DIR] [-v] [--json]
   python -m devclaw.cli trace list [--goal G] [--kind K] [--role R] [--since 24h|<iso>]
                                    [--errors-only] [--limit N] [--json]
   python -m devclaw.cli trace report [--since 24h|<iso>] [--json]
@@ -26,10 +38,12 @@ rollup (the same shape the MCP tools return), so the CLI is scriptable too.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
-from typing import Optional
+import time
+from typing import Awaitable, Callable, Optional
 
 from .goal.store import GoalStore
 from .project_registry import ProjectExists, ProjectRegistry, project_rollup
@@ -41,6 +55,12 @@ from .telemetry import (
     format_trace_report,
     parse_since,
 )
+
+# Snapshot collector for the `cognition` dry-run's optional --repo grounding.
+# Imported as a module global (not called via task_git.) so tests patch it on
+# THIS namespace — same convention as planner.py / task_queue's git wrappers
+# (see .claude/rules/cognition-prompts.md). Best-effort, never raises.
+from .task_git import _review_repo_context_sync  # noqa: F401
 
 
 def _db_path() -> str:
@@ -419,9 +439,328 @@ def _cmd_schedule_clear(args) -> int:
         store.close()
 
 
+# ---- cognition dry-run (planner/decomposer, no execution) ------------------
+#
+# Inspection-only: ONE real cognition call, NO docker / queue / state / heartbeat.
+# The caller factories below are module globals so tests inject a fake claude
+# caller by monkeypatching them — the same seam plan_goal/decompose already
+# expose via their `claude_caller=` parameters, surfaced at the CLI edge.
+
+
+def _default_planner_caller() -> Callable[[str], Awaitable[str]]:
+    """Production planner-tier caller (opus, role='planner'). Lazy import so a
+    test that patches this never drags the cognition subprocess in."""
+    from .planner import PLANNER_MODEL, claude_with_model
+
+    return claude_with_model(PLANNER_MODEL, role="planner")
+
+
+def _default_decomposer_caller() -> Callable[[str], Awaitable[str]]:
+    """Production decomposer-tier caller (opus, role='goal_decomposer', larger
+    timeout). Reuses the decomposer module's own factory — no duplicate wiring."""
+    from .goal.decomposer import default_caller
+
+    return default_caller()
+
+
+async def _repo_context(workspace_dir: str) -> str:
+    """Async wrapper around the best-effort workspace snapshot (the #227
+    collector). Runs the blocking git probe in a thread; degrades to '' on any
+    hiccup — grounding is optional, it never fails the dry-run. Looks up
+    :func:`_review_repo_context_sync` as a module global so tests patch it here."""
+    return await asyncio.to_thread(_review_repo_context_sync, workspace_dir)
+
+
+async def _grounded_context(repo: Optional[str]) -> Optional[str]:
+    """Collect REPOSITORY CONTEXT when --repo is given; None otherwise (an
+    ungrounded plan). Best-effort: a snapshot failure degrades to None, never
+    aborts the dry-run."""
+    if not repo:
+        return None
+    try:
+        ctx = await _repo_context(os.path.abspath(os.path.expanduser(repo)))
+    except Exception as exc:  # noqa: BLE001 — best-effort grounding
+        print(f"note: repo snapshot failed ({exc}); planning ungrounded", file=sys.stderr)
+        return None
+    return ctx or None
+
+
+async def _traced(producer: Awaitable) -> tuple[object, int, dict, int]:
+    """Await ``producer`` (a coroutine that makes exactly ONE cognition call)
+    under an in-memory tracer so we can read back real latency + token usage
+    (the CLI attaches no persistent tracer, so this is the only place the
+    envelope's usage is observable). Returns ``(result, latency_ms, usage,
+    cognition_calls)``; ``cognition_calls`` lets the caller assert the one-call
+    contract."""
+    from .loom.trace import Tracer, tracer_scope
+
+    tracer = Tracer(label="cli-cognition")
+    started = time.monotonic()
+    with tracer_scope(tracer):
+        result = await producer
+    measured_ms = int((time.monotonic() - started) * 1000)
+    events = tracer.by_kind("cognition")
+    ev = events[-1] if events else {}
+    latency_ms = int(ev.get("latency_ms") or 0) or measured_ms
+    usage = {
+        "tokens_in": ev.get("tokens_in"),
+        "tokens_out": ev.get("tokens_out"),
+        "cost_usd": ev.get("cost_usd"),
+    }
+    return result, latency_ms, usage, len(events)
+
+
+def _fmt_usage(latency_ms: int, usage: dict) -> str:
+    parts = [f"{latency_ms} ms"]
+    ti, to, cost = usage.get("tokens_in"), usage.get("tokens_out"), usage.get("cost_usd")
+    if ti is not None or to is not None:
+        parts.append(
+            f"tokens in={ti if ti is not None else '?'} "
+            f"out={to if to is not None else '?'}"
+        )
+    if cost is not None:
+        parts.append(f"${cost:.4f}")
+    return "   ".join(parts)
+
+
+def _dependency_levels(tasks: list) -> list[list]:
+    """Bucket topo-ordered PlannedTasks by dependency depth so the render shows
+    which tasks run in parallel (same level) vs sequentially (later level).
+    depth(t) = 0 if no deps, else 1 + max(depth(dep))."""
+    by_key = {t.key: t for t in tasks}
+    depth: dict[str, int] = {}
+
+    def _depth(k: str) -> int:
+        if k in depth:
+            return depth[k]
+        t = by_key[k]
+        depth[k] = 0 if not t.depends_on_keys else 1 + max(_depth(d) for d in t.depends_on_keys)
+        return depth[k]
+
+    for t in tasks:
+        _depth(t.key)
+    if not tasks:
+        return []
+    groups: list[list] = [[] for _ in range(max(depth.values()) + 1)]
+    for t in tasks:  # tasks arrive topo-ordered → each group stays deterministic
+        groups[depth[t.key]].append(t)
+    return groups
+
+
+def _render_plan_dag(tasks: list) -> list[str]:
+    lines: list[str] = []
+    groups = _dependency_levels(tasks)
+    for i, group in enumerate(groups):
+        if not group:
+            continue
+        parallel = " (parallel)" if len(group) > 1 else ""
+        if i == 0:
+            lines.append(f"level {i} — no dependencies{parallel}:")
+        else:
+            lines.append(f"level {i} — after level {i - 1}{parallel}:")
+        for t in group:
+            dep = f"  ← depends_on: {', '.join(t.depends_on_keys)}" if t.depends_on_keys else ""
+            ms = f"  · milestone: {t.milestone}" if t.milestone else ""
+            lines.append(f"  ● {t.key}  [{t.kind}]{dep}{ms}")
+            # The task's goal brief already carries `Acceptance criteria:` /
+            # `Constraints:` blocks (planner prompt, #252) — render it verbatim.
+            for gl in t.goal.splitlines():
+                lines.append(f"      {gl}".rstrip() if gl.strip() else "")
+            lines.append("")
+    return lines
+
+
+def _cmd_cognition_plan(args) -> int:
+    """Dry-run the DAG planner: ONE real cognition call → a rendered task DAG.
+    No docker, no queue, no state — planning in isolation from execution."""
+    from .planner import PlannerError, build_planner_prompt, extract_json, validate_plan
+
+    caller = _default_planner_caller()
+    workspace_dir = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else os.getcwd()
+
+    async def _run() -> tuple[str, list, int, dict, int]:
+        repo_context = await _grounded_context(args.repo)
+        prompt = build_planner_prompt(args.goal, workspace_dir, repo_context)
+        raw, latency_ms, usage, ncalls = await _traced(caller(prompt))
+        tasks = validate_plan(json.loads(extract_json(raw)))
+        return prompt, tasks, latency_ms, usage, ncalls
+
+    try:
+        prompt, tasks, latency_ms, usage, ncalls = asyncio.run(_run())
+    except PlannerError as exc:
+        print(f"planner failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(
+            [
+                {"key": t.key, "goal": t.goal, "kind": t.kind,
+                 "depends_on": list(t.depends_on_keys), "milestone": t.milestone}
+                for t in tasks
+            ],
+            indent=2,
+        ))
+        return 0
+
+    if args.show_prompt:
+        print("=== PROMPT ===")
+        print(prompt)
+        print("=== END PROMPT ===\n")
+    print(f"Goal: {args.goal}")
+    print(f"Repo: {args.repo or '(none — ungrounded plan)'}")
+    print(f"Plan: {len(tasks)} task(s)   {_fmt_usage(latency_ms, usage)}   "
+          f"cognition_calls={ncalls}")
+    print()
+    for line in _render_plan_dag(tasks):
+        print(line)
+    return 0
+
+
+def _render_checklist(checklist) -> list[str]:
+    lines: list[str] = []
+    # Group by milestone, preserving first-seen order; None → "(no milestone)".
+    order: list[Optional[str]] = []
+    groups: dict[Optional[str], list] = {}
+    for item in checklist.items:
+        key = item.milestone
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(item)
+    for ms in order:
+        lines.append(f"milestone: {ms}" if ms else "milestone: (none)")
+        for it in groups[ms]:
+            dep = f"  ← depends_on: {', '.join(it.depends_on)}" if it.depends_on else ""
+            scaffold = "  [scaffold]" if it.scaffold else ""
+            lines.append(f"  ● {it.id}  [{it.status}]{scaffold}{dep}")
+            lines.append(f"      {it.requirement}")
+            lines.append(f"      evidence_target: {it.evidence_target}")
+            if it.addresses_files:
+                lines.append(f"      files: {', '.join(it.addresses_files)}")
+            if it.note:
+                lines.append(f"      note: {it.note}")
+            lines.append("")
+    if checklist.open_questions:
+        lines.append("open_questions:")
+        for q in checklist.open_questions:
+            lines.append(f"  - {q}")
+        lines.append("")
+    if checklist.notes:
+        lines.append("notes:")
+        for n in checklist.notes:
+            lines.append(f"  - {n}")
+        lines.append("")
+    return lines
+
+
+def _cmd_cognition_decompose(args) -> int:
+    """Dry-run the goal decomposer: ONE real cognition call → a rendered
+    milestone checklist. Same no-side-effects contract as `plan`."""
+    from .goal.decomposer import GoalDecomposerError, build_prompt, decompose
+    from .goal.models import Goal
+
+    caller = _default_decomposer_caller()
+    workspace_dir = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else os.getcwd()
+    # A throwaway in-memory Goal — the decomposer only reads its facts; nothing
+    # is persisted (no GoalStore is ever constructed on this path).
+    goal_obj = Goal(
+        id="cli-dryrun",
+        objective=args.objective,
+        cadence="1d",
+        engine="devclaw",
+        workspace_dir=workspace_dir,
+        done_when=args.done_when,
+    )
+
+    async def _run() -> tuple[str, object, int, dict, int]:
+        repo_context = await _grounded_context(args.repo)
+        # build_prompt is called once here only to DISPLAY the exact prompt for
+        # -v; decompose() builds the byte-identical prompt internally and makes
+        # the single cognition call (the caller runs exactly once inside it).
+        prompt = build_prompt(goal_obj, repo_context=repo_context)
+        checklist, latency_ms, usage, ncalls = await _traced(
+            decompose(goal_obj, claude_caller=caller, repo_context=repo_context)
+        )
+        return prompt, checklist, latency_ms, usage, ncalls
+
+    try:
+        prompt, checklist, latency_ms, usage, ncalls = asyncio.run(_run())
+    except GoalDecomposerError as exc:
+        print(f"decomposer failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — surface the parse/schema failure
+        print(f"decomposer output unusable: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(
+            {
+                "checklist": [
+                    {"id": it.id, "requirement": it.requirement,
+                     "evidence_target": it.evidence_target,
+                     "addresses_files": list(it.addresses_files),
+                     "depends_on": list(it.depends_on), "status": it.status,
+                     "milestone": it.milestone, "note": it.note,
+                     "scaffold": it.scaffold}
+                    for it in checklist.items
+                ],
+                "open_questions": list(checklist.open_questions),
+                "notes": list(checklist.notes),
+            },
+            indent=2,
+        ))
+        return 0
+
+    if args.show_prompt:
+        print("=== PROMPT ===")
+        print(prompt)
+        print("=== END PROMPT ===\n")
+    print(f"Objective: {args.objective}")
+    print(f"done_when: {args.done_when}")
+    print(f"Repo: {args.repo or '(none — ungrounded)'}")
+    print(f"Checklist: {len(checklist.items)} item(s)   "
+          f"{_fmt_usage(latency_ms, usage)}   cognition_calls={ncalls}")
+    print()
+    for line in _render_checklist(checklist):
+        print(line)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="devclaw", description="devclaw control-plane CLI")
     sub = parser.add_subparsers(dest="group", required=True)
+
+    p_cog = sub.add_parser(
+        "cognition",
+        help="dry-run the planner/decomposer — ONE cognition call, no docker/queue/state",
+    )
+    cog_sub = p_cog.add_subparsers(dest="cmd", required=True)
+
+    c_plan = cog_sub.add_parser(
+        "plan",
+        help="split a goal into a task DAG (one planner call) and print it — no execution",
+    )
+    c_plan.add_argument("goal", help="the goal to plan")
+    c_plan.add_argument("--repo", help="workspace dir to ground the plan (REPOSITORY CONTEXT)")
+    c_plan.add_argument("-v", "--show-prompt", action="store_true",
+                        help="also print the exact prompt sent to the model")
+    c_plan.add_argument("--json", action="store_true",
+                        help="print the parsed plan (list of tasks) for scripting")
+    c_plan.set_defaults(func=lambda reg, get, a: _cmd_cognition_plan(a))
+
+    c_dec = cog_sub.add_parser(
+        "decompose",
+        help="decompose a durable objective into a milestone checklist (one decomposer call)",
+    )
+    c_dec.add_argument("objective", help="the durable objective to decompose")
+    c_dec.add_argument("--done-when", required=True,
+                       help="the firmed completion criterion the checklist must satisfy")
+    c_dec.add_argument("--repo", help="workspace dir to ground the decomposition")
+    c_dec.add_argument("-v", "--show-prompt", action="store_true",
+                       help="also print the exact prompt sent to the model")
+    c_dec.add_argument("--json", action="store_true",
+                       help="print the parsed checklist for scripting")
+    c_dec.set_defaults(func=lambda reg, get, a: _cmd_cognition_decompose(a))
 
     p_score = sub.add_parser(
         "scorecard",
@@ -558,6 +897,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # The `cognition` dry-run is inspection-only: it constructs NO registry and
+    # NO GoalStore (zero state reads/writes, zero queue/engine), so route it
+    # before either store is opened. Its func lambdas ignore reg/all_goals.
+    if args.group == "cognition":
+        return args.func(None, None, args)
     reg = ProjectRegistry(_db_path())
     # All CLI subcommands receive the full goals list for uniformity. Only
     # `list` and `show` actually consume it; the rest ignore it.
