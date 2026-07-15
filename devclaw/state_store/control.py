@@ -12,6 +12,7 @@ the pre-split monolith.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 
@@ -56,6 +57,20 @@ class ControlPlaneMixin:
         restart still honours it."""
         self.set_meta("pause_until_ms", str(int(until_ms)))
         self.set_meta("pause_reason", reason or "")
+        # Observability: a usage/rate-limit pause is a RECOVERED problem — the
+        # account auto-resumes when the cap resets, so this is exactly the
+        # "captured even though it recovered" case. Single choke point: both the
+        # task-queue pause and the goal-cognition pause route through here. The
+        # reason is `f"{kind}: {msg}"` / `f"{kind} (goal cognition)"`, so its
+        # leading token is the limit kind (quota|rate_limit). record_problem is
+        # best-effort — a hiccup never breaks the pause.
+        kind = re.split(r"[:\s(]", (reason or "").strip(), maxsplit=1)[0] or "unknown"
+        self.record_problem(
+            category="limit",
+            kind=kind,
+            message=reason or "",
+            recovered=True,
+        )
 
     def global_pause(self) -> tuple[int, str]:
         """Return (until_ms, reason). until_ms is 0 when no pause is set."""

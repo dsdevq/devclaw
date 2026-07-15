@@ -582,6 +582,47 @@ class PersistentTracer(Tracer):
         except Exception:
             # Telemetry must never break the cascade. Swallow + continue.
             pass
+        self._maybe_record_problem(payload)
+
+    def _maybe_record_problem(self, payload: dict) -> None:
+        """Centralized capture of the ERROR-bearing trace events into the
+        problems catalog (the #250-style dedup layer). One integration surface
+        covers three failure classes: a cognition call that carried an error, a
+        subprocess (claude --print / docker run / git push) that failed, and a
+        delivery the pre-PR review gate BLOCKED. Non-error events (the common
+        case) fall through untouched. Best-effort — record_problem swallows its
+        own exceptions, and this whole hook is defensive so telemetry can never
+        break the cascade."""
+        try:
+            kind = payload.get("kind")
+            if kind == "cognition" and payload.get("error"):
+                self._store.record_problem(
+                    category="cognition",
+                    kind=payload.get("role") or "cognition",
+                    message=str(payload.get("error")),
+                    recovered=False,
+                    goal_id=self._goal_id,
+                )
+            elif kind == "subprocess" and payload.get("error"):
+                self._store.record_problem(
+                    category="subprocess",
+                    kind=payload.get("cmd") or "subprocess",
+                    message=str(payload.get("error")),
+                    recovered=False,
+                    goal_id=self._goal_id,
+                )
+            elif kind == "delivery" and payload.get("gate_passed") is False:
+                # A gate that BLOCKS a change is the gate working — but the change
+                # WAS defective, so it's a problem devclaw hit. Category "gate".
+                self._store.record_problem(
+                    category="gate",
+                    kind="review_gate",
+                    message=str(payload.get("action_label") or "delivery gate blocked"),
+                    recovered=False,
+                    goal_id=self._goal_id,
+                )
+        except Exception:
+            pass
 
     def write_transcript(
         self, *, role: str, model: str, prompt: str, response: str,
