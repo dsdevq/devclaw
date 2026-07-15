@@ -223,9 +223,14 @@ append-only event log and its views are projections. Goal state is owned by
 
 - **Public surface:** the `runner.py` JSON-line stdout protocol (`event:` lines
   + a single terminating `result:` line). Layer 4 (sandcastle) consumes this.
-- **Behavior:** reads `/opt/devclaw/skills/` per kind, drops
-  `/workspace/.mcp.json` for Playwright MCP, fires pre/post hooks (universal +
-  per-repo), runs the agent loop, runs `verify_cmd`, emits `result:`.
+- **Behavior:** concatenates the always-on **doctrine** skills from
+  `/opt/devclaw/skills/` per kind (`_common` + the `_writes-code/*` tier for
+  code-writing kinds + the `<kind>/*` tier) into the brief; the sibling
+  `craft/` dir (self-selected how-to guides — `frontend-design`, `playwright`)
+  is **not** concatenated — `_common` points the agent to `ls`/`cat` it for the
+  guide a task needs (progressive disclosure). Drops `/workspace/.mcp.json` for
+  Playwright MCP, fires pre/post hooks (universal + per-repo), runs the agent
+  loop, runs `verify_cmd`, emits `result:`.
 - **Allowed to depend on:** `claude-agent-acp`, `claude-code`, MCP servers, the
   per-task `/workspace` git checkout.
 - **Forbidden:** importing anything from the devclaw Python package (different

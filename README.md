@@ -50,10 +50,15 @@ The worker harness reads two complementary layers of doctrine each task:
 
 | Layer | Lives in | Owned by | Purpose |
 |---|---|---|---|
-| **Universal** | `/opt/devclaw/skills/` + `/opt/devclaw/hooks/` (baked into the sandbox image from `openhands-runner/skills/` and `openhands-runner/hooks/` in this repo) | DevClaw | Cross-repo doctrine — quality bar, verify-gate coverage, commit hygiene, e2e patterns. The runner prepends per-task-kind skill bundles to the goal; universal hooks run mechanical pre/post checks. |
+| **Universal** | `/opt/devclaw/skills/` + `/opt/devclaw/hooks/` (baked into the sandbox image from `openhands-runner/skills/` and `openhands-runner/hooks/` in this repo) | DevClaw | Cross-repo doctrine — quality bar, verify-gate coverage, commit hygiene. The runner prepends per-task-kind skill bundles to the goal; universal hooks run mechanical pre/post checks. |
 | **Per-repo** | `<repo>/.agent/skills/` + `<repo>/.agent/hooks/` (alongside `AGENTS.md`) | The project | Project-specific notes — auth flow, migration commands, deploy steps. Agent-discovered (the universal `_common` skill tells it to `ls .agent/skills/`); per-repo hooks fire after universal ones with a `[name:repo]` tag. |
 
 Same pattern as `AGENTS.md`: universal devclaw doctrine + per-repo project facts. The universal layer stays consistent across every cascade; the per-repo layer evolves at the project's own pace.
+
+The universal layer is itself split by **nature**, not by kind:
+
+- **Doctrine — always-on.** `_common.md`, the `_writes-code/*` tier (quality bar, verify-gate coverage, verify-iterate, commit hygiene), and each `<kind>/*` tier. The runner concatenates these into the brief every task whether or not the agent thinks they apply — they're non-negotiable.
+- **Craft — self-selected.** How-to references in `openhands-runner/skills/craft/` (e.g. `frontend-design`, `playwright`) baked to `/opt/devclaw/skills/craft/`. These are **not** concatenated; `_common` points the agent at the dir and it `ls`/`cat`s only the guides a task calls for (progressive disclosure). Same discovery mechanism as per-repo `.agent/skills/` — no tagging or conditional-loading logic, plain `ls` + read.
 
 #### Model-agnostic invariants
 
