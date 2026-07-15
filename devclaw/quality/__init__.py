@@ -31,9 +31,11 @@ from ..model_tiers import model_for as _model_for
 REVIEW_MODEL = _model_for("review")
 #: per-call timeout. The review reads a diff up to _MAX_DIFF_CHARS (60 KB) and
 #: reasons over the whole thing on Sonnet — it was the one large-input cognition
-#: role still on the global 90s ceiling, so a big diff timed out, failed the gate
-#: closed, burned the retry budget, and escalated to the owner. Match the other
-#: large-output sonnet role (grill = 180s) rather than the 90s PLANNER_TIMEOUT_MS.
+#: role still on the then-90s global ceiling, so a big diff timed out, failed the
+#: gate closed, burned the retry budget, and escalated to the owner (#210). Kept
+#: explicit even though the general default (``PLANNER_TIMEOUT_MS``, now 180s and
+#: env-tunable via ``DEVCLAW_COGNITION_TIMEOUT_S``) has since caught up — the
+#: review's budget is a deliberate role-level decision, not an inherited default.
 REVIEW_TIMEOUT_MS = 180_000
 #: default cognition caller for the review, bound to the review tier + timeout
 review_caller = claude_with_model(REVIEW_MODEL, role="review", timeout_ms=REVIEW_TIMEOUT_MS)
