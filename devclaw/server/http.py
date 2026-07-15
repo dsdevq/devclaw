@@ -23,6 +23,7 @@ from starlette.responses import (
 )
 
 from .. import __version__
+from .. import telemetry as _telemetry
 from . import dashboard as _dash
 from ..project_registry import project_rollup
 from ._state import (
@@ -851,6 +852,50 @@ async def pr_merge(request: Request) -> Response:
     return JSONResponse(
         {"merged": True, "prUrl": pr_url, "output": stdout.decode("utf-8", "replace").strip()[:200]}
     )
+
+
+_TRACES_JSON_DEFAULT_LIMIT = 200
+_TRACES_JSON_MAX_LIMIT = 1000
+
+
+@mcp.custom_route("/traces.json", methods=["GET"])
+async def traces_json(request: Request) -> Response:
+    """General telemetry read over the ``traces`` table — the same filters the
+    ``devclaw trace list`` CLI exposes, for dashboards/scripts that already
+    speak HTTP to this server.
+
+    Query params: ``goal`` (or ``goal_id``), ``kind``, ``role`` (cognition
+    payload field), ``since`` (30m/24h/7d or ISO timestamp), ``errors_only``
+    (1/true), ``limit`` (default 200, max 1000). Rows come back newest-first.
+    Every filter is applied in SQL by ``StateStore.read_traces`` — the
+    production table holds 200k+ rows, so this route never loads-then-filters
+    in Python. Read-only: auth/token handling is the transport-wide middleware,
+    same as every other route here."""
+    q = request.query_params
+    since_ms = None
+    since = q.get("since")
+    if since:
+        try:
+            since_ms = _telemetry.parse_since(since)
+        except ValueError as exc:
+            return JSONResponse({"error": "bad_since", "detail": str(exc)}, status_code=400)
+    try:
+        limit = int(q.get("limit", _TRACES_JSON_DEFAULT_LIMIT))
+    except ValueError:
+        return JSONResponse({"error": "bad_limit"}, status_code=400)
+    if limit <= 0:
+        return JSONResponse({"error": "bad_limit"}, status_code=400)
+    limit = min(limit, _TRACES_JSON_MAX_LIMIT)
+    rows = store.read_traces(
+        goal_id=q.get("goal") or q.get("goal_id") or None,
+        kind=q.get("kind") or None,
+        role=q.get("role") or None,
+        since_ms=since_ms,
+        errors_only=str(q.get("errors_only", "")).lower() in ("1", "true", "yes"),
+        limit=limit,
+        newest_first=True,
+    )
+    return JSONResponse({"traces": rows, "count": len(rows), "limit": limit})
 
 
 @mcp.custom_route("/projects/{project_id}.json", methods=["GET"])

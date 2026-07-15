@@ -21,8 +21,10 @@ inventing new persistence.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 # ``role`` labels used by the cognition tracer for evaluator calls. See the
@@ -212,6 +214,231 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
             "written inbox.md steers are not (yet) traced separately.",
         ],
     }
+
+
+# ---- trace read surface (day-report + shared --since parsing) --------------
+#
+# Same philosophy as the scorecard above: pure SQL + a light Python pass over
+# the SQL-narrowed rows, NO cognition call anywhere. The production traces
+# table holds 200k+ rows — every query below filters in SQL first (kind/ts ride
+# their indexes); Python only ever touches the in-window subset.
+
+
+_SINCE_RE = re.compile(r"^(\d+)([mhd])$")
+_SINCE_UNIT_MS = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+
+def parse_since(spec: str, *, now_ms: Optional[int] = None) -> int:
+    """Parse a ``--since`` spec into an epoch-ms lower bound.
+
+    Accepts a relative window (``30m`` / ``24h`` / ``7d``) or an ISO-8601
+    timestamp (naive → UTC, matching the epoch-ms ``ts`` the tracer writes).
+    Raises ``ValueError`` on anything else — the CLI/HTTP callers turn that
+    into a usage error instead of silently reading the whole table."""
+    s = (spec or "").strip()
+    m = _SINCE_RE.match(s)
+    if m:
+        base = now_ms if now_ms is not None else _now_ms()
+        return base - int(m.group(1)) * _SINCE_UNIT_MS[m.group(2)]
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        raise ValueError(
+            f"bad --since {spec!r}: use <N>m/<N>h/<N>d or an ISO timestamp"
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
+def _error_class(error: str) -> str:
+    """Deterministic error bucket: 'timeout' outranks everything (that's the
+    class the owner greps for first), else the first line's prefix before the
+    first ':' — devclaw error strings lead with their class ("spawn failed:",
+    "review gate crashed:", "delivery failed:", ...)."""
+    e = (error or "").strip()
+    if not e:
+        return "(none)"
+    low = e.lower()
+    if "timeout" in low or "timed out" in low:
+        return "timeout"
+    head = e.splitlines()[0].split(":", 1)[0].strip()
+    return (head[:60] or "(unclassified)").lower()
+
+
+def _percentile(sorted_values: list[int], q: float) -> int:
+    """Nearest-rank percentile over an ascending list. Deterministic, no
+    interpolation — report numbers must be reproducible byte-for-byte."""
+    if not sorted_values:
+        return 0
+    rank = max(1, math.ceil(q * len(sorted_values)))
+    return int(sorted_values[min(rank, len(sorted_values)) - 1])
+
+
+def compute_trace_report(store: Any, *, since_ms: int) -> dict:
+    """The 'what happened overnight' day-report: deterministic aggregates over
+    ``tasks`` + ``traces`` since ``since_ms``. Reads only; NO LLM.
+
+    Sections: tasks dispatched/settled by status + failed-task error classes,
+    cognition calls by role (count / p50 / p90 / max latency, timeouts), retry
+    storms (same task title attempted more than once), OWNER notifications,
+    trend_check volume."""
+    with store._lock:  # noqa: SLF001 — telemetry co-designs with state_store
+        dispatched_row = store._db.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE created_at >= ?",
+            (since_ms,),
+        ).fetchone()
+        settled_by_status = dict(
+            store._db.execute(
+                "SELECT status, COUNT(*) AS n FROM tasks "
+                "WHERE completed_at IS NOT NULL AND completed_at >= ? "
+                "GROUP BY status",
+                (since_ms,),
+            ).fetchall()
+        )
+        failed_rows = store._db.execute(
+            "SELECT error FROM tasks "
+            "WHERE status = 'failed' AND completed_at IS NOT NULL "
+            "AND completed_at >= ?",
+            (since_ms,),
+        ).fetchall()
+        storm_rows = store._db.execute(
+            "SELECT title, COUNT(*) AS n FROM tasks "
+            "WHERE created_at >= ? AND title IS NOT NULL AND title != '' "
+            "GROUP BY title HAVING n > 1 ORDER BY n DESC, title ASC",
+            (since_ms,),
+        ).fetchall()
+        cog_rows = store._db.execute(
+            "SELECT payload_json FROM traces "
+            "WHERE kind = 'cognition' AND ts >= ? ORDER BY id ASC",
+            (since_ms,),
+        ).fetchall()
+        notify_rows = store._db.execute(
+            "SELECT COALESCE(json_extract(payload_json, '$.level'), '') AS lvl, "
+            "COUNT(*) AS n FROM traces "
+            "WHERE kind = 'notify' AND ts >= ? GROUP BY lvl",
+            (since_ms,),
+        ).fetchall()
+        trend_total_row = store._db.execute(
+            "SELECT COUNT(*) AS n FROM traces "
+            "WHERE kind = 'trend_check' AND ts >= ?",
+            (since_ms,),
+        ).fetchone()
+        trend_fired_row = store._db.execute(
+            "SELECT COUNT(*) AS n FROM traces "
+            "WHERE kind = 'trend_check' AND ts >= ? "
+            "AND json_extract(payload_json, '$.fired')",
+            (since_ms,),
+        ).fetchone()
+
+    error_classes: dict[str, int] = {}
+    for r in failed_rows:
+        c = _error_class(r["error"] or "")
+        error_classes[c] = error_classes.get(c, 0) + 1
+
+    # Cognition by role — the role lives inside payload_json; the SQL above
+    # already narrowed to in-window cognition rows, so this pass is bounded.
+    by_role: dict[str, dict] = {}
+    latencies: dict[str, list[int]] = {}
+    for r in cog_rows:
+        try:
+            p = json.loads(r["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        role = str(p.get("role") or "(unknown)")
+        rec = by_role.setdefault(
+            role, {"calls": 0, "errors": 0, "timeouts": 0},
+        )
+        rec["calls"] += 1
+        err = str(p.get("error") or "")
+        if err:
+            rec["errors"] += 1
+            if _error_class(err) == "timeout":
+                rec["timeouts"] += 1
+        latencies.setdefault(role, []).append(int(p.get("latency_ms") or 0))
+    for role, vals in latencies.items():
+        vals.sort()
+        by_role[role]["latency_ms"] = {
+            "p50": _percentile(vals, 0.50),
+            "p90": _percentile(vals, 0.90),
+            "max": vals[-1] if vals else 0,
+        }
+
+    notify_by_level = {str(r["lvl"] or "(unknown)"): int(r["n"]) for r in notify_rows}
+
+    return {
+        "since_ms": since_ms,
+        "computed_at_ms": _now_ms(),
+        "tasks": {
+            "dispatched": int(dispatched_row["n"] if dispatched_row else 0),
+            "settled_by_status": {k: int(v) for k, v in sorted(settled_by_status.items())},
+            "failed_error_classes": dict(sorted(error_classes.items())),
+        },
+        "cognition": {
+            "total_calls": sum(r["calls"] for r in by_role.values()),
+            "by_role": {k: by_role[k] for k in sorted(by_role)},
+        },
+        "retry_storms": [
+            {"title": str(r["title"]), "attempts": int(r["n"])} for r in storm_rows
+        ],
+        "notifications": {
+            "owner": int(notify_by_level.get("OWNER", 0)),
+            "by_level": notify_by_level,
+        },
+        "trend_checks": {
+            "total": int(trend_total_row["n"] if trend_total_row else 0),
+            "fired": int(trend_fired_row["n"] if trend_fired_row else 0),
+        },
+    }
+
+
+def format_trace_report(rep: dict) -> str:
+    """Render a trace report dict for human eyeballing on the terminal."""
+    def _iso(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        )
+
+    t = rep["tasks"]
+    lines = [
+        f"window:      since {_iso(rep['since_ms'])}",
+        f"tasks:       dispatched {t['dispatched']}",
+    ]
+    settled = t["settled_by_status"]
+    if settled:
+        lines.append(
+            "  settled:   "
+            + ", ".join(f"{k} {v}" for k, v in settled.items())
+        )
+    else:
+        lines.append("  settled:   (none)")
+    if t["failed_error_classes"]:
+        lines.append("  failed by error class:")
+        for cls, n in t["failed_error_classes"].items():
+            lines.append(f"    {cls:<28} {n}")
+    c = rep["cognition"]
+    lines.append(f"cognition:   {c['total_calls']} calls")
+    for role, rec in c["by_role"].items():
+        lat = rec.get("latency_ms") or {}
+        lines.append(
+            f"  {role:<12} calls {rec['calls']:<4} "
+            f"p50 {lat.get('p50', 0)}ms  p90 {lat.get('p90', 0)}ms  "
+            f"max {lat.get('max', 0)}ms  timeouts {rec['timeouts']}"
+        )
+    storms = rep["retry_storms"]
+    if storms:
+        lines.append("retry storms (same title attempted >1):")
+        for s in storms:
+            lines.append(f"  {s['attempts']}x  {s['title']}")
+    else:
+        lines.append("retry storms: (none)")
+    lines.append(f"notify:      OWNER {rep['notifications']['owner']}")
+    for lvl, n in sorted(rep["notifications"]["by_level"].items()):
+        if lvl != "OWNER":
+            lines.append(f"  {lvl:<12} {n}")
+    tc = rep["trend_checks"]
+    lines.append(f"trend checks: {tc['total']} ({tc['fired']} fired)")
+    return "\n".join(lines)
 
 
 def format_scorecard(sc: dict) -> str:

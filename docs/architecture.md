@@ -147,7 +147,10 @@ append-only event log and its views are projections. Goal state is owned by
   `GoalStore`).
 - **Tested by:** `tests/test_dashboard.py`, `tests/test_console_prs_endpoint.py`
   — full HTTP/tool requests against the FastMCP app (via the in-process client
-  in `conftest.py`) with the layers below stubbed.
+  in `conftest.py`) with the layers below stubbed. The general telemetry read
+  surface (`GET /traces.json` + the `devclaw trace list`/`trace report` CLI —
+  pure SELECTs over the `traces`/`tasks` tables, filters applied in SQL):
+  `tests/test_trace_read_surface.py`.
 
 ### Layer 2 — Orchestrator (GoalService + heartbeat)
 
