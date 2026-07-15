@@ -238,6 +238,7 @@ class StateStore(ControlPlaneMixin):
                 CREATE INDEX IF NOT EXISTS idx_traces_goal      ON traces(goal_id, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_trace     ON traces(trace_id, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_kind      ON traces(kind, id);
+                CREATE INDEX IF NOT EXISTS idx_traces_ts        ON traces(ts);
                 """
             )
             self._commit()
@@ -591,23 +592,45 @@ class StateStore(ControlPlaneMixin):
     def read_traces(
         self,
         *,
-        goal_id: str,
+        goal_id: Optional[str] = None,
         since_id: int = 0,
         limit: int = 500,
         kind: Optional[str] = None,
+        role: Optional[str] = None,
+        since_ms: Optional[int] = None,
+        errors_only: bool = False,
+        newest_first: bool = False,
     ) -> list[dict]:
-        """Read trace events for one goal in emission order. Pass ``since_id``
-        to resume after a known cursor (exclusive); pass ``kind`` to filter
-        (e.g. only cognition calls)."""
+        """Read trace events in emission order. Pure SELECT — every filter is
+        applied in SQL (the production table holds 200k+ rows; loading-then-
+        filtering in Python is not an option). ``goal_id``/``kind`` ride their
+        indexes; ``since_ms`` rides ``idx_traces_ts``; ``role`` (cognition
+        payload field) and ``errors_only`` (non-empty ``error`` payload field)
+        use ``json_extract`` over the already-narrowed row set.
+
+        Pass ``since_id`` to resume after a known cursor (exclusive);
+        ``newest_first=True`` flips the ordering to ``id DESC`` so "the last N
+        matching events" is one indexed query, not a full-table read."""
         sql = (
             "SELECT id, trace_id, goal_id, kind, ts, payload_json FROM traces "
-            "WHERE goal_id = ? AND id > ?"
+            "WHERE id > ?"
         )
-        args: list[object] = [goal_id, since_id]
+        args: list[object] = [since_id]
+        if goal_id:
+            sql += " AND goal_id = ?"
+            args.append(goal_id)
         if kind:
             sql += " AND kind = ?"
             args.append(kind)
-        sql += " ORDER BY id ASC LIMIT ?"
+        if since_ms is not None:
+            sql += " AND ts >= ?"
+            args.append(int(since_ms))
+        if role:
+            sql += " AND json_extract(payload_json, '$.role') = ?"
+            args.append(role)
+        if errors_only:
+            sql += " AND COALESCE(json_extract(payload_json, '$.error'), '') != ''"
+        sql += f" ORDER BY id {'DESC' if newest_first else 'ASC'} LIMIT ?"
         args.append(limit)
         with self._lock:
             rows = self._db.execute(sql, tuple(args)).fetchall()
