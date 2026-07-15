@@ -7,24 +7,32 @@ violated and had zero enforcement before this hook.
 
 Deliberately narrow (false positives cost more than false negatives here):
 
-  BLOCKED  git commit …            while the command's cwd is on main
+  BLOCKED  git commit …            when the command's EFFECTIVE dir is on main
   BLOCKED  git push (bare)         while on main (would push main)
-  BLOCKED  git push <remote>       while on main (same)
   BLOCKED  any push refspec that TARGETS main (…:main, `origin main`, HEAD:main)
 
-  ALLOWED  everything else — including branch deletes (`push origin --delete x`),
-           explicit non-main refspecs pushed from a main checkout
-           (`push origin sha:refs/heads/x`), pulls, fetches, worktree ops.
+  ALLOWED  everything else — branch deletes, explicit non-main refspecs, pulls,
+           fetches, worktree ops, and any commit in a worktree/feature branch.
 
-Escape hatch: prefix the command with `DEVCLAW_ALLOW_MAIN=1 ` when a push to
-main is genuinely intended.
+Effective dir: real work runs in a worktree the command `cd`s into, but the
+session cwd in the payload is the main checkout (kept on `main`). Trusting the
+payload cwd blocked EVERY legitimate worktree commit (systematic false
+positive) and conditioned the DEVCLAW_ALLOW_MAIN reflex that hollows out the
+guard. So we resolve the dir the git command actually runs in — `git -C <path>`
+or a leading literal `cd <path>` — and only fall back to the payload cwd when
+neither is present. A target dir that is shell-expanded ($VAR / $() / `cmd`) is
+unresolvable here → branch treated as unknown → the commit-on-main block is
+skipped; the dir-independent push-targets-main check still applies.
 
-Exit codes per the hooks contract: 0 allow · 2 block (stderr shown to Claude).
-Fail-OPEN on our own errors: a broken guard must never wedge normal work —
-this protects a convention, it is not a security boundary.
+Escape hatch: prefix the command with `DEVCLAW_ALLOW_MAIN=1 `.
+
+Exit codes: 0 allow · 2 block (stderr shown to Claude). Fail-OPEN on our own
+errors: a broken guard must never wedge work — this protects a convention, not
+a security boundary.
 """
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -41,13 +49,29 @@ def current_branch(cwd: str) -> str:
         return ""
 
 
+def effective_cwd(command: str, payload_cwd: str) -> "str | None":
+    """Directory the git command will run in. `git -C <path>` (the dir form,
+    which precedes the subcommand — NOT `git commit -C <ref>`) and a leading
+    `cd <path>` win over the payload cwd. A shell-expanded path we can't resolve
+    here returns None (branch unknown)."""
+    for pat in (r"\bgit\s+-C\s+(\S+)",
+                r"(?:^|&&|\|\||;)\s*cd\s+(\S+)"):
+        m = re.search(pat, command)
+        if m:
+            raw = m.group(1)
+            if "$" in raw or "`" in raw:
+                return None
+            return os.path.expanduser(raw.strip("'\""))
+    return payload_cwd
+
+
 def blocks(command: str, cwd: str) -> "str | None":
     if "DEVCLAW_ALLOW_MAIN=1" in command:
         return None
-    # Only inspect commands that contain a git commit/push at all.
     if not re.search(r"\bgit\b[^|;&]*\b(commit|push)\b", command):
         return None
-    on_main = current_branch(cwd) in ("main", "master")
+    eff = effective_cwd(command, cwd)
+    on_main = eff is not None and current_branch(eff) in ("main", "master")
 
     if on_main and re.search(r"\bgit\b[^|;&]*\bcommit\b", command):
         return (
@@ -58,7 +82,6 @@ def blocks(command: str, cwd: str) -> "str | None":
 
     for push in re.finditer(r"\bgit\b[^|;&]*\bpush\b([^|;&]*)", command):
         args = [a for a in push.group(1).split() if not a.startswith("-")]
-        # `git push origin --delete x` / explicit non-main refspecs are fine.
         if any(a == "main" or a.endswith(":main") or a.endswith("/main") and ":" in a
                for a in args):
             return (
@@ -66,7 +89,6 @@ def blocks(command: str, cwd: str) -> "str | None":
                 "via gh). Override: prefix with DEVCLAW_ALLOW_MAIN=1"
             )
         if on_main and len(args) <= 1 and "--delete" not in push.group(1):
-            # bare `git push` / `git push origin` from a main checkout
             return (
                 "blocked: bare `git push` while on main would push main. "
                 "Branch per change. Override: prefix with DEVCLAW_ALLOW_MAIN=1"
