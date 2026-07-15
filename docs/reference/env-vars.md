@@ -70,6 +70,12 @@ session quota, not a bill.**
 | `DEVCLAW_MODEL_LIGHT` | `haiku` | Mechanical prose: per-delivery summaries, failure-analysis judge. |
 | `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **The in-sandbox coding agent — the token/quota bulk.** Full id, not alias. Set `claude-opus-4-8` to opt a run up to Opus. Empty → ACP server's default. |
 
+## Quality gate (pre-PR review)
+
+| Var | Default | Purpose |
+|---|---|---|
+| `DEVCLAW_REVIEW_PANEL_N` | `1` | Panelists in the pre-PR adversarial review panel (`quality.review_panel`). `1` = the single reviewer, byte-identical to the historical gate (delegates straight to `review_diff`). `N>=2` fans out N reviewers in parallel over the SAME diff under **diverse lenses** (`correctness`, `regression_risk`, `meets_acceptance_criteria`, round-robin if `N` exceeds the lens set); their blocking issues are **unioned** (evidence wins), so the panel is strictly ≥ as strict as one reviewer. Fails **CLOSED on sub-quorum**: fewer than `ceil(N/2)` valid votes (a panelist crash/unparseable output is a non-vote) raises, failing the task closed and fast — never an approval. Prefer an **odd** N (at even N the quorum `ceil(N/2)` tolerates only a bare minority of crashes; e.g. N=2 approves on one valid vote). **Opt-in**; recommended production value `3` after a live shakedown. Each panelist's vote is persisted as an append-only `review_vote` event. |
+
 ## Sandbox (auth + resources)
 
 | Var | Default | Purpose |

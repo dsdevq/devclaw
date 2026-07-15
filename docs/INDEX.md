@@ -33,14 +33,14 @@ docs/
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`flows/task-execution.md`](./flows/task-execution.md) | Temporal trace of ONE task, every hop (node 1 waiter → node 2 devclaw-mcp → node 3 ephemeral sandbox), with a "fails if" rail. | **CURRENT** — *audited 2026-07-13*: all dispatch/settle symbols verified; Step I now lists the REPOSITORY CONTEXT input the review gate gained in #227. Sandbox mechanics re-checked 2026-07-11, unchanged. *Updated 2026-07-15*: Step D now names the per-task acceptance-criteria/constraints (carried inside the goal string) + the structured return contract `_wrap_goal` appends for code tasks. |
+| [`flows/task-execution.md`](./flows/task-execution.md) | Temporal trace of ONE task, every hop (node 1 waiter → node 2 devclaw-mcp → node 3 ephemeral sandbox), with a "fails if" rail. | **CURRENT** — *audited 2026-07-13*: all dispatch/settle symbols verified; Step I now lists the REPOSITORY CONTEXT input the review gate gained in #227. Sandbox mechanics re-checked 2026-07-11, unchanged. *Updated 2026-07-15*: Step D now names the per-task acceptance-criteria/constraints (carried inside the goal string) + the structured return contract `_wrap_goal` appends for code tasks. Step I now names `review_panel` + the opt-in `DEVCLAW_REVIEW_PANEL_N` diverse-lens panel (fail-closed on sub-quorum). |
 | [`flows/delivery.md`](./flows/delivery.md) | How dispatches become PRs: the 3 delivery shapes (backlog / checklist / program), the dispatch cap, the Shape-3 reconcile step. | **CURRENT** — *audited 2026-07-13*: cap-recovery row now names both human verbs (`steer_goal`/`resume_goal`, #228/#238) and notes the cap block never auto-heals; the Shape-1 `pr_state` quote fixed to match `tick_settle.py` verbatim. Cap formula re-verified (algebraically identical to `tick_dispatch.py`). |
 
 ## Reference
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: added `DEVCLAW_COGNITION=agent_sdk` (opt-in agent-sdk cognition backend, feat/cognition-sdk-backend); `DEVCLAW_COGNITION_TIMEOUT_S` (cognition-timeout headroom, default 180s replacing the hardcoded 90s cap — now also the agent_sdk inactivity budget); `DEVCLAW_TRACE_RETENTION_DAYS` (trace-retention prune). Prior audit 2026-07-13 (#228–#238 tranche; `DEVCLAW_SKILL_LIBRARY` removed). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
+| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: added `DEVCLAW_COGNITION=agent_sdk` (opt-in agent-sdk cognition backend, feat/cognition-sdk-backend); `DEVCLAW_COGNITION_TIMEOUT_S` (cognition-timeout headroom, default 180s replacing the hardcoded 90s cap — now also the agent_sdk inactivity budget); `DEVCLAW_TRACE_RETENTION_DAYS` (trace-retention prune); `DEVCLAW_REVIEW_PANEL_N` (opt-in diverse-lens review panel, default 1 = single reviewer). Prior audit 2026-07-13 (#228–#238 tranche; `DEVCLAW_SKILL_LIBRARY` removed). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
 
 ## Runbooks
 
