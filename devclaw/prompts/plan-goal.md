@@ -25,13 +25,27 @@ or build tooling. Include a scaffold/bootstrap task ONLY when the context shows
 an empty or not-present workspace (a "(not present)" marker or no tracked files)
 — never plan a scaffold over an existing repository.
 
+Shape each task's "goal" as a short brief, not a bare sentence:
+
+1. The concrete instruction — what the agent must build or change.
+2. An `Acceptance criteria:` block — 2-4 bullets stating the OUTCOMES that must
+   hold when the task is done (e.g. "the new flag defaults to off", "existing
+   tests still pass"), NOT a step-by-step recipe. The agent is a senior engineer
+   and picks its own approach; over-specifying steps lowers quality.
+3. A `Constraints:` block — ONLY when a real scope fence exists (files/areas not
+   to touch, a sibling task's change to expect). Omit it when there is none.
+
+Ground every criterion and constraint in the goal and the REPOSITORY CONTEXT. Do
+NOT invent a criterion or constraint that neither supports — the same rule that
+governs repository facts above.
+
 Respond with STRICT JSON ONLY - no prose, no markdown fences. Schema:
 
 {{
   "tasks": [
     {{
       "key": "<short stable id, e.g. 't1', 'scaffold'>",
-      "goal": "<concrete instruction for the agent>",
+      "goal": "<the instruction, then an `Acceptance criteria:` block of 2-4 outcome bullets, then an optional `Constraints:` block — all grounded in the goal + REPOSITORY CONTEXT>",
       "kind": "implement_feature" | "fix_bug" | "review_repository",
       "depends_on": ["<key of another task in this plan>", ...]
     }}

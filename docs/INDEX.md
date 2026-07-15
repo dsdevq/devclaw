@@ -33,7 +33,7 @@ docs/
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`flows/task-execution.md`](./flows/task-execution.md) | Temporal trace of ONE task, every hop (node 1 waiter → node 2 devclaw-mcp → node 3 ephemeral sandbox), with a "fails if" rail. | **CURRENT** — *audited 2026-07-13*: all dispatch/settle symbols verified; Step I now lists the REPOSITORY CONTEXT input the review gate gained in #227. Sandbox mechanics re-checked 2026-07-11, unchanged. |
+| [`flows/task-execution.md`](./flows/task-execution.md) | Temporal trace of ONE task, every hop (node 1 waiter → node 2 devclaw-mcp → node 3 ephemeral sandbox), with a "fails if" rail. | **CURRENT** — *audited 2026-07-13*: all dispatch/settle symbols verified; Step I now lists the REPOSITORY CONTEXT input the review gate gained in #227. Sandbox mechanics re-checked 2026-07-11, unchanged. *Updated 2026-07-15*: Step D now names the per-task acceptance-criteria/constraints (carried inside the goal string) + the structured return contract `_wrap_goal` appends for code tasks. |
 | [`flows/delivery.md`](./flows/delivery.md) | How dispatches become PRs: the 3 delivery shapes (backlog / checklist / program), the dispatch cap, the Shape-3 reconcile step. | **CURRENT** — *audited 2026-07-13*: cap-recovery row now names both human verbs (`steer_goal`/`resume_goal`, #228/#238) and notes the cap block never auto-heals; the Shape-1 `pr_state` quote fixed to match `tick_settle.py` verbatim. Cap formula re-verified (algebraically identical to `tick_dispatch.py`). |
 
 ## Reference

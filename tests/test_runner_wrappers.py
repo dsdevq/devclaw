@@ -37,7 +37,9 @@ def test_implement_feature_briefs_and_asks_to_verify(runner):
     # told to self-verify
     assert "VERIFY" in wrapped
     assert "test/build" in wrapped
-    assert wrapped.rstrip().endswith("GOAL-TOKEN")  # goal lands last
+    assert "GOAL-TOKEN" in wrapped  # the goal still rides along
+    # the structured return contract is now the FINAL section (see below)
+    assert wrapped.rstrip().endswith("with how far you got.")
 
 
 def test_fix_bug_keeps_smallest_change_and_verifies(runner):
@@ -70,6 +72,39 @@ def test_review_repository_stays_read_only(runner):
     assert "READ ONLY" in wrapped
     assert "Do NOT modify" in wrapped
     assert "look at auth" in wrapped
+
+
+# ---- structured return contract (task-brief structure work) -----------------
+
+
+def test_code_tasks_end_with_a_structured_return_contract(runner):
+    # The bare "say DONE" is replaced by a required, parseable hand-back so the
+    # goal layer gets a legible account of what shipped. Present for both
+    # code-writing kinds, and it is the LAST section (closing instruction).
+    for kind in ("implement_feature", "fix_bug"):
+        wrapped = runner._wrap_goal(kind, "GOAL-TOKEN")
+        for field in ("STATUS:", "CHANGED:", "VERIFIED:", "ACCEPTANCE:", "FOLLOW-UPS:"):
+            assert field in wrapped, f"{field} missing for {kind}"
+        assert "GOAL-TOKEN" in wrapped  # the goal still rides along
+        assert wrapped.index("GOAL-TOKEN") < wrapped.index("STATUS:")  # contract is last
+
+
+def test_return_contract_not_added_to_read_only_kinds(runner):
+    # review_repository + onboard have their OWN report contract (a written
+    # report / doc set) — the code hand-back would fight it, so it's absent.
+    # Proven absent from the raw wrapper first: the fields appear nowhere in the
+    # review/onboard templates.
+    for kind in ("review_repository", "onboard"):
+        assert "ACCEPTANCE:" not in runner._KIND_WRAPPERS[kind]  # not in the raw template
+        assert "FOLLOW-UPS:" not in runner._wrap_goal(kind, "X")  # nor in the rendered brief
+
+
+def test_return_contract_reports_outcome_never_prescribes_how(runner):
+    # The contract must not fight _QUALITY_BAR's "form your own opinion as a
+    # senior engineer": it asks for a hand-back of OUTCOMES, not a recipe.
+    contract = runner._RETURN_CONTRACT
+    assert "acceptance criterion" in contract.lower()
+    assert "only checks you truly ran" in contract  # factual, not aspirational
 
 
 def test_unknown_kind_falls_back_to_implement_feature(runner):

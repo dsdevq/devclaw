@@ -26,6 +26,15 @@ def test_prompt_falls_back_for_unknown_kind():
     assert "X" in p
 
 
+def test_code_prompts_carry_structured_return_contract():
+    # The bare "say DONE / BLOCKED" is replaced by the parseable hand-back so
+    # the claude_sdk engine's result is as legible as the OpenHands runner's.
+    for kind in ("implement_feature", "fix_bug"):
+        p = _prompt(EngineRequest(kind=kind, workspace_dir="/ws", goal="G"))
+        for field in ("STATUS:", "CHANGED:", "VERIFIED:", "ACCEPTANCE:", "FOLLOW-UPS:"):
+            assert field in p, f"{field} missing in sdk-{kind} prompt"
+
+
 def test_docker_args_have_curated_auth_mounts_and_no_api_keys():
     args = _build_docker_args(
         container_name="devclaw-test",

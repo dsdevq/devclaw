@@ -83,8 +83,12 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │                                                  │                                 │
      │  │  Step D — runner.py:                             │                                 │
      │  │     • read JSON payload from argv                │                                 │
-     │  │     • build wrapped_goal (system prompt +        │                                 │
-     │  │       quality bar + the task body)               │                                 │
+     │  │     • build wrapped_goal (skills + quality bar   │                                 │
+     │  │       + the task body — which for a code task    │                                 │
+     │  │       carries the planner's per-task acceptance  │                                 │
+     │  │       criteria/constraints inside the goal — +   │                                 │
+     │  │       a structured return contract as the last   │                                 │
+     │  │       section, _wrap_goal)                       │                                 │
      │  │     • from openhands.sdk import Conversation,    │                                 │
      │  │           ACPAgent                               │                                 │
      │  │     • agent = ACPAgent(                          │                                 │

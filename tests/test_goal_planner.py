@@ -38,6 +38,30 @@ def test_goal_planner_prompt_carries_anti_inference_guard():
     assert "must never name a language" in p
 
 
+# ---- per-task acceptance criteria + constraints (task-brief structure) ------
+
+
+def test_goal_planner_asks_for_grounded_acceptance_criteria_and_constraints():
+    """The next-action planner must brief the action's `goal` with per-task
+    acceptance criteria (OUTCOMES, not steps) + optional constraints, grounded
+    in done_when/checklist/repo context and never invented."""
+    p = build_prompt(_goal(), GoalStatus(), "", "", "")
+    assert "Acceptance criteria:" in p
+    assert "Constraints:" in p
+    assert "OUTCOMES" in p and "step-by-step recipe" in p  # outcomes, not how-to
+    # grounded, never invented — the criteria/constraints share the repo-fact rule
+    flat = " ".join(p.split())
+    assert "NEVER invent a criterion that none of those support" in flat
+    assert "senior engineer who decides its own approach" in flat  # don't over-prescribe
+
+
+def test_goal_planner_scopes_the_brief_shape_to_code_actions():
+    """review_repository actions keep a plain review-focus goal — the criteria
+    shape is only for the code-writing tools."""
+    p = build_prompt(_goal(), GoalStatus(), "", "", "")
+    assert "`review_repository` actions do not use this shape" in p
+
+
 def test_build_prompt_renders_repo_context_section_when_present():
     p = build_prompt(
         _goal(), GoalStatus(), "", "", "",

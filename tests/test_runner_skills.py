@@ -164,7 +164,19 @@ def test_wrap_goal_uses_skills_when_dir_present(runner, skill_dir):
     wrapped = runner._wrap_goal("implement_feature", "GOAL-TOKEN")
     assert "Common operating context" in wrapped
     assert "## Goal" in wrapped
-    assert wrapped.rstrip().endswith("GOAL-TOKEN")
+    # goal rides along after the skills; the return contract is the final section
+    assert "GOAL-TOKEN" in wrapped
+    assert wrapped.index("## Goal") < wrapped.index("GOAL-TOKEN") < wrapped.index("STATUS:")
+
+
+def test_wrap_goal_appends_return_contract_on_skills_path(runner, skill_dir):
+    # Even with the baked skills loaded (production path), the structured
+    # hand-back is appended after ## Goal so the engineer's result is legible.
+    wrapped = runner._wrap_goal("implement_feature", "GOAL-TOKEN")
+    for field in ("STATUS:", "CHANGED:", "VERIFIED:", "ACCEPTANCE:", "FOLLOW-UPS:"):
+        assert field in wrapped
+    # read-only kinds keep their own report contract — no code hand-back
+    assert "FOLLOW-UPS:" not in runner._wrap_goal("review_repository", "x")
 
 
 def test_wrap_goal_falls_back_when_skill_dir_missing(runner, monkeypatch, tmp_path):
@@ -188,7 +200,7 @@ def test_wrap_goal_threads_workspace_dir_to_per_repo_skills(runner, skill_dir, t
     )
     assert "Quality bar" in wrapped  # universal reaches the prompt
     assert "REPO-OBSERVATION-MARKER" in wrapped  # so does per-repo
-    assert wrapped.rstrip().endswith("GOAL-TOKEN")  # goal still lands last
+    assert "GOAL-TOKEN" in wrapped  # goal still rides along (return contract is last)
     assert wrapped != "GOAL-TOKEN"
     assert "AGENTS.md" in wrapped  # from embedded _CONTEXT_PREAMBLE
 
