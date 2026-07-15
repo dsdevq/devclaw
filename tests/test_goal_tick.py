@@ -30,6 +30,24 @@ ACT_FEATURE = json.dumps(
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_real_deploys(monkeypatch):
+    """Deploys are out of scope for tick tests, but every done-gate close runs
+    the best-effort ``_auto_deploy`` with ``enabled=True`` by default — and it
+    swallows ``Exception``, so on a docker-enabled host the achieved-verdict
+    tests here silently launched a REAL ``devclaw-deploy-g`` container that
+    outlived pytest (the 2026-07-14 leak; conftest's ``_block_real_docker``
+    now fails such an escape loudly). Stub the seam module-wide with the same
+    raiser shape individual tests already used; a test that wants to assert
+    deploy behavior patches ``deploy_project`` itself."""
+    from devclaw.delivery import deploy as deploy_mod
+
+    async def _no_deploy(workspace_dir, slug):
+        raise RuntimeError("no deploys under test")
+
+    monkeypatch.setattr(deploy_mod, "deploy_project", _no_deploy)
+
+
 def _store(tmp_path, clock):
     return GoalStore(tmp_path, now=clock)
 

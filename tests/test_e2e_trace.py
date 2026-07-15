@@ -51,13 +51,22 @@ async def _tick(store, planner, evaluator, engine, notifier, *, verify_done=True
 
 
 @pytest.mark.asyncio
-async def test_e2e_trace_captures_full_lifecycle(tmp_path):
+async def test_e2e_trace_captures_full_lifecycle(tmp_path, monkeypatch):
     """A goal advances from investigating to done over several ticks; the tracer
     sees every tick, every cognition call (with role), the dispatches, the
     delivery, and the owner-altitude notifications. Asserts the *shape* of what
     happened, not specific timing — refactors that preserve behavior preserve
     the trace; refactors that change it (extra calls, missing dispatch, wrong
     role label) fail this test loudly."""
+    # The done-gate close runs best-effort auto-deploy (enabled=True default);
+    # deploys are out of this test's scope, and unstubbed this launched a REAL
+    # devclaw-deploy-g container on docker-enabled hosts (the 2026-07-14 leak).
+    from devclaw.delivery import deploy as deploy_mod
+
+    async def _no_deploy(workspace_dir, slug):
+        raise RuntimeError("no deploys under test")
+
+    monkeypatch.setattr(deploy_mod, "deploy_project", _no_deploy)
     tracer = Tracer(label="e2e-stub")
     set_tracer(tracer)
     try:
