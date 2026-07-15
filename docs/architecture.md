@@ -215,7 +215,9 @@ append-only event log and its views are projections. Goal state is owned by
 
 - **Public surface:** the `runner.py` JSON-line stdout protocol (`event:` lines
   + a single terminating `result:` line). Layer 4 (sandcastle) consumes this.
-- **Behavior:** reads `/opt/devclaw/skills/` per kind, drops
+- **Behavior:** reads `/opt/devclaw/skills/` per kind (the `_writes-code/`
+  tier — quality bar, verify-gate coverage, e2e, frontend-design — loads only
+  for code-writing kinds), drops
   `/workspace/.mcp.json` for Playwright MCP, fires pre/post hooks (universal +
   per-repo), runs the agent loop, runs `verify_cmd`, emits `result:`.
 - **Allowed to depend on:** `claude-agent-acp`, `claude-code`, MCP servers, the

@@ -60,6 +60,21 @@ def test_writes_code_tier_loads_for_code_writing_kinds_only(runner, skill_dir):
         assert "Commit hygiene" not in bundle
 
 
+def test_frontend_design_skill_loads_for_code_kinds_and_absent_for_read_only(runner, skill_dir):
+    """The frontend-design skill ships in the _writes-code tier, so it reaches
+    the code-writing kinds (implement_feature, fix_bug) and is ABSENT from the
+    read-only / non-code kinds (review_repository, onboard) — proving it's gated
+    by the code-writing tier, not always-on."""
+    for kind in ("implement_feature", "fix_bug"):
+        bundle = runner._load_skills(kind)
+        assert "# Frontend design" in bundle
+        assert "Honor the project's design system FIRST" in bundle
+        assert "prefers-reduced-motion" in bundle
+    for kind in ("review_repository", "onboard"):
+        bundle = runner._load_skills(kind)
+        assert "Frontend design" not in bundle
+
+
 def test_fix_bug_keeps_its_smallest_change_skill(runner, skill_dir):
     bundle = runner._load_skills("fix_bug")
     assert "smallest change" in bundle.lower()
