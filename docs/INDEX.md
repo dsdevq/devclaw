@@ -40,7 +40,7 @@ docs/
 
 | Doc | Purpose | Currency |
 |---|---|---|
-| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *audited 2026-07-13*: the #228–#238 tranche added zero env vars (heal caps/backoff are code constants); `DEVCLAW_SKILL_LIBRARY` row removed with the inert skill-library subtraction (2026-07-13). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
+| [`reference/env-vars.md`](./reference/env-vars.md) | Single source of truth for every env var the runtime reads, grouped by purpose. | **CURRENT** — *updated 2026-07-15*: `DEVCLAW_COGNITION_TIMEOUT_S` row added (cognition-timeout headroom PR; default 180s replaces the hardcoded 90s cap). Prior audit 2026-07-13 (#228–#238 added zero env vars; `DEVCLAW_SKILL_LIBRARY` row removed with the inert skill-library subtraction). Doc↔code parity enforced by `tests/test_env_vars_doc_sync.py` (bidirectional). |
 
 ## Runbooks
 

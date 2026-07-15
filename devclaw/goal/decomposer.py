@@ -56,8 +56,8 @@ from ..model_tiers import model_for as _model_for
 DECOMPOSER_MODEL = _model_for("decomposer")
 
 #: per-call timeout. Decomposition routinely emits multi-KB structured YAML
-#: (a whole-CRM goal measured at ~18 KB / ~2 min on opus), well past the global
-#: 90s ceiling. Override via env if the goal is unusually large/small. The
+#: (a whole-CRM goal measured at ~18 KB / ~2 min on opus), well past the old
+#: 90s global default. Override via env if the goal is unusually large/small. The
 #: global ``PLANNER_TIMEOUT_MS`` ceiling does NOT apply when this is set.
 DECOMPOSER_TIMEOUT_MS = 300_000
 

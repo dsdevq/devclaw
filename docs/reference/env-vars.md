@@ -50,6 +50,7 @@ default; copy it to `.env` and uncomment what you want to change.
 |---|---|---|
 | `DEVCLAW_ENGINE` | *(unset)* | `(unset)` → OpenHands in a per-task docker sandbox (production). `host` → OpenHands on the host with **no** sandbox (dev/CI, agent has full FS access). `stub` → deterministic stub (harness validation, no docker, no claude). `claude_sdk` → `claude --print` inside the sandcastle (spike; see [decisions/0002-engine-mode.md](../decisions/0002-engine-mode.md)). |
 | `DEVCLAW_COGNITION` | `claude` | Which `Cognition` impl every role's `default_caller` routes through. `claude` → `claude --print` over Pro/Max OAuth (production). `stub` → deterministic canned responses (offline harnesses + eval scaffolding). Unknown values fail loud at first use. |
+| `DEVCLAW_COGNITION_TIMEOUT_S` | `180` | Default wall-clock cap (seconds) on one `claude --print` cognition call, when the role passes no explicit budget. Peak-hour latency lever: successful calls measured 50–78s while the old hardcoded 90s cap timed five calls out at exactly the cap (2026-07-14/15). Roles with their own budget (review 180s, decomposer 300s) are unaffected. Invalid or `<=0` → default. |
 
 ## Model tiering (cognition cost lever)
 
