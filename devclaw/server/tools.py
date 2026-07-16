@@ -278,6 +278,42 @@ async def get_scorecard_metrics(
     return json.dumps(compute_scorecard(store, window_hours=int(window_hours)), indent=2)
 
 
+@mcp.tool
+async def list_problems(
+    category: Optional[
+        Literal[
+            "block",
+            "task_fail",
+            "gate",
+            "delivery",
+            "limit",
+            "cognition",
+            "subprocess",
+            "other",
+        ]
+    ] = None,
+    limit: Annotated[int, Field(ge=1, le=1000)] = 100,
+) -> str:
+    """The deduplicated problems catalog (#260): distinct failures devclaw has
+    hit, most-frequent first — a ranked, countable table, not a scrolling log.
+
+    Each row is ONE root cause (fingerprinted on ``category | kind |
+    normalize(message)``), so N recurrences collapse to a single row with
+    ``count`` incremented rather than N rows. ``recovered_count`` is how often
+    devclaw carried on past it (a usage-limit pause that auto-resumes, a
+    mechanical block that self-heals); ``terminal_count`` is how often it was a
+    dead stop (a failed task, a human-gated block). ``sample_message`` keeps one
+    un-normalized example for context.
+
+    Pass ``category`` to filter to one class of failure (block / task_fail /
+    gate / delivery / limit / cognition / subprocess / other). Pure SELECT over
+    state_store — cheap, read-only, never wakes the goal loop."""
+    problems = store.list_problems(category=category, limit=int(limit))
+    return json.dumps(
+        {"count": len(problems), "problems": problems}, indent=2
+    )
+
+
 # ===== cancellation (deliberate abort) =======================================
 
 

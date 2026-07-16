@@ -148,9 +148,11 @@ failures **even when devclaw recovered from them**: a block entry
 error-bearing trace events centralized in `PersistentTracer`
 (cognition/subprocess errors, a review-gate-blocked delivery). Mechanical
 auto-heals do **not** re-record — the original block entry already counted it.
-This is the **capture + dedup + count** layer only; a ranked report over the
-table, and any dreaming / auto-approval on top, are deliberate follow-ups. See
-`devclaw/state_store/problems.py`.
+This is the **capture + dedup + count** layer; the `list_problems` MCP tool
+(reading `StateStore.list_problems`, most-frequent first, optional `category`
+filter) is the read surface over it. Any dreaming / auto-approval on top remains
+a deliberate follow-up. See `devclaw/state_store/problems.py` and the tool in
+`devclaw/server/tools.py`.
 
 ---
 
