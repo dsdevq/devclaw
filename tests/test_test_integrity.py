@@ -49,3 +49,31 @@ def test_js_skip_detected():
 def test_go_skip_detected():
     r = scan_diff(_diff("api/handler_test.go", added=["    t.Skip(\"todo\")"]))
     assert not r.ok and r.added_skips == 1
+
+
+# ---- removed-test NAME extraction (for the caller's relocation credit) --------
+
+def test_removed_names_python():
+    r = scan_diff(_diff("tests/test_api.py", removed=["def test_edge_case():", "    assert g() == 2"]))
+    assert "test_edge_case" in r.removed_names
+
+
+def test_removed_names_go():
+    r = scan_diff(_diff("api/handler_test.go", removed=["func TestConnect(t *testing.T) {"]))
+    assert "TestConnect" in r.removed_names
+
+
+def test_removed_names_js_label():
+    r = scan_diff(_diff("src/__tests__/app.test.ts", removed=["  it('opens the dropdown', () => {"]))
+    assert "opens the dropdown" in r.removed_names
+
+
+def test_removed_names_csharp_attribute_then_signature():
+    # the C# case that bit closeloop: [Fact] on one line, the method name on the
+    # next — the name must still be extracted via the attribute→signature pairing.
+    r = scan_diff(_diff(
+        "backend/Tests/Domain/DealTests.cs",
+        removed=["    [Fact]", "    public void Deal_Requires_Amount()", "    {"],
+    ))
+    assert r.removed_tests == 1
+    assert "Deal_Requires_Amount" in r.removed_names
