@@ -705,3 +705,24 @@ async def test_evaluate_threads_standing_through_to_validate():
     )
     assert r.verdict == "needs_human"
     assert "standing" in r.question.lower()
+
+
+def test_done_gate_brief_requires_browser_run_evidence_for_ui_clauses():
+    """A UI clause is satisfied only by a real-browser run — a component that
+    unit-tests green, builds, or renders in a Storybook story is not proof it
+    works in the running app (the finance-sentry cmn-select gap)."""
+    from types import SimpleNamespace
+
+    from devclaw.goal.tick_donegate import _done_gate_review_brief
+
+    goal = SimpleNamespace(
+        objective="ship a themed Angular UI library",
+        done_when="each component works in the running app",
+    )
+    brief = _done_gate_review_brief(goal)
+    lowered = brief.lower()
+    # a web-UI clause must cite a passing browser run…
+    assert "browser" in lowered and "playwright" in lowered
+    # …and the brief must call out that unit tests / stories are NOT sufficient.
+    assert "storybook" in lowered
+    assert "not proof" in lowered

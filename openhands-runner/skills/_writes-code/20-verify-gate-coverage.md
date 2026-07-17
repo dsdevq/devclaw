@@ -10,4 +10,8 @@ Before you finish:
 2. If a build step is needed before the new tests run (e.g. `npm run build` before serving a SPA), include that step in the gate too.
 3. Record in your final summary which test layers the gate now covers, so the evaluator can verify against it directly.
 
-For the browser-E2E how-to (Playwright specs, config, console-error listeners), see `craft/playwright.md`.
+## Web-UI changes are gated in a real browser
+
+If your change touches a web-UI path (`*.component.ts`, `*.component.html`, `src/app/**`, `angular.json`), the host **browser gate** fails it **closed** unless the verify gate ran a passing Playwright suite over it — unit tests + a build are not enough, because they never render the integrated app. The gate keys off a machine-readable **Playwright JSON report** (executed count > 0, zero failures), not a string-match of `verify_cmd`.
+
+So for a UI change: add a `@playwright/test` spec that exercises it in the running app, and make `verify_cmd` run `npx playwright test --reporter=json`. See `craft/playwright.md` for the config, the `webServer` boot, the console-error listeners, and the reporter-artifact contract.

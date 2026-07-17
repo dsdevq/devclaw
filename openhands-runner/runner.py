@@ -400,6 +400,39 @@ def _run_verify(cmd: str, workspace_dir: str, timeout: int = _VERIFY_TIMEOUT_S) 
     }
 
 
+#: Where the browser-E2E gate's proof-of-execution lands. The runner points
+#: Playwright's JSON reporter here (via PLAYWRIGHT_JSON_OUTPUT_NAME) so a browser
+#: run's real pass/fail counts survive to the host — the 4 KB-truncated verify
+#: `output` can't carry them. A devclaw-owned path (not the project's default)
+#: so it reflects THIS run, never a stale artifact from a prior attempt.
+_BROWSER_REPORT_REL = os.path.join(".devclaw", "playwright-report.json")
+
+
+def _read_browser_report(workspace_dir: str) -> "dict | None":
+    """Parse the Playwright JSON reporter artifact the verify gate produced (if
+    any) into the compact {expected, unexpected, flaky, skipped} summary the
+    host browser-gate keys off. Best-effort: a missing/garbled artifact returns
+    None, which the host reads as "no browser run" — fail-closed for a frontend
+    change, never a false pass."""
+    path = os.path.join(workspace_dir, _BROWSER_REPORT_REL)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    stats = data.get("stats") if isinstance(data, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    if not any(k in stats for k in ("expected", "unexpected", "flaky", "skipped")):
+        return None
+    return {
+        "expected": int(stats.get("expected", 0) or 0),
+        "unexpected": int(stats.get("unexpected", 0) or 0),
+        "flaky": int(stats.get("flaky", 0) or 0),
+        "skipped": int(stats.get("skipped", 0) or 0),
+    }
+
+
 # --- usage-limit detection ---------------------------------------------------
 # Vendored subset — keep in sync with devclaw/loom/limits.py. The runner runs
 # inside the sandbox WITHOUT the devclaw package installed, so it cannot import
@@ -739,7 +772,19 @@ def main() -> None:
     # (TaskQueue) decides done-vs-failed from `verify.passed`; here we just run it
     # and report. Emitted as an event too so it shows in the live stream.
     if verify_cmd:
+        # Point Playwright's JSON reporter at a devclaw-owned path so that IF the
+        # verify gate runs browser E2E (`npx playwright test --reporter=json`),
+        # the run's real counts survive to the host browser-gate. Set
+        # unconditionally — harmless when the gate isn't a browser suite (nothing
+        # writes the file, and the host reads its absence as fail-closed only for
+        # a frontend change with a playwright config).
+        report_path = os.path.join(workspace_dir, _BROWSER_REPORT_REL)
+        os.makedirs(os.path.dirname(report_path), exist_ok=True)
+        os.environ["PLAYWRIGHT_JSON_OUTPUT_NAME"] = report_path
         verify = _run_verify(verify_cmd, workspace_dir)
+        browser_report = _read_browser_report(workspace_dir)
+        if browser_report is not None:
+            verify["browser_report"] = browser_report
         result_payload["verify"] = verify
         _emit_event(
             {

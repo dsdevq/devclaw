@@ -58,7 +58,7 @@ _UNSET: Any = object()
 #: non-null value pins this project's behaviour regardless of the env default.
 #: ``bool`` fields persist as INTEGER (0/1), ``str`` fields as TEXT.
 _OVERRIDE_BOOL_FIELDS = ("automerge", "autodeploy", "review_gate", "verify_done")
-_OVERRIDE_STR_FIELDS = ("merge_strategy",)
+_OVERRIDE_STR_FIELDS = ("merge_strategy", "browser_gate_mode")
 _OVERRIDE_FIELDS = _OVERRIDE_BOOL_FIELDS + _OVERRIDE_STR_FIELDS
 
 
@@ -96,6 +96,7 @@ class Project:
     autodeploy: Optional[bool] = None     # DEVCLAW_GOAL_AUTODEPLOY
     review_gate: Optional[bool] = None    # devclaw default: task_queue.REVIEW_GATE_ENABLED
     verify_done: Optional[bool] = None    # DEVCLAW_GOAL_VERIFY_DONE
+    browser_gate_mode: Optional[str] = None  # DEVCLAW_GOAL_BROWSER_GATE_MODE: flexible|strict
     created_at: int = field(default_factory=_now_ms)
     updated_at: int = field(default_factory=_now_ms)
 
@@ -114,6 +115,7 @@ class Project:
             "autodeploy": self.autodeploy,
             "reviewGate": self.review_gate,
             "verifyDone": self.verify_done,
+            "browserGateMode": self.browser_gate_mode,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
@@ -153,6 +155,7 @@ def _row_to_project(r: sqlite3.Row) -> Project:
         autodeploy=_bool_col("autodeploy"),
         review_gate=_bool_col("review_gate"),
         verify_done=_bool_col("verify_done"),
+        browser_gate_mode=_str_col("browser_gate_mode"),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
     )
@@ -199,6 +202,7 @@ class ProjectRegistry:
                   autodeploy    INTEGER,
                   review_gate   INTEGER,
                   verify_done   INTEGER,
+                  browser_gate_mode TEXT,
                   created_at    INTEGER NOT NULL,
                   updated_at    INTEGER NOT NULL
                 );
@@ -237,12 +241,14 @@ class ProjectRegistry:
         autodeploy: Optional[bool] = None,
         review_gate: Optional[bool] = None,
         verify_done: Optional[bool] = None,
+        browser_gate_mode: Optional[str] = None,
     ) -> Project:
         p = Project(
             id=id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
             preview_url=preview_url, notes=notes, goal_ids=list(goal_ids or []),
             automerge=automerge, merge_strategy=merge_strategy, autodeploy=autodeploy,
             review_gate=review_gate, verify_done=verify_done,
+            browser_gate_mode=browser_gate_mode,
         )
         with self._lock:
             try:
@@ -250,13 +256,15 @@ class ProjectRegistry:
                     """INSERT INTO projects
                          (id, name, repo_url, workspace_dir, preview_url, status,
                           goal_ids, notes, automerge, merge_strategy, autodeploy,
-                          review_gate, verify_done, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                          review_gate, verify_done, browser_gate_mode,
+                          created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         p.id, p.name, p.repo_url, p.workspace_dir, p.preview_url,
                         p.status, json.dumps(p.goal_ids), p.notes,
                         _bool_db(p.automerge), p.merge_strategy, _bool_db(p.autodeploy),
                         _bool_db(p.review_gate), _bool_db(p.verify_done),
+                        p.browser_gate_mode,
                         p.created_at, p.updated_at,
                     ),
                 )
@@ -306,6 +314,7 @@ class ProjectRegistry:
         autodeploy: Optional[bool] = _UNSET,
         review_gate: Optional[bool] = _UNSET,
         verify_done: Optional[bool] = _UNSET,
+        browser_gate_mode: Optional[str] = _UNSET,
     ) -> Project:
         """Partial update — only the supplied fields change. Returns the updated
         project. Raises KeyError if unknown. ``updated_at`` always bumps.
@@ -342,6 +351,8 @@ class ProjectRegistry:
             p.review_gate = review_gate
         if verify_done is not _UNSET:
             p.verify_done = verify_done
+        if browser_gate_mode is not _UNSET:
+            p.browser_gate_mode = browser_gate_mode
         p.updated_at = _now_ms()
         self._save(p)
         return p
@@ -379,13 +390,14 @@ class ProjectRegistry:
                 """UPDATE projects SET
                      name=?, repo_url=?, workspace_dir=?, preview_url=?, status=?,
                      goal_ids=?, notes=?, automerge=?, merge_strategy=?, autodeploy=?,
-                     review_gate=?, verify_done=?, updated_at=?
+                     review_gate=?, verify_done=?, browser_gate_mode=?, updated_at=?
                    WHERE id=?""",
                 (
                     p.name, p.repo_url, p.workspace_dir, p.preview_url, p.status,
                     json.dumps(p.goal_ids), p.notes,
                     _bool_db(p.automerge), p.merge_strategy, _bool_db(p.autodeploy),
                     _bool_db(p.review_gate), _bool_db(p.verify_done),
+                    p.browser_gate_mode,
                     p.updated_at, p.id,
                 ),
             )

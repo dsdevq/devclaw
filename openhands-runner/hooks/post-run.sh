@@ -35,6 +35,23 @@ if [ -n "$new_spec_files" ]; then
   fi
 fi
 
+# ---- check 1b: web-UI SOURCE changed but the gate runs no browser E2E ----
+# Stronger than 1a (which only fires on ADDED spec files): a change that edits
+# components/templates without any browser run will fail the host browser-gate
+# CLOSED at settle. Surface it EARLY so the agent adds the spec + JSON reporter
+# now, instead of discovering it after a wasted gate round.
+changed_ui=""
+if [ -n "$pre_head" ] && [ -d "$workspace_dir/.git" ]; then
+  changed_ui=$(git -C "$workspace_dir" diff --name-only "$pre_head" -- \
+    '**/*.component.ts' '**/*.component.html' '*/src/app/**' 'angular.json' 2>/dev/null || true)
+fi
+if [ -n "$changed_ui" ] && [ -n "$verify_cmd" ] && ! echo "$verify_cmd" | grep -qiE 'playwright'; then
+  echo "warn: web-UI source changed but verify_cmd runs no browser E2E — the browser gate will fail this CLOSED:"
+  echo "$changed_ui" | sed 's/^/  - /'
+  echo "  verify_cmd: $verify_cmd"
+  echo "  fix: add a Playwright spec that exercises this change in the running app, and extend verify_cmd to run 'npx playwright test --reporter=json' (see craft/playwright.md)."
+fi
+
 # ---- check 2: AGENTS.md exists but wasn't updated this run ----
 # The _common skill tells the agent to keep AGENTS.md current. If it shipped a
 # change without touching AGENTS.md, surface a soft warning so the next planner
