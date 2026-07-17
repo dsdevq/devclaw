@@ -450,6 +450,20 @@ async def _resolve_polling_action(
             )
         else:
             ctx.store.append_log(goal_id, f"auto-merge failed, left for review: {poll.pr_url}")
+            # Loud, not silent (2026-07-17): automerge is ENABLED for this goal
+            # but the merge did not land (failing/pending checks, a conflict, a gh
+            # hiccup). The best-effort merger swallows the reason and returns
+            # False, so WITHOUT this the owner never learns it was attempted — and
+            # is later paged to "please merge PR X" as if nothing tried (the
+            # finance-sentry "automerge never fired" confusion, 2026-07-17). A PR
+            # that needs a manual merge IS a needs-you event → OWNER altitude.
+            await _notify(
+                ctx.notifier, NotifyLevel.OWNER,
+                f"⚠️ [{goal_id}] auto-merge failed — {_action_label(ref)} shipped "
+                f"but its PR did not merge automatically (check its CI/mergeability). "
+                f"Please merge it by hand: {poll.pr_url}",
+                summarize=ctx.summary_caller,
+            )
 
     # Program settle: a finished program leaves a STACK of PRs the single-PR
     # auto-merge above can't touch (no single gate verdict). Reconcile the

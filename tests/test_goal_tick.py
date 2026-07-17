@@ -985,6 +985,35 @@ async def test_green_delivery_auto_merges_when_enabled(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_failed_auto_merge_pings_owner_loudly(tmp_path, monkeypatch):
+    """A FAILED automerge (enabled, gate green, but the merge didn't land) must
+    ping the OWNER, not silently leave the PR and later page to 'please merge PR
+    X' as if nothing tried — the finance-sentry 'automerge never fired'
+    confusion (2026-07-17). Loud failure over silent degradation."""
+    monkeypatch.setattr("devclaw.goal.tick._merge.AUTOMERGE_ENABLED", True)
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", _delivery_status())
+    planner, evaluator = FakeClaude(ACT_FEATURE), FakeClaude()
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", detail="added /health",
+        pr_url="https://github.com/o/r/pull/9", gate_passed=True,
+    ))
+    notifier, merger = RecordingNotifier(), RecordingMerger(ok=False)
+
+    await _tick(store, "g", planner, evaluator, engine, notifier, merger=merger)
+
+    assert merger.merged == ["https://github.com/o/r/pull/9"]  # the merge WAS attempted
+    # …and its failure produced an OWNER-altitude ping (default floor) naming the
+    # PR the owner must now merge by hand — not a silent log line.
+    pings = [m for m in notifier.sent if "auto-merge failed" in m.lower()]
+    assert pings, f"expected a loud owner ping on failed automerge, got {notifier.sent}"
+    assert "https://github.com/o/r/pull/9" in pings[0]
+    # the planner is told the PR is still open (unmerged), not merged.
+    assert "pr_state=open" in planner.last_prompt
+
+
+@pytest.mark.asyncio
 async def test_merge_fires_on_a_passed_merger_even_with_global_flag_off(tmp_path, monkeypatch):
     """Regression lock for the per-project-override bug found 2026-07-05: a
     project can pin automerge ON for its own repo even while the devclaw-wide
