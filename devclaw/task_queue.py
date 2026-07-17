@@ -45,6 +45,7 @@ from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .quality import format_feedback, review_panel
+from .quality.browser_gate import PLAYWRIGHT_CONFIG_NAMES, browser_run_verdict
 from .engine.sandcastle import run_sandcastle, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
@@ -100,6 +101,22 @@ _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
 #: re-running (the same diff re-crashes the gate identically), so it fails FAST
 #: instead of burning the retry budget and then the goal-level re-dispatch loop.
 _REVIEW_CRASH_MARKER = "review gate crashed (failing closed):"
+#: Browser-E2E gate (2026-07-17): after verify + integrity + review pass, a change
+#: that touched a web-UI path must have been exercised in a REAL browser (a passing
+#: Playwright run, proven via the runner's `browser_report` counts) before it ships
+#: — closing the hole where `ng build && vitest` + a static diff review pass while
+#: the running app is broken (finance-sentry cmn-select threw NG05105 unopened).
+#: Fail-open on capability uncertainty (a project with no browser suite, under
+#: `flexible`), fail-closed on evidence (a failed/un-run suite).
+BROWSER_GATE_ENABLED = os.environ.get("DEVCLAW_GOAL_BROWSER_GATE", "1") not in ("0", "false", "")
+#: "strict" → a frontend change with no browser suite at all (`absent`) blocks,
+#: forcing E2E adoption; "flexible" (default) lets `absent` fall through with a
+#: loud log so a not-yet-E2E'd project isn't wedged. Mirrors CI_GATE_MODE. The
+#: per-project override is resolved in _browser_gate_mode (registry seam).
+BROWSER_GATE_MODE = os.environ.get("DEVCLAW_GOAL_BROWSER_GATE_MODE", "flexible")
+#: Stable prefix on the browser-gate feed-back reason (parallels the review/
+#: integrity reasons) so the settle path and tests can recognise it.
+_BROWSER_GATE_MARKER = "browser gate (failing closed):"
 #: per-workspace circuit-breaker: N task failures on the same workspace_dir
 #: within WINDOW_S trips a hold for HOLD_S. Sibling of the global quota pause but
 #: scoped, so one broken workspace doesn't starve the others. Trigger event that
@@ -183,6 +200,53 @@ def _integrity_failure(diff: str) -> Optional[str]:
         f"{report.summary()}. The gate passed, but the change weakened the test "
         "suite — restore the tests and make the code genuinely pass them; do not "
         "delete, skip, or gut tests to go green."
+    )
+
+
+def _has_playwright_config(workspace_dir: str) -> bool:
+    """Does the workspace carry a Playwright config anywhere near its roots — i.e.
+    has the project opted into a browser suite at all? Bounded walk (skips
+    node_modules/.git/dist and stops at depth 3) so a large monorepo stays cheap.
+    This is the capability signal that separates ``never_ran`` (config exists, a
+    run was expected, none happened) from ``absent`` (nothing to run)."""
+    try:
+        for root, dirs, files in os.walk(workspace_dir):
+            dirs[:] = [d for d in dirs if d not in ("node_modules", ".git", "dist", ".angular", ".venv")]
+            if root[len(workspace_dir):].count(os.sep) >= 3:
+                dirs[:] = []
+            if any(f in PLAYWRIGHT_CONFIG_NAMES for f in files):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _browser_gate_failure(
+    verify: Optional[dict], diff: str, workspace_dir: str, *, mode: str
+) -> Optional[str]:
+    """Return a feed-back reason if a web-UI change failed the browser-E2E gate
+    CLOSED, else None. A change that touched a frontend path must carry a passing
+    real-browser run (the runner's ``browser_report``); a failed or un-run suite
+    is fed back through the SAME retry loop as an integrity/review failure so the
+    agent adds/repairs the Playwright spec. Fail-open on capability uncertainty
+    (a project with no browser suite, under ``flexible``); fail-closed on
+    evidence. No cognition, no network — a bounded filesystem check + the pure
+    verdict."""
+    if not BROWSER_GATE_ENABLED:
+        return None
+    config_present = _has_playwright_config(workspace_dir)
+    verdict = browser_run_verdict(verify, diff, config_present=config_present)
+    if not verdict.blocks_delivery(mode):
+        if verdict.state == "absent":
+            sys.stderr.write(
+                f"task-queue: browser-gate not enforced ({mode}) — {verdict.detail}\n"
+            )
+        return None
+    return (
+        f"{_BROWSER_GATE_MARKER} {verdict.detail}. A change touching the web UI must "
+        "pass a real-browser end-to-end run (`npx playwright test --reporter=json`) "
+        "before it ships — add or repair the Playwright spec that exercises this "
+        "change in the running app, and make the verify gate run it."
     )
 
 
@@ -985,6 +1049,18 @@ class TaskQueue(_NotifyMixin):
                                 task_id=task_id, program_id=program_id,
                             )
                         )
+                        # Browser-E2E gate: a change that touched a web-UI path must
+                        # carry a passing real-browser run (verify's browser_report),
+                        # else it fails CLOSED and retries — closing the "green unit
+                        # tests + static review, broken in the running app" hole.
+                        # Only when integrity + review already passed (short-circuit).
+                        browser_fb = (
+                            None if (integrity is not None or review_fb is not None)
+                            else _browser_gate_failure(
+                                verify, diff, workspace_dir,
+                                mode=self._browser_gate_mode(workspace_dir),
+                            )
+                        )
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
                             # a gate failure so it retries with the tampering fed back.
@@ -993,6 +1069,11 @@ class TaskQueue(_NotifyMixin):
                             # gate + tests fine, but review found a real defect — feed
                             # the issues back through the SAME retry loop as a gate fail.
                             last_failure = review_fb
+                        elif browser_fb is not None:
+                            # gate + tests + review fine, but a UI change was never
+                            # exercised in a browser — feed back so the agent adds the
+                            # E2E spec and runs it (fail closed, same retry loop).
+                            last_failure = browser_fb
                         elif defer_done:
                             # caller delivers, then settles 'done' WITH pr_url atomically
                             return result
@@ -1091,6 +1172,14 @@ class TaskQueue(_NotifyMixin):
         return self._registry.resolve_override(
             workspace_dir, "review_gate", REVIEW_GATE_ENABLED
         )
+
+    def _browser_gate_mode(self, workspace_dir: str) -> str:
+        """Browser-gate stance (``flexible``|``strict``) for a task in
+        ``workspace_dir``. The devclaw-wide ``BROWSER_GATE_MODE`` default; the
+        per-project override is wired in a follow-up via the same registry seam
+        as ``_review_gate_enabled`` (which needs the ``browser_gate_mode`` field
+        added to the registry's override set + Project schema first)."""
+        return BROWSER_GATE_MODE
 
     def _reviewer_accepts_record_vote(self) -> bool:
         """Whether the wired reviewer takes a ``record_vote`` sink (review_panel
