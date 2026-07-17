@@ -42,7 +42,7 @@ from typing import Awaitable, Callable, Optional
 from .delivery import deliver_change, delivery_failed
 from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
-from .loom.test_integrity import scan_diff
+from .loom.test_integrity import present_test_names, scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .quality import format_feedback, review_panel
 from .quality.browser_gate import PLAYWRIGHT_CONFIG_NAMES, browser_run_verdict
@@ -179,13 +179,21 @@ async def _review_repo_context(host_dir: str) -> str:
     return await asyncio.to_thread(_review_repo_context_sync, host_dir)
 
 
-def _integrity_failure(diff: str) -> Optional[str]:
+def _integrity_failure(diff: str, workspace_dir: Optional[str] = None) -> Optional[str]:
     """Return a failure summary if the change weakened the tests (deleted/skipped),
     else None. Enforces what the prompt only asks for. Operates on an already-
     computed diff (shared with the review gate). A CRASH in the scanner fails
     CLOSED: a quality gate that silently no-ops on its own error is exactly how
     a gutted test suite ships unnoticed — the crash feeds the same retry loop
-    as a real integrity failure, then escalates."""
+    as a real integrity failure, then escalates.
+
+    Relocation credit (2026-07-17): a removed test whose name still exists as a
+    test declaration ELSEWHERE in the post-change tree is a move/dedup, not a
+    weakening — crediting it unblocks the legitimate "delete the old file whose
+    methods a prior PR already ported" case that cost closeloop-bench ~40h of
+    thrash. Grounded against the real tree via ``present_test_names``; only
+    positive evidence relaxes, and a walk hiccup credits nothing (fail closed),
+    so a genuine test deletion is never waved through."""
     try:
         report = scan_diff(diff)
     except Exception as err:  # noqa: BLE001 — fail closed, never silently approve
@@ -194,6 +202,19 @@ def _integrity_failure(diff: str) -> Optional[str]:
             f"{err.__class__.__name__}: {err}. The change was not scanned for "
             "weakened tests, so it must not ship on the gate's silence."
         )
+    if report.ok:
+        return None
+    if report.removed_tests > 0 and report.removed_names and workspace_dir:
+        try:
+            present = present_test_names(workspace_dir)
+        except Exception:  # noqa: BLE001 — a walk hiccup must not mask a weakening
+            present = set()
+        # distinct removed names proven to live elsewhere, capped at the count.
+        credited = min(
+            report.removed_tests,
+            len({n for n in report.removed_names if n in present}),
+        )
+        report.removed_tests = max(0, report.removed_tests - credited)
     if report.ok:
         return None
     return (
@@ -1041,7 +1062,7 @@ class TaskQueue(_NotifyMixin):
                         # diff came back empty and BOTH guards silently no-op'd in
                         # the deployed container. Use workspace_dir directly.
                         diff = await _git_diff(workspace_dir, pre_run_sha)
-                        integrity = _integrity_failure(diff)
+                        integrity = _integrity_failure(diff, workspace_dir)
                         review_fb = (
                             None if integrity is not None
                             else await self._review_failure(
