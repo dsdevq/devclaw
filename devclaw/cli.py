@@ -123,6 +123,8 @@ def _print_show(p: dict) -> None:
     print(f"  autodeploy: {_ovr(p.get('autodeploy'))}")
     print(f"  review-gate: {_ovr(p.get('reviewGate'))}")
     print(f"  verify-done: {_ovr(p.get('verifyDone'))}")
+    bgm = p.get("browserGateMode")
+    print(f"  browser-gate-mode: {bgm if bgm is not None else 'inherit (devclaw default)'}")
     if p.get("notes"):
         print(f"  notes:     {p['notes']}")
     goals = p.get("goals", [])
@@ -179,6 +181,7 @@ def _cmd_register(reg: ProjectRegistry, all_goals, args) -> int:
             autodeploy=(None if args.autodeploy is None else _onoff[args.autodeploy]),
             review_gate=(None if args.review_gate is None else _onoff[args.review_gate]),
             verify_done=(None if args.verify_done is None else _onoff[args.verify_done]),
+            browser_gate_mode=args.browser_gate_mode,
         )
     except ProjectExists:
         print(f"project already exists: {args.id}", file=sys.stderr)
@@ -196,6 +199,8 @@ def _cmd_update(reg: ProjectRegistry, all_goals, args) -> int:
             override_kwargs[field] = _onoff[val]
     if args.merge_strategy is not None:
         override_kwargs["merge_strategy"] = None if args.merge_strategy == "inherit" else args.merge_strategy
+    if args.browser_gate_mode is not None:
+        override_kwargs["browser_gate_mode"] = None if args.browser_gate_mode == "inherit" else args.browser_gate_mode
     try:
         reg.update(
             args.id, name=args.name, repo_url=args.repo_url,
@@ -1023,6 +1028,10 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="pin the pre-PR review gate; omit to inherit the default")
     p_reg.add_argument("--verify-done", choices=["on", "off"],
                         help="pin the grounded done-gate re-check; omit to inherit the default")
+    p_reg.add_argument("--browser-gate-mode", choices=["flexible", "strict"],
+                        help="pin the browser-E2E gate stance for a project with no "
+                             "Playwright suite (strict forces E2E adoption); omit to "
+                             "inherit the default")
     p_reg.set_defaults(func=_cmd_register)
 
     p_upd = psub.add_parser("update", help="update project fields")
@@ -1045,6 +1054,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="pin the pre-PR review gate; 'inherit' clears; omit to leave unchanged")
     p_upd.add_argument("--verify-done", choices=["on", "off", "inherit"],
                         help="pin the grounded done-gate re-check; 'inherit' clears; omit to leave unchanged")
+    p_upd.add_argument("--browser-gate-mode", choices=["flexible", "strict", "inherit"],
+                        help="pin the browser-E2E gate stance (strict forces E2E "
+                             "adoption); 'inherit' clears; omit to leave unchanged")
     p_upd.set_defaults(func=_cmd_update)
 
     p_link = psub.add_parser("link", help="link/unlink a goal to a project")

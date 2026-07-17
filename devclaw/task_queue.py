@@ -1175,11 +1175,14 @@ class TaskQueue(_NotifyMixin):
 
     def _browser_gate_mode(self, workspace_dir: str) -> str:
         """Browser-gate stance (``flexible``|``strict``) for a task in
-        ``workspace_dir``. The devclaw-wide ``BROWSER_GATE_MODE`` default; the
-        per-project override is wired in a follow-up via the same registry seam
-        as ``_review_gate_enabled`` (which needs the ``browser_gate_mode`` field
-        added to the registry's override set + Project schema first)."""
-        return BROWSER_GATE_MODE
+        ``workspace_dir``: the owning project's ``browser_gate_mode`` override if
+        set, else the devclaw-wide ``BROWSER_GATE_MODE`` default. No registry
+        wired → the default. Same resolver seam as ``_review_gate_enabled``."""
+        if self._registry is None:
+            return BROWSER_GATE_MODE
+        return self._registry.resolve_override(
+            workspace_dir, "browser_gate_mode", BROWSER_GATE_MODE
+        )
 
     def _reviewer_accepts_record_vote(self) -> bool:
         """Whether the wired reviewer takes a ``record_vote`` sink (review_panel
