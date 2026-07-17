@@ -24,6 +24,7 @@ because nothing ever read it — the only real switch was the global env var).
 from __future__ import annotations
 
 import asyncio
+import sys
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 if TYPE_CHECKING:
@@ -81,9 +82,18 @@ async def merge_pr(pr_url: str, strategy: str = DEFAULT_MERGE_STRATEGY) -> bool:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         out, _ = await proc.communicate()
-    except Exception:  # noqa: BLE001 — best-effort; never break the tick
+    except Exception as exc:  # noqa: BLE001 — best-effort; never break the tick
+        sys.stderr.write(f"merge.merge_pr: {pr_url} crashed: {exc.__class__.__name__}: {exc}\n")
         return False
-    return proc.returncode == 0
+    if proc.returncode != 0:
+        # Surface WHY to the logs — the caller only sees the bool and pings the
+        # owner, but the operator debugging "automerge isn't firing" needs the gh
+        # reason (pending checks, not mergeable, auth). The reason is otherwise
+        # swallowed. Observable, still best-effort (never raises into the tick).
+        reason = (out.decode(errors="replace").strip() or "no output")[:300]
+        sys.stderr.write(f"merge.merge_pr: {pr_url} not merged (rc={proc.returncode}): {reason}\n")
+        return False
+    return True
 
 
 def default_merger(strategy: str = DEFAULT_MERGE_STRATEGY) -> Merger:
