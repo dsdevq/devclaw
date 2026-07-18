@@ -455,3 +455,118 @@ def test_inprocess_engine_exposes_prune_seam(store, monkeypatch):
     engine = InProcessEngine(TaskQueue(store), store)
     assert engine.prune_traces() == 1
     assert store.read_traces(goal_id="g") == []
+
+
+# ---- events retention prune (volume hygiene, 2026-07-18) -------------------
+#
+# The events table (raw runner SDK events, one row per agent action) is the
+# highest-volume append-only log after traces and grew unbounded until now. It
+# shares the trace prune's table-agnostic machinery — these tests mirror the
+# trace-prune ones and add a guard that the two prunes keep INDEPENDENT daily
+# watermarks (a shared watermark would let one prune suppress the other).
+
+
+def _old_event(store, *, age_days: int, task_id: str = "task-1"):
+    store.append_event(
+        task_id=task_id, program_id=None, type="note", source="test",
+        payload_json="{}", ts=_NOW - age_days * _DAY_MS,
+    )
+
+
+def _event_count(store, task_id: str = "task-1") -> int:
+    return len(store.list_events(task_id=task_id, limit=10_000))
+
+
+def test_events_prune_deletes_old_rows_and_keeps_recent(store):
+    _old_event(store, age_days=31)
+    _old_event(store, age_days=1)
+    deleted = store.maybe_prune_events(now_ms=_NOW, retention_days=30)
+    assert deleted == 1
+    assert _event_count(store) == 1  # only the fresh row survives
+
+
+def test_events_prune_runs_at_most_once_per_day(store):
+    _old_event(store, age_days=40)
+    assert store.maybe_prune_events(now_ms=_NOW, retention_days=30) == 1
+    # New stale rows appear, but the daily watermark gates the next cycle...
+    _old_event(store, age_days=40)
+    assert store.maybe_prune_events(now_ms=_NOW + 3600 * 1000, retention_days=30) == 0
+    assert _event_count(store) == 1
+    # ...until a day has passed.
+    assert store.maybe_prune_events(now_ms=_NOW + 25 * 3600 * 1000, retention_days=30) == 1
+    assert _event_count(store) == 0
+
+
+def test_events_prune_drains_backlog_in_batches_across_ticks(store):
+    """A FULL batch leaves the watermark alone so the next tick continues the
+    drain — a huge first prune spreads across ticks instead of wedging one."""
+    for _ in range(5):
+        _old_event(store, age_days=40)
+    assert store.maybe_prune_events(now_ms=_NOW, retention_days=30, batch_limit=2) == 2
+    assert store.maybe_prune_events(now_ms=_NOW + 1, retention_days=30, batch_limit=2) == 2
+    # Short batch → drained → watermark stamps, daily gate takes over.
+    assert store.maybe_prune_events(now_ms=_NOW + 2, retention_days=30, batch_limit=2) == 1
+    assert _event_count(store) == 0
+    _old_event(store, age_days=40)
+    assert store.maybe_prune_events(now_ms=_NOW + 3600 * 1000, retention_days=30, batch_limit=2) == 0
+
+
+def test_events_prune_disabled_by_zero_negative_or_invalid_env(store, monkeypatch):
+    """0 / negative / unparseable DEVCLAW_EVENTS_RETENTION_DAYS disables the
+    prune gracefully — a typo must never crash the heartbeat or delete rows."""
+    _old_event(store, age_days=400)
+    for raw in ("0", "-5", "not-a-number"):
+        monkeypatch.setenv("DEVCLAW_EVENTS_RETENTION_DAYS", raw)
+        assert store.maybe_prune_events(now_ms=_NOW) == 0
+    assert _event_count(store) == 1  # nothing deleted
+
+
+def test_events_retention_days_env_parsing(monkeypatch):
+    from devclaw.state_store.core import events_retention_days
+
+    monkeypatch.delenv("DEVCLAW_EVENTS_RETENTION_DAYS", raising=False)
+    assert events_retention_days() == 30     # unset → default
+    monkeypatch.setenv("DEVCLAW_EVENTS_RETENTION_DAYS", "7")
+    assert events_retention_days() == 7
+    monkeypatch.setenv("DEVCLAW_EVENTS_RETENTION_DAYS", "0")
+    assert events_retention_days() == 0      # explicit off
+    monkeypatch.setenv("DEVCLAW_EVENTS_RETENTION_DAYS", "-3")
+    assert events_retention_days() == 0      # negative → off
+    monkeypatch.setenv("DEVCLAW_EVENTS_RETENTION_DAYS", "thirty")
+    assert events_retention_days() == 0      # unparseable → off, gracefully
+    monkeypatch.setenv("DEVCLAW_EVENTS_RETENTION_DAYS", "   ")
+    assert events_retention_days() == 30     # blank → default (unset-equivalent)
+
+
+def test_events_and_traces_prune_keep_independent_watermarks(store):
+    """The two prunes must not share a daily watermark: pruning traces must not
+    suppress the events prune within the same day (separate meta keys)."""
+    store.append_trace_event(
+        trace_id="t", goal_id="g", kind="note", payload={"tag": "stale"},
+        ts=_NOW - 40 * _DAY_MS,
+    )
+    _old_event(store, age_days=40)
+    # Prune traces first — stamps the trace watermark only.
+    assert store.maybe_prune_traces(now_ms=_NOW, retention_days=30) == 1
+    # Events prune in the SAME instant must still run (its own watermark).
+    assert store.maybe_prune_events(now_ms=_NOW, retention_days=30) == 1
+    assert store.read_traces(goal_id="g") == []
+    assert _event_count(store) == 0
+
+
+def test_inprocess_engine_exposes_events_prune_seam(store, monkeypatch):
+    """The goal heartbeat reaches the events prune through the engine (same
+    getattr seam as prune_traces) — InProcessEngine must delegate to
+    maybe_prune_events."""
+    from devclaw.goal.engine import InProcessEngine
+    from devclaw.state_store import _now_ms
+    from devclaw.task_queue import TaskQueue
+
+    monkeypatch.delenv("DEVCLAW_EVENTS_RETENTION_DAYS", raising=False)
+    store.append_event(
+        task_id="task-1", program_id=None, type="note", source="test",
+        payload_json="{}", ts=_now_ms() - 40 * _DAY_MS,
+    )
+    engine = InProcessEngine(TaskQueue(store), store)
+    assert engine.prune_events() == 1
+    assert _event_count(store) == 0
