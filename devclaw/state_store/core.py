@@ -63,6 +63,22 @@ _TRACE_PRUNE_META_KEY = "trace_prune_last_ms"
 #: meta key holding the epoch-ms of the last COMPLETED (drained) events prune cycle.
 _EVENTS_PRUNE_META_KEY = "events_prune_last_ms"
 
+# ---- VACUUM (reclaim disk the prunes free, 2026-07-18) ----------------------
+# The retention prunes DELETE rows but SQLite never returns freed pages to the
+# OS on its own — the .db file only ever grows, freed pages are merely reused.
+# A periodic VACUUM rebuilds the file so the space the prunes reclaim actually
+# comes back. VACUUM rewrites the whole DB (holds the write lock, needs free
+# disk ~= file size), so it runs RARELY (weekly) and only when there's real
+# reclaim to be had (freelist past a threshold) — never on a healthy DB. Pure
+# SQLite, zero LLM, on the heartbeat cheap path beside the prunes.
+#: A VACUUM runs at most once per week (watermark in ``meta``).
+_VACUUM_INTERVAL_MS = 7 * 24 * 3600 * 1000
+#: Only VACUUM when at least this many free pages are reclaimable — at the 4KB
+#: default page size, ~40MB. Below it the rewrite cost isn't worth the reclaim.
+_VACUUM_MIN_FREELIST_PAGES = 10_000
+#: meta key holding the epoch-ms of the last VACUUM cycle CHECK (vacuumed or not).
+_VACUUM_META_KEY = "vacuum_last_ms"
+
 
 def _parse_retention_days(raw: Optional[str], default: int) -> int:
     """Parse a retention-days env value with the fail-safe semantics shared by
@@ -99,6 +115,8 @@ def events_retention_days() -> int:
 class StateStore(ControlPlaneMixin, ProblemsMixin):
     def __init__(self, db_path: str) -> None:
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+        #: resolved path to the .db file, kept for VACUUM / on-disk size checks.
+        self._db_path = str(Path(db_path).expanduser())
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")  # concurrent reads, single writer
@@ -925,6 +943,58 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
             table="events", meta_key=_EVENTS_PRUNE_META_KEY,
             retention_days=days, now_ms=now, batch_limit=batch_limit,
         )
+
+    def maybe_vacuum(
+        self,
+        *,
+        now_ms: Optional[int] = None,
+        interval_ms: int = _VACUUM_INTERVAL_MS,
+        min_freelist_pages: int = _VACUUM_MIN_FREELIST_PAGES,
+    ) -> bool:
+        """Weekly VACUUM that returns the disk the retention prunes free back to
+        the OS (SQLite reuses freed pages but never shrinks the .db file on its
+        own). The heartbeat's cheap-path maintenance hook, beside the prunes.
+
+        Semantics:
+          * checked at most once per ``interval_ms`` (weekly), gated by the
+            ``vacuum_last_ms`` meta watermark — stamped on every CHECK (whether
+            or not it vacuumed) so a healthy DB isn't re-inspected every tick;
+          * only actually VACUUMs when the freelist is at least
+            ``min_freelist_pages`` (real reclaim to be had) — a rewrite of a
+            near-full DB for a few free pages isn't worth the write-lock cost;
+          * never runs inside an open ``transaction()`` (VACUUM cannot run in a
+            transaction) — defers to a later tick.
+
+        Returns True iff it actually VACUUMed. Pure SQLite — zero LLM calls,
+        safe on the zero-token idle path (the rare weekly rewrite aside)."""
+        now = _now_ms() if now_ms is None else now_ms
+        raw = self.get_meta(_VACUUM_META_KEY)
+        try:
+            last = int(raw) if raw else 0
+        except ValueError:
+            last = 0
+        if last and (now - last) < interval_ms:
+            return False
+        with self._lock:
+            if self._txn_depth > 0:
+                # Mid atomic unit — VACUUM would raise. Try again next tick
+                # (do NOT stamp the watermark: this cycle never happened).
+                return False
+            free = int(self._db.execute("PRAGMA freelist_count").fetchone()[0])
+            if free < min_freelist_pages:
+                # Inspected, nothing worth reclaiming — stamp so we wait a full
+                # interval rather than re-checking every tick.
+                self.set_meta(_VACUUM_META_KEY, str(now))
+                return False
+            self._db.commit()  # VACUUM requires no open transaction
+            self._db.execute("VACUUM")
+            self._db.commit()
+            # Stamp only AFTER a successful rewrite: a VACUUM that raises (e.g.
+            # not enough scratch disk — it needs ~file-size free) leaves the
+            # watermark alone, so the next tick retries rather than deferring a
+            # full week. Symmetric with the transaction-defer path above.
+            self.set_meta(_VACUUM_META_KEY, str(now))
+            return True
 
     def list_events(
         self,

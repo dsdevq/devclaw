@@ -688,6 +688,10 @@ async def tick_all(
     # (single-writer invariant), the engine is just the seam.
     _engine_prune_traces(engine)
     _engine_prune_events(engine)
+    # Reclaim the disk those DELETEs free — a weekly, freelist-gated VACUUM
+    # (SQLite reuses freed pages but never shrinks the .db file on its own).
+    # Same cheap-path slot, same zero-LLM guarantee.
+    _engine_vacuum(engine)
 
     for goal_id in store.list_goal_ids():
         # Per-goal run-window: a goal can carry its OWN night/off-hours schedule
@@ -781,6 +785,20 @@ def _engine_prune_events(engine: GoalEngine) -> None:
     a maintenance failure must never break the heartbeat — the events table
     just stays bigger until a later tick succeeds."""
     fn = getattr(engine, "prune_events", None)
+    if not callable(fn):
+        return
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — maintenance must not break the heartbeat
+        pass
+
+
+def _engine_vacuum(engine: GoalEngine) -> None:
+    """Run the weekly, freelist-gated VACUUM via the engine, if it exposes one
+    (the in-process engine does; test doubles may not → no vacuum). Best-effort:
+    a maintenance failure must never break the heartbeat — the .db just stays at
+    its current size until a later tick reclaims it."""
+    fn = getattr(engine, "vacuum", None)
     if not callable(fn):
         return
     try:
