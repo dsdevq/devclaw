@@ -88,6 +88,32 @@ export function tokenQueryString(): string {
   return tokenQS();
 }
 
+// A goal plus the project it belongs to — the row shape the Overview and the
+// global Goals view render. Aggregated client-side (there's no single all-goals
+// endpoint) by fanning out over each project's detail; N is small.
+export interface GoalWithProject extends GoalRow {
+  projectId: string;
+  projectName: string;
+  archived: boolean;
+}
+
+export async function fetchAllGoals(): Promise<GoalWithProject[]> {
+  const projects = await fetchProjects();
+  const details = await Promise.all(
+    projects.map((pr) => fetchProject(pr.id).catch(() => null)),
+  );
+  const out: GoalWithProject[] = [];
+  details.forEach((d, i) => {
+    if (!d) return;
+    const proj = projects[i];
+    const push = (g: GoalRow, archived: boolean) =>
+      out.push({ ...g, projectId: proj.id, projectName: proj.name, archived });
+    d.active.forEach((g) => push(g, false));
+    d.archived.forEach((g) => push(g, true));
+  });
+  return out;
+}
+
 export type Verdict =
   | "on_track"
   | "off_track"
