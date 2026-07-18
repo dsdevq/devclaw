@@ -193,7 +193,7 @@ async def test_default_merger_binds_strategy_into_the_gh_flag(monkeypatch):
     reaches the subprocess, not just the resolver."""
     from devclaw.goal.merge import default_merger
 
-    captured = {}
+    captured = []
 
     class _Proc:
         returncode = 0
@@ -201,11 +201,57 @@ async def test_default_merger_binds_strategy_into_the_gh_flag(monkeypatch):
             return (b"", b"")
 
     async def _fake_exec(*args, **kwargs):
-        captured["args"] = args
+        captured.append(args)
         return _Proc()
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
     merger = default_merger("rebase")
     assert await merger("https://github.com/o/r/pull/1") is True
-    assert "--rebase" in captured["args"]
-    assert "--squash" not in captured["args"]
+    merge_calls = [a for a in captured if "merge" in a]
+    assert merge_calls, "no gh pr merge call captured"
+    assert all("--rebase" in a for a in merge_calls)
+    assert all("--squash" not in a for a in merge_calls)
+
+
+@pytest.mark.asyncio
+async def test_merge_pr_enables_auto_merge_before_posting_gate_status(monkeypatch):
+    """ORDER regression (finance-sentry, 2026-07-18): posting the gate status
+    BEFORE --auto can leave the PR 'clean', which makes GitHub refuse to enable
+    auto-merge ('clean status') and degrades every merge to the racy client-side
+    direct attempt — on finance-sentry that lost the sub-second UNKNOWN-
+    mergeability race on every PR (all recent PRs owner-merged by hand, hours
+    later). merge_pr must enable --auto FIRST, while the required check is still
+    pending, then post the status GitHub merges on server-side."""
+    def script(argv):
+        if "view" in argv:
+            return 0, b"sha-order"
+        return 0, b""
+    exec_, calls = _fake_gh(script)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", exec_)
+
+    from devclaw.goal.merge import merge_pr
+    assert await merge_pr("https://github.com/o/r/pull/10") is True
+    auto_idx = next(i for i, a in enumerate(calls) if _is_auto_merge(a))
+    status_idx = next(i for i, a in enumerate(calls) if _is_status_post(a))
+    assert auto_idx < status_idx
+
+
+@pytest.mark.asyncio
+async def test_merge_pr_posts_gate_status_even_when_auto_declined(monkeypatch):
+    """The gate status is truthful evidence and must land on the head SHA on the
+    fallback path too (harmless extra check on an unprotected repo, and keeps
+    the repo-config upgrade path — protect main + require devclaw/gate —
+    working without a devclaw change)."""
+    def script(argv):
+        if "view" in argv:
+            return 0, b"sha-declined"
+        if _is_auto_merge(argv):
+            return 1, b"Auto-merge is not allowed for this repository"
+        return 0, b""
+    exec_, calls = _fake_gh(script)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", exec_)
+
+    from devclaw.goal.merge import merge_pr
+    assert await merge_pr("https://github.com/o/r/pull/11") is True
+    assert any(_is_status_post(a) for a in calls)
+    assert any(_is_direct_merge(a) for a in calls)

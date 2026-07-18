@@ -130,16 +130,29 @@ async def merge_pr(pr_url: str, strategy: str = DEFAULT_MERGE_STRATEGY) -> bool:
     merge is *enabled/queued* (GitHub completes it) — the caller's tip re-check
     before the next task tolerates the eventual-merge delay.
 
+    ORDER MATTERS (2026-07-18 finance-sentry diagnosis): ``--auto`` is enabled
+    FIRST, while the PR is still blocked on the not-yet-posted required check —
+    GitHub only accepts enabling auto-merge on a PR that has something left to
+    wait for. Posting the gate status first can make the PR "clean", ``--auto``
+    then errors ("clean status") and the merge degrades to the client-side
+    direct attempt, which fires sub-second after PR creation while
+    ``mergeStateStatus`` is still UNKNOWN and loses that race essentially
+    always (every recent finance-sentry PR ended up owner-merged by hand).
+    Enable-then-post lets GitHub resolve everything server-side — no client
+    polling, no race.
+
     Falls back to a direct merge for repos where GitHub auto-merge isn't enabled
     (``--auto`` errors "clean status"/"not allowed") — byte-identical to the
     pre-change behavior there, so nothing regresses without the repo config."""
     if not pr_url:
         return False
     flag = "--" + (strategy if strategy in _VALID_STRATEGIES else DEFAULT_MERGE_STRATEGY)
-    # Post devclaw's own gate as the required check first, so --auto has something
-    # green to merge on where branch protection requires it.
-    await _post_gate_status(pr_url)
+    # Enable server-side auto-merge FIRST (see ORDER MATTERS above)…
     rc, out = await _run_gh("gh", "pr", "merge", pr_url, "--auto", flag, "--delete-branch")
+    # …then post devclaw's gate as the required check: with --auto enabled it is
+    # the green light GitHub merges on; on the fallback path it is a truthful,
+    # harmless extra check. Best-effort either way.
+    await _post_gate_status(pr_url)
     if rc == 0:
         return True
     # --auto declined (repo has no auto-merge enabled) → direct merge, as before.
