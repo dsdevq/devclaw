@@ -103,6 +103,14 @@ _REVIEWABLE_KINDS = ("implement_feature", "fix_bug")
 #: re-running (the same diff re-crashes the gate identically), so it fails FAST
 #: instead of burning the retry budget and then the goal-level re-dispatch loop.
 _REVIEW_CRASH_MARKER = "review gate crashed (failing closed):"
+#: Stable marker prefixed on the failure string when the WORKER itself honestly
+#: self-reported it cannot finish (result ``status == "blocked"`` — a missing
+#: capability, contradictory/impossible instructions). Like the review-crash
+#: marker, this fails FAST and CLOSED: a re-run reproduces the same block
+#: identically, so retrying only burns the budget and then the goal-level
+#: re-dispatch loop. It is NEVER treated as an approval (never settles ``done``);
+#: the reason rides the failure so the goal layer surfaces it to the owner.
+_WORKER_BLOCKED_MARKER = "worker reported BLOCKED:"
 #: Browser-E2E gate (2026-07-17): after verify + integrity + review pass, a change
 #: that touched a web-UI path must have been exercised in a REAL browser (a passing
 #: Playwright run, proven via the runner's `browser_report` counts) before it ships
@@ -1088,6 +1096,14 @@ class TaskQueue(_NotifyMixin):
                     if result.get("status") == "rate_limited" and result.get("retry_after"):
                         # the engineer parsed an explicit reset hint — prefer it
                         last_failure = f"rate limit; retry-after: {result['retry_after']}s"
+                    elif result.get("status") == "blocked":
+                        # Honest worker self-report: the engineer said it genuinely
+                        # cannot complete this task as specified. Carry the reason
+                        # under the marker the no-retry branch below keys on — fail
+                        # CLOSED (never `done`) and fail FAST (a re-run re-blocks
+                        # identically), surfacing the reason instead of looping.
+                        reason = (result.get("reason") or "").strip() or "no reason given"
+                        last_failure = f"{_WORKER_BLOCKED_MARKER} {reason}"
                 else:
                     # "done" means the verify gate passed, not that the agent said so.
                     verify = result.get("verify")
@@ -1155,6 +1171,25 @@ class TaskQueue(_NotifyMixin):
                         else:
                             self._store.mark_done(task_id, json.dumps(result))
                             return None
+            # Worker honest-block: the engineer self-reported it cannot finish
+            # (missing capability, contradictory/impossible instructions). Fail
+            # FAST + CLOSED (never ship, never settle `done` — invariant #186) and
+            # do NOT retry: a re-run reproduces the same block identically, so a
+            # retry only burns the budget and then the goal-level re-dispatch loop.
+            # The reason rides the failure so the goal layer surfaces it to the
+            # owner (poll.detail → the planner's next-tick context). Checked BEFORE
+            # classify_failure so an unlucky reason wording can't be misrouted into
+            # the pause path — a block is never a quota event.
+            if last_failure.startswith(_WORKER_BLOCKED_MARKER):
+                self._store.mark_failed(
+                    task_id,
+                    f"{last_failure} — the worker reports it cannot complete this "
+                    "task as specified. Not auto-retried: a re-run reproduces the "
+                    "same block. Needs a human — adjust the goal/instructions or "
+                    "supply the missing capability.",
+                )
+                self._check_and_trip_breaker(workspace_dir, task_id)
+                return None
             # Quota guard: a usage/rate limit must NOT be retried-now (that burns
             # the remaining quota on the same doomed call). Pause ALL dispatch and
             # requeue this task; the tick loop auto-resumes when the pause expires.
