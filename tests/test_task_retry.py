@@ -81,6 +81,69 @@ async def test_success_first_try_runs_once(store, monkeypatch):
     assert len(calls) == 1  # no needless retry on success
 
 
+def _reset_recorder(monkeypatch, base_sha: str = "basesha0"):
+    """Fake a captured pre-run base + record every retry-reset call.
+
+    Real ``/ws`` isn't a git repo, so without this the base capture returns ''
+    and the reset is (correctly) skipped — these fakes let us assert the reset
+    behavior directly."""
+    resets: list = []
+
+    async def fake_head(host_dir):
+        return base_sha
+
+    async def fake_reset(host_dir, sha):
+        resets.append((host_dir, sha))
+        return True
+
+    monkeypatch.setattr(task_queue, "_git_head", fake_head)
+    monkeypatch.setattr(task_queue, "_git_reset_clean", fake_reset)
+    return resets
+
+
+async def test_retry_resets_workspace_to_clean_per_item_base(store, monkeypatch):
+    # #1 retry isolation: each retry rewinds the workspace to the pre-run base
+    # BEFORE re-running, so a failed attempt's drift can't compound into the
+    # next (the closeloop-bench 2026-07-18 "each retry inherits more drift"
+    # pattern). The reset fires on the retry and ONLY the retry.
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    resets = _reset_recorder(monkeypatch)
+    calls: list = []
+    q = TaskQueue(store, runner=_flaky_runner(fail_times=1, calls=calls))
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="do X", verify_cmd="pytest")
+    await q.drain()
+    assert store.get_task(tid).status == "done"
+    assert len(calls) == 2  # failed once, retried, passed
+    assert resets == [("/ws", "basesha0")]  # reset to the captured base, once
+
+
+async def test_first_attempt_never_resets(store, monkeypatch):
+    # A clean first-try success must not rewind anything — no needless reset.
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    resets = _reset_recorder(monkeypatch)
+    calls: list = []
+    q = TaskQueue(store, runner=_flaky_runner(fail_times=0, calls=calls))
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    assert store.get_task(tid).status == "done"
+    assert resets == []
+
+
+async def test_retry_reset_skipped_when_base_capture_missed(store, monkeypatch):
+    # Best-effort: if the pre-run base capture returned '' (a git hiccup),
+    # the retry still runs but attempts no reset (nothing to rewind to) —
+    # degrade on the drifted tree, never wedge the retry.
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    resets = _reset_recorder(monkeypatch, base_sha="")
+    calls: list = []
+    q = TaskQueue(store, runner=_flaky_runner(fail_times=1, calls=calls))
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    assert store.get_task(tid).status == "done"
+    assert len(calls) == 2  # retry still happened
+    assert resets == []  # but no reset attempted with an empty base
+
+
 async def test_timeout_is_not_retried(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     monkeypatch.setattr(task_queue, "TASK_TIMEOUT_S", 0.2)

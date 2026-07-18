@@ -56,6 +56,7 @@ from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 from .task_git import (  # noqa: F401
     _git_diff_sync,
     _git_head_sync,
+    _git_reset_clean_sync,
     _review_repo_context_sync,
     _wip_snapshot_sync,
 )
@@ -174,6 +175,11 @@ async def _git_diff(host_dir: str, base: str = "") -> str:
 async def _git_head(host_dir: str) -> str:
     """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
     return await asyncio.to_thread(_git_head_sync, host_dir)
+
+
+async def _git_reset_clean(host_dir: str, sha: str) -> bool:
+    """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
+    return await asyncio.to_thread(_git_reset_clean_sync, host_dir, sha)
 
 
 async def _wip_snapshot(host_dir: str, task_id: str) -> str:
@@ -1025,6 +1031,25 @@ class TaskQueue(_NotifyMixin):
         attempts = 1 + max(0, TASK_MAX_RETRIES)
         last_failure = "unknown error"
         for attempt in range(attempts):
+            if attempt > 0 and pre_run_sha:
+                # Retry isolation (#1): rewind the workspace to the clean
+                # per-item base captured above before re-running. Without this
+                # the inner loop never re-preps between attempts, so attempt
+                # N+1 inherits attempt N's mutated tree — and any local commits
+                # it landed on the goal branch — and a failed attempt's drift
+                # compounds across retries instead of each one starting from
+                # the same clean base the gates diff against (`pre_run_sha`).
+                # This is the intra-dispatch half of the closeloop-bench
+                # 2026-07-18 "each retry inherits more drift than the last"
+                # pattern. Best-effort: a reset hiccup logs and proceeds on the
+                # drifted tree rather than wedging the retry. Local-only —
+                # delivery pushes only AFTER this loop and only on a gate pass,
+                # so rewinding here never touches origin.
+                if not await _git_reset_clean(workspace_dir, pre_run_sha):
+                    sys.stderr.write(
+                        f"task-queue: retry reset to {pre_run_sha[:8]} failed "
+                        f"task={task_id}; proceeding on drifted tree\n"
+                    )
             attempt_goal = f"{resume_brief}{goal}" if attempt == 0 else (
                 f"{resume_brief}{goal}\n\n[Automatic retry {attempt}/{attempts - 1}] Your previous "
                 f"attempt did not pass verification. What went wrong:\n{last_failure}\n\n"
