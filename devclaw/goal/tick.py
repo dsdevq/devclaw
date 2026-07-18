@@ -679,12 +679,15 @@ async def tick_all(
     if blocked:
         return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
 
-    # Trace retention (volume hygiene, 2026-07-15): AFTER the cheap gates
-    # above, BEFORE any per-goal work — a daily, batched, pure-SQLite DELETE
-    # of trace rows past DEVCLAW_TRACE_RETENTION_DAYS. Zero LLM calls, so the
-    # zero-token idle guarantee is untouched; StateStore owns the actual
-    # write (single-writer invariant), the engine is just the seam.
+    # Retention (volume hygiene): AFTER the cheap gates above, BEFORE any
+    # per-goal work — daily, batched, pure-SQLite DELETEs of the two
+    # highest-volume append-only logs past their retention windows: traces
+    # (DEVCLAW_TRACE_RETENTION_DAYS, 2026-07-15) and events (raw runner SDK
+    # events, DEVCLAW_EVENTS_RETENTION_DAYS, 2026-07-18). Zero LLM calls, so the
+    # zero-token idle guarantee is untouched; StateStore owns the actual writes
+    # (single-writer invariant), the engine is just the seam.
     _engine_prune_traces(engine)
+    _engine_prune_events(engine)
 
     for goal_id in store.list_goal_ids():
         # Per-goal run-window: a goal can carry its OWN night/off-hours schedule
@@ -764,6 +767,20 @@ def _engine_prune_traces(engine: GoalEngine) -> None:
     a maintenance failure must never break the heartbeat — the traces table
     just stays bigger until a later tick succeeds."""
     fn = getattr(engine, "prune_traces", None)
+    if not callable(fn):
+        return
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — maintenance must not break the heartbeat
+        pass
+
+
+def _engine_prune_events(engine: GoalEngine) -> None:
+    """Run the daily events-retention prune via the engine, if it exposes one
+    (the in-process engine does; test doubles may not → no prune). Best-effort:
+    a maintenance failure must never break the heartbeat — the events table
+    just stays bigger until a later tick succeeds."""
+    fn = getattr(engine, "prune_events", None)
     if not callable(fn):
         return
     try:

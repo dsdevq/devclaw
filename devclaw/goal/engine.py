@@ -176,6 +176,13 @@ class InProcessEngine:
         test doubles without this method mean no prune, harmlessly)."""
         return self._store.maybe_prune_traces()
 
+    def prune_events(self) -> int:
+        """Daily events-retention prune (volume hygiene, 2026-07-18). Delegates
+        to :meth:`StateStore.maybe_prune_events` — same seam as
+        :meth:`prune_traces`, bounding the highest-volume append-only log after
+        traces (raw runner SDK events)."""
+        return self._store.maybe_prune_events()
+
     def goal_operator_block(self, goal_id: str, now_ms: int) -> tuple[bool, str]:
         """A single goal's OWN run-window gate — applied on top of the engine-wide
         :meth:`operator_block` so a goal dispatches only if the global controls AND

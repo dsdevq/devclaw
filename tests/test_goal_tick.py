@@ -2924,14 +2924,19 @@ async def test_trend_sweep_skips_cancelled_and_done_goals(tmp_path):
 
 
 class PruningEngine(FakeEngine):
-    """FakeEngine that exposes the trace-retention prune seam."""
+    """FakeEngine that exposes both retention prune seams."""
 
     def __init__(self):
         super().__init__()
         self.prunes = 0
+        self.event_prunes = 0
 
     def prune_traces(self) -> int:
         self.prunes += 1
+        return 0
+
+    def prune_events(self) -> int:
+        self.event_prunes += 1
         return 0
 
 
@@ -2979,3 +2984,49 @@ async def test_trace_prune_failure_never_breaks_the_heartbeat(tmp_path):
     )
 
     assert out["g"] is Outcome.IDLE    # the sweep survived the prune crash
+
+
+@pytest.mark.asyncio
+async def test_tick_all_runs_events_prune_on_cheap_path_with_zero_tokens(tmp_path):
+    """tick_all invokes the engine's daily events-retention prune once per
+    sweep, AFTER the cheap gates, alongside the trace prune — and it costs zero
+    LLM calls (pure SQLite, so the zero-token idle guard is untouched)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    engine = PruningEngine()
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert engine.event_prunes == 1
+    assert out["g"] is Outcome.IDLE
+    assert planner.calls == 0          # <-- the quota guardrail holds
+    assert evaluator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_events_prune_failure_never_breaks_the_heartbeat(tmp_path):
+    """An events-prune crash is swallowed just like the trace prune —
+    maintenance must not take down the sweep; goals still tick."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    class ExplodingEventsPruneEngine(FakeEngine):
+        def prune_events(self) -> int:
+            raise RuntimeError("database is locked")
+
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=ExplodingEventsPruneEngine(), planner_caller=planner,
+        evaluator_caller=evaluator, notifier=notifier,
+        notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert out["g"] is Outcome.IDLE    # the sweep survived the events-prune crash

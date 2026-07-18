@@ -38,38 +38,62 @@ from .rows import (
     _row_to_task,
 )
 
-# ---- trace retention (volume hygiene, 2026-07-15) ---------------------------
+# ---- retention (volume hygiene) ---------------------------------------------
 # Production evidence: a live devclaw.db reached 402MB with 200k+ trace rows —
-# telemetry must not outgrow the state it observes. The heartbeat calls
-# :meth:`StateStore.maybe_prune_traces` on its cheap path; everything here is
-# pure SQLite (zero LLM calls) and batched so a first prune of a huge backlog
-# can never wedge a tick.
+# telemetry must not outgrow the state it observes. Two append-only, high-volume
+# logs are pruned on an identical schedule: `traces` (per-tick observability,
+# 2026-07-15) and `events` (raw runner SDK events, one row per agent action —
+# the highest-volume table after traces, bounded 2026-07-18). The heartbeat
+# calls :meth:`maybe_prune_traces` + :meth:`maybe_prune_events` on its cheap
+# path; both route through the same table-agnostic :meth:`_maybe_prune_table`
+# core — pure SQLite (zero LLM calls) and batched so a first prune of a huge
+# backlog can never wedge a tick.
 
 #: Days of trace history to keep when ``DEVCLAW_TRACE_RETENTION_DAYS`` is unset.
 TRACE_RETENTION_DAYS_DEFAULT = 30
-#: Max trace rows deleted per prune call — one bounded batch per heartbeat
-#: tick until the backlog drains, so a 400MB first prune spreads across ticks.
+#: Days of event history to keep when ``DEVCLAW_EVENTS_RETENTION_DAYS`` is unset.
+EVENTS_RETENTION_DAYS_DEFAULT = 30
+#: Max rows deleted per prune call — one bounded batch per heartbeat tick until
+#: the backlog drains, so a 400MB first prune spreads across ticks.
 TRACE_PRUNE_BATCH = 5000
-#: A new prune cycle starts at most once per day (watermark in ``meta``).
+#: A new prune cycle (per table) starts at most once per day (watermark in ``meta``).
 _TRACE_PRUNE_INTERVAL_MS = 24 * 3600 * 1000
-#: meta key holding the epoch-ms of the last COMPLETED (drained) prune cycle.
+#: meta key holding the epoch-ms of the last COMPLETED (drained) trace prune cycle.
 _TRACE_PRUNE_META_KEY = "trace_prune_last_ms"
+#: meta key holding the epoch-ms of the last COMPLETED (drained) events prune cycle.
+_EVENTS_PRUNE_META_KEY = "events_prune_last_ms"
 
 
-def trace_retention_days() -> int:
-    """Trace retention in days from ``DEVCLAW_TRACE_RETENTION_DAYS``.
-
-    Unset/blank → the 30-day default. ``0``, a negative value, or anything
-    unparseable → ``0`` (retention disabled, gracefully — a typo in an env var
-    must never make the prune delete aggressively or crash the heartbeat)."""
-    raw = os.environ.get("DEVCLAW_TRACE_RETENTION_DAYS")
+def _parse_retention_days(raw: Optional[str], default: int) -> int:
+    """Parse a retention-days env value with the fail-safe semantics shared by
+    every retention surface: unset/blank → ``default``; ``0``, a negative value,
+    or anything unparseable → ``0`` (retention disabled, gracefully — a typo in
+    an env var must never make a prune delete aggressively or crash the
+    heartbeat). Callers pass ``os.environ.get("DEVCLAW_…")`` directly so the env
+    read stays a literal the doc-sync test (test_env_vars_doc_sync.py) can see."""
     if raw is None or not raw.strip():
-        return TRACE_RETENTION_DAYS_DEFAULT
+        return default
     try:
         days = int(raw.strip())
     except ValueError:
         return 0
     return days if days > 0 else 0
+
+
+def trace_retention_days() -> int:
+    """Trace retention in days from ``DEVCLAW_TRACE_RETENTION_DAYS`` (see
+    :func:`_parse_retention_days`)."""
+    return _parse_retention_days(
+        os.environ.get("DEVCLAW_TRACE_RETENTION_DAYS"), TRACE_RETENTION_DAYS_DEFAULT
+    )
+
+
+def events_retention_days() -> int:
+    """Event retention in days from ``DEVCLAW_EVENTS_RETENTION_DAYS`` (see
+    :func:`_parse_retention_days`)."""
+    return _parse_retention_days(
+        os.environ.get("DEVCLAW_EVENTS_RETENTION_DAYS"), EVENTS_RETENTION_DAYS_DEFAULT
+    )
 
 
 class StateStore(ControlPlaneMixin, ProblemsMixin):
@@ -185,6 +209,12 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                   parent_goal_id  TEXT
                 );
 
+                -- Raw runner SDK events (one row per agent action inside every
+                -- task) — the highest-volume append-only log after traces. Rows
+                -- are never mutated (append + a daily retention DELETE of rows
+                -- older than DEVCLAW_EVENTS_RETENTION_DAYS — see
+                -- maybe_prune_events). Read by get_events + the SSE layer, which
+                -- uses the monotonic id as its resume cursor.
                 CREATE TABLE IF NOT EXISTS events (
                   id              INTEGER PRIMARY KEY AUTOINCREMENT,
                   task_id         TEXT NOT NULL,
@@ -297,6 +327,7 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 CREATE INDEX IF NOT EXISTS idx_programs_parent_goal ON programs(parent_goal_id);
                 CREATE INDEX IF NOT EXISTS idx_events_program   ON events(program_id, id);
                 CREATE INDEX IF NOT EXISTS idx_events_task      ON events(task_id, id);
+                CREATE INDEX IF NOT EXISTS idx_events_ts        ON events(ts);
                 CREATE INDEX IF NOT EXISTS idx_traces_goal      ON traces(goal_id, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_trace     ON traces(trace_id, id);
                 CREATE INDEX IF NOT EXISTS idx_traces_kind      ON traces(kind, id);
@@ -788,22 +819,78 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
             "cognition_tokens_out_est": tokens_out_est,
         }
 
-    def prune_trace_batch(
-        self, *, older_than_ms: int, limit: int = TRACE_PRUNE_BATCH
-    ) -> int:
-        """Delete up to ``limit`` of the OLDEST trace rows with ``ts`` before
-        ``older_than_ms``. Returns the number of rows deleted. One bounded
-        batch — the caller loops across heartbeat ticks (via
-        :meth:`maybe_prune_traces`) rather than holding the write lock long
-        enough to wedge a tick on a 200k-row backlog."""
+    def _prune_table_batch(self, *, table: str, older_than_ms: int, limit: int) -> int:
+        """Delete up to ``limit`` of the OLDEST rows in ``table`` with ``ts``
+        before ``older_than_ms``. Returns the number of rows deleted. One
+        bounded batch — the caller loops across heartbeat ticks (via
+        :meth:`_maybe_prune_table`) rather than holding the write lock long
+        enough to wedge a tick on a 200k-row backlog.
+
+        ``table`` is a fixed module-controlled literal (``traces`` / ``events``),
+        never user input, and both tables share the ``id`` PK + monotonic ``ts``
+        shape this query relies on (ordering by ``id`` reads the oldest rows off
+        the front of the PK)."""
         with self._lock:
             cur = self._db.execute(
-                "DELETE FROM traces WHERE id IN ("
-                "SELECT id FROM traces WHERE ts < ? ORDER BY id ASC LIMIT ?)",
+                f"DELETE FROM {table} WHERE id IN ("  # noqa: S608 — fixed literal, not user input
+                f"SELECT id FROM {table} WHERE ts < ? ORDER BY id ASC LIMIT ?)",
                 (older_than_ms, limit),
             )
             self._commit()
             return int(cur.rowcount)
+
+    def _maybe_prune_table(
+        self,
+        *,
+        table: str,
+        meta_key: str,
+        retention_days: int,
+        now_ms: int,
+        batch_limit: int,
+    ) -> int:
+        """Table-agnostic retention prune — the shared core behind
+        :meth:`maybe_prune_traces` and :meth:`maybe_prune_events` (StateStore
+        owns both logs' writes, so the prune lives here beside them, not in a
+        second writer).
+
+        Semantics:
+          * disabled (``retention_days`` <= 0) → no-op, returns 0;
+          * a new prune CYCLE starts at most once per ``_TRACE_PRUNE_INTERVAL_MS``
+            (daily), gated by the per-table ``meta_key`` watermark;
+          * each call deletes at most ``batch_limit`` rows; the watermark is
+            advanced only when a batch comes back short (backlog drained), so
+            an oversized first prune drains one bounded batch per tick instead
+            of blocking a single tick for the whole 400MB table.
+
+        Pure SQLite — zero LLM calls, safe on the zero-token idle path."""
+        if retention_days <= 0:
+            return 0
+        raw = self.get_meta(meta_key)
+        try:
+            last = int(raw) if raw else 0
+        except ValueError:
+            last = 0
+        if last and (now_ms - last) < _TRACE_PRUNE_INTERVAL_MS:
+            return 0
+        deleted = self._prune_table_batch(
+            table=table, older_than_ms=now_ms - retention_days * 24 * 3600 * 1000,
+            limit=batch_limit,
+        )
+        if deleted < batch_limit:
+            # Drained — stamp the watermark so the next cycle waits a day.
+            # A full batch leaves the watermark alone: more rows may remain,
+            # and the next tick continues the drain.
+            self.set_meta(meta_key, str(now_ms))
+        return deleted
+
+    def prune_trace_batch(
+        self, *, older_than_ms: int, limit: int = TRACE_PRUNE_BATCH
+    ) -> int:
+        """One bounded batch of the traces retention prune. See
+        :meth:`_prune_table_batch`."""
+        return self._prune_table_batch(
+            table="traces", older_than_ms=older_than_ms, limit=limit,
+        )
 
     def maybe_prune_traces(
         self,
@@ -813,39 +900,31 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         batch_limit: int = TRACE_PRUNE_BATCH,
     ) -> int:
         """Retention prune for the traces table — the heartbeat's cheap-path
-        maintenance hook (StateStore owns all trace writes, so the prune lives
-        here beside them, not in a second writer).
-
-        Semantics:
-          * disabled (``retention_days`` resolves to 0) → no-op, returns 0;
-          * a new prune CYCLE starts at most once per ``_TRACE_PRUNE_INTERVAL_MS``
-            (daily), gated by the ``trace_prune_last_ms`` meta watermark;
-          * each call deletes at most ``batch_limit`` rows; the watermark is
-            advanced only when a batch comes back short (backlog drained), so
-            an oversized first prune drains one bounded batch per tick instead
-            of blocking a single tick for the whole 400MB table.
-
-        Pure SQLite — zero LLM calls, safe on the zero-token idle path."""
+        maintenance hook. Thin wrapper over :meth:`_maybe_prune_table`."""
         days = trace_retention_days() if retention_days is None else retention_days
-        if days <= 0:
-            return 0
         now = _now_ms() if now_ms is None else now_ms
-        raw = self.get_meta(_TRACE_PRUNE_META_KEY)
-        try:
-            last = int(raw) if raw else 0
-        except ValueError:
-            last = 0
-        if last and (now - last) < _TRACE_PRUNE_INTERVAL_MS:
-            return 0
-        deleted = self.prune_trace_batch(
-            older_than_ms=now - days * 24 * 3600 * 1000, limit=batch_limit,
+        return self._maybe_prune_table(
+            table="traces", meta_key=_TRACE_PRUNE_META_KEY,
+            retention_days=days, now_ms=now, batch_limit=batch_limit,
         )
-        if deleted < batch_limit:
-            # Drained — stamp the watermark so the next cycle waits a day.
-            # A full batch leaves the watermark alone: more rows may remain,
-            # and the next tick continues the drain.
-            self.set_meta(_TRACE_PRUNE_META_KEY, str(now))
-        return deleted
+
+    def maybe_prune_events(
+        self,
+        *,
+        now_ms: Optional[int] = None,
+        retention_days: Optional[int] = None,
+        batch_limit: int = TRACE_PRUNE_BATCH,
+    ) -> int:
+        """Retention prune for the events table (raw runner SDK events, one row
+        per agent action — the highest-volume append-only log after traces).
+        The heartbeat's cheap-path maintenance hook, beside the trace prune.
+        Thin wrapper over :meth:`_maybe_prune_table`."""
+        days = events_retention_days() if retention_days is None else retention_days
+        now = _now_ms() if now_ms is None else now_ms
+        return self._maybe_prune_table(
+            table="events", meta_key=_EVENTS_PRUNE_META_KEY,
+            retention_days=days, now_ms=now, batch_limit=batch_limit,
+        )
 
     def list_events(
         self,
