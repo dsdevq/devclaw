@@ -3080,3 +3080,74 @@ async def test_vacuum_failure_never_breaks_the_heartbeat(tmp_path):
     )
 
     assert out["g"] is Outcome.IDLE    # the sweep survived the vacuum crash
+
+
+@pytest.mark.asyncio
+async def test_tick_all_pings_owner_when_db_size_alerts_at_zero_tokens(tmp_path):
+    """When the DB-size alarm fires, tick_all pings the owner ONCE on the cheap
+    path — and it costs zero LLM calls (raw owner send, no summarizer)."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    class AlertingEngine(FakeEngine):
+        def check_db_size_alert(self) -> "str | None":
+            return "⚠️ devclaw.db has grown to 2.10 GB"
+
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=AlertingEngine(), planner_caller=planner,
+        evaluator_caller=evaluator, notifier=notifier,
+        notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert any("devclaw.db has grown" in m for m in notifier.sent)
+    assert out["g"] is Outcome.IDLE
+    assert planner.calls == 0          # <-- the quota guardrail holds
+    assert evaluator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_no_db_size_ping_when_under_threshold(tmp_path):
+    """A None from the alarm (under threshold) sends nothing."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    class QuietEngine(FakeEngine):
+        def check_db_size_alert(self) -> "str | None":
+            return None
+
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    await tick_all(
+        store=store, engine=QuietEngine(), planner_caller=planner,
+        evaluator_caller=evaluator, notifier=notifier,
+        notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert not any("devclaw.db" in m for m in notifier.sent)
+
+
+@pytest.mark.asyncio
+async def test_db_size_alert_failure_never_breaks_the_heartbeat(tmp_path):
+    """An alarm-check crash is swallowed — maintenance must not take down the
+    sweep; goals still tick and the owner isn't spammed with a stack trace."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    class ExplodingAlertEngine(FakeEngine):
+        def check_db_size_alert(self) -> "str | None":
+            raise RuntimeError("stat failed")
+
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=ExplodingAlertEngine(), planner_caller=planner,
+        evaluator_caller=evaluator, notifier=notifier,
+        notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert out["g"] is Outcome.IDLE    # the sweep survived the alarm crash

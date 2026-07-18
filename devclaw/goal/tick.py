@@ -692,6 +692,11 @@ async def tick_all(
     # (SQLite reuses freed pages but never shrinks the .db file on its own).
     # Same cheap-path slot, same zero-LLM guarantee.
     _engine_vacuum(engine)
+    # Loud-not-silent DB-size alarm: if the .db has grown past the threshold
+    # despite retention+VACUUM, ping the owner ONCE (re-armed when it drops back
+    # under) — a silent disk-fill wedge is the failure mode this whole tranche
+    # exists to prevent. Zero LLM (raw owner ping, no summarizer).
+    await _maybe_alert_db_size(engine, notifier)
 
     for goal_id in store.list_goal_ids():
         # Per-goal run-window: a goal can carry its OWN night/off-hours schedule
@@ -805,6 +810,23 @@ def _engine_vacuum(engine: GoalEngine) -> None:
         fn()
     except Exception:  # noqa: BLE001 — maintenance must not break the heartbeat
         pass
+
+
+async def _maybe_alert_db_size(engine: GoalEngine, notifier: Notifier) -> None:
+    """Check the DB-size alarm via the engine and, if it just crossed the
+    threshold, ping the owner ONCE. Best-effort on both legs: a stat failure or
+    a notifier outage must never break the heartbeat. The ping is a RAW owner
+    send (no summarizer) so it stays zero-token on the cheap path — the message
+    is already plain and terse."""
+    fn = getattr(engine, "check_db_size_alert", None)
+    if not callable(fn):
+        return
+    try:
+        msg = fn()
+    except Exception:  # noqa: BLE001 — maintenance must not break the heartbeat
+        return
+    if msg:
+        await _notify(notifier, NotifyLevel.OWNER, msg)
 
 
 def _engine_clear_pause(engine: GoalEngine) -> None:

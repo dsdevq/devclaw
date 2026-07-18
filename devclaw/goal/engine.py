@@ -189,6 +189,14 @@ class InProcessEngine:
         — same getattr seam as :meth:`prune_traces`."""
         return self._store.maybe_vacuum()
 
+    def check_db_size_alert(self) -> "str | None":
+        """One-shot DB-size alarm (loud-not-silent, 2026-07-18). Delegates to
+        :meth:`StateStore.check_db_size_alert` — same getattr seam as
+        :meth:`vacuum`. Returns an owner-facing message the tick the .db crosses
+        the threshold, else None. The goal layer owns the Notifier, so the
+        actual ping happens at the tick call site, not here."""
+        return self._store.check_db_size_alert()
+
     def goal_operator_block(self, goal_id: str, now_ms: int) -> tuple[bool, str]:
         """A single goal's OWN run-window gate — applied on top of the engine-wide
         :meth:`operator_block` so a goal dispatches only if the global controls AND
