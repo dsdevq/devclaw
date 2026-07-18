@@ -465,7 +465,24 @@ async def goal_answer(request: Request) -> Response:
 #    editor would be a vector to inject a metered API key (the OAuth-only
 #    invariant strips ANTHROPIC_* — never make them settable here).
 
-_ENV_DOC = Path(__file__).resolve().parents[2] / "docs" / "reference" / "env-vars.md"
+def _resolve_env_doc() -> Path:
+    """Locate docs/reference/env-vars.md across install layouts. Under an editable
+    install / the source tree it sits at the repo root above this module; under a
+    NON-editable install the package is copied to site-packages WITHOUT docs/, but
+    the server runs with cwd at the repo root (/app in the container), so the
+    cwd-relative candidate finds it. Falls back to the module-relative path (→ the
+    catalog degrades to [] if the doc is genuinely absent)."""
+    default = Path(__file__).resolve().parents[2] / "docs" / "reference" / "env-vars.md"
+    for c in (default, Path.cwd() / "docs" / "reference" / "env-vars.md"):
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return default
+
+
+_ENV_DOC = _resolve_env_doc()
 _SECRET_HINTS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
 
 

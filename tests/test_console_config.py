@@ -61,6 +61,21 @@ def test_env_catalog_masks_secret_values(monkeypatch):
     assert "supersecret" not in tok["value"] and tok["value"] == "••••••"
 
 
+def test_resolve_env_doc_finds_cwd_copy_under_noneditable_install(monkeypatch, tmp_path):
+    # Non-editable install: the module-relative path is in site-packages WITHOUT
+    # docs/, but the server runs with cwd at the repo root that has the doc. The
+    # resolver must fall through to the cwd candidate rather than return a dead
+    # module-relative path (the live bug: catalog came back empty in prod).
+    from devclaw.server import http as http_mod
+    doc = tmp_path / "docs" / "reference" / "env-vars.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("## G\n| `DEVCLAW_X` | `1` | test |\n")
+    # force the module-relative default to a nonexistent location
+    monkeypatch.setattr(http_mod, "__file__", str(tmp_path / "pkg" / "server" / "http.py"))
+    monkeypatch.chdir(tmp_path)
+    assert http_mod._resolve_env_doc() == doc
+
+
 def test_env_catalog_degrades_to_empty_when_doc_missing(monkeypatch, tmp_path):
     from devclaw.server import http as http_mod
     monkeypatch.setattr(http_mod, "_ENV_DOC", tmp_path / "nope.md")
