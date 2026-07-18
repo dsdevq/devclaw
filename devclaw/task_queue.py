@@ -46,6 +46,7 @@ from .loom.test_integrity import present_test_names, scan_diff
 from .planner import PlannedTask, PlannerError, plan_goal
 from .quality import format_feedback, review_panel
 from .quality.browser_gate import PLAYWRIGHT_CONFIG_NAMES, browser_run_verdict
+from .quality.reachability import judge_reachability
 from .engine.sandcastle import run_sandcastle, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
@@ -114,6 +115,14 @@ BROWSER_GATE_ENABLED = os.environ.get("DEVCLAW_GOAL_BROWSER_GATE", "1") not in (
 #: loud log so a not-yet-E2E'd project isn't wedged. Mirrors CI_GATE_MODE. The
 #: per-project override is resolved in _browser_gate_mode (registry seam).
 BROWSER_GATE_MODE = os.environ.get("DEVCLAW_GOAL_BROWSER_GATE_MODE", "flexible")
+#: The reasoned escape valve for the browser gate's one false positive (a UI
+#: change not rendered in the running app — see quality/reachability.py). Default
+#: ON: it is strictly safe (can only RELAX a would-be block, and only on an
+#: affirmatively-grounded `reachable == "no"`). Set 0 to fall back to the pure
+#: mechanical gate. A disabled browser gate makes this moot (never consulted).
+BROWSER_REACHABILITY_ENABLED = os.environ.get(
+    "DEVCLAW_GOAL_BROWSER_REACHABILITY", "1"
+) not in ("0", "false", "")
 #: Stable prefix on the browser-gate feed-back reason (parallels the review/
 #: integrity reasons) so the settle path and tests can recognise it.
 _BROWSER_GATE_MARKER = "browser gate (failing closed):"
@@ -299,6 +308,7 @@ class TaskQueue(_NotifyMixin):
         runner: Optional[RunnerFn] = None,
         on_settle: Optional[Callable[[], None]] = None,
         reviewer: Optional[Callable[..., Awaitable[dict]]] = None,
+        reachability_judge: Optional[Callable[..., Awaitable[dict]]] = None,
     ) -> None:
         self._store = store
         # Injectable for tests — default to the real planner / sandcastle runner.
@@ -314,6 +324,14 @@ class TaskQueue(_NotifyMixin):
         # DEVCLAW_REVIEW_PANEL_N=1 it delegates to review_diff and is byte-
         # identical to the single-reviewer gate; N>=2 fans out diverse lenses.
         self._reviewer: Callable[..., Awaitable[dict]] = reviewer or review_panel
+        # The browser-gate reachability escape valve's cognition (diff + repo
+        # context → reachable verdict). Injectable so tests stub the Claude call;
+        # defaults to the real grounded judge. Consulted ONLY when the mechanical
+        # browser gate is about to block a no-browser-run frontend change — never
+        # on idle / backend / passing paths (the zero-token guard).
+        self._reachability_judge: Callable[..., Awaitable[dict]] = (
+            reachability_judge or judge_reachability
+        )
         # Optional in-process hook fired whenever a task/program reaches a
         # terminal state — the goal layer wires its heartbeat-wake here so a
         # finished engine run triggers an immediate goal tick (replacing the old
@@ -1082,6 +1100,17 @@ class TaskQueue(_NotifyMixin):
                                 mode=self._browser_gate_mode(workspace_dir),
                             )
                         )
+                        # Reasoned escape valve: the mechanical gate fires on ANY
+                        # frontend file, which false-positives on a UI change not
+                        # rendered in the running app (a library component no route
+                        # imports yet). Before blocking, an INDEPENDENT grounded
+                        # judge may clear it — but ONLY on an affirmative, proven
+                        # "not reachable". Uncertain / crash / reachable → block
+                        # stands (fail closed). Runs only on the would-block path.
+                        if browser_fb is not None and await self._browser_reachability_clears(
+                            verify, diff, workspace_dir
+                        ):
+                            browser_fb = None
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
                             # a gate failure so it retries with the tampering fed back.
@@ -1204,6 +1233,59 @@ class TaskQueue(_NotifyMixin):
         return self._registry.resolve_override(
             workspace_dir, "browser_gate_mode", BROWSER_GATE_MODE
         )
+
+    async def _browser_reachability_clears(
+        self, verify: Optional[dict], diff: str, workspace_dir: str
+    ) -> bool:
+        """The reasoned escape valve for the browser gate. Returns True ONLY when
+        an independent, grounded judge affirmatively determines the UI this diff
+        changes is NOT rendered in the running app (nothing for a browser to
+        exercise → the full-app E2E requirement is a false positive). Every other
+        outcome returns False so the gate's block stands — the fail-closed spine:
+
+        - disabled (`BROWSER_REACHABILITY_ENABLED` off) → False.
+        - the block is a REAL browser failure (`ran_failed`) — a suite ran and a
+          test failed → hard evidence, never overridable → False. Only a NO-RUN
+          block (`never_ran` / `absent`) is a candidate for the false positive.
+        - the judge says `reachable` is `yes` or `unknown` → False.
+        - the judge raises (parse error, quota, timeout, crash) → False.
+
+        So it can only ever RELAX a would-be block, never create or harden one,
+        and only on proof. Consulted by settle ONLY when the mechanical gate is
+        already about to block a frontend change — so no cognition fires on idle,
+        backend, or passing paths (the zero-token guard)."""
+        if not BROWSER_REACHABILITY_ENABLED:
+            return False
+        # Recompute the mechanical verdict so we override ONLY a no-run block — a
+        # `ran_failed` (a browser test actually failed) is evidence, not a false
+        # positive, and must never be reasoned away. This also means the judge is
+        # not even called for `ran_failed` (zero token on that path too).
+        config_present = _has_playwright_config(workspace_dir)
+        verdict = browser_run_verdict(verify, diff, config_present=config_present)
+        if verdict.state not in ("never_ran", "absent"):
+            return False
+        # Ground the judge in the ACTUAL task workspace (routes, imports, files) —
+        # best-effort, collected OUTSIDE the try so a git hiccup degrades to no
+        # context (→ the judge answers `unknown` → block stands), never a crash.
+        repo_context = await _review_repo_context(workspace_dir)
+        try:
+            result = await self._reachability_judge(
+                diff=diff, repo_context=repo_context
+            )
+        except Exception as err:  # noqa: BLE001 — fail closed, never wave a UI change through
+            sys.stderr.write(
+                f"task-queue: browser-reachability judge crashed, block stands "
+                f"({err.__class__.__name__}: {err})\n"
+            )
+            return False
+        if result.get("reachable") == "no":
+            sys.stderr.write(
+                "task-queue: browser-gate reachability override — the changed UI "
+                "is not rendered in the running app, so the full-app browser run "
+                f"is N/A: {result.get('rationale', '')[:200]}\n"
+            )
+            return True
+        return False
 
     def _reviewer_accepts_record_vote(self) -> bool:
         """Whether the wired reviewer takes a ``record_vote`` sink (review_panel
