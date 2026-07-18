@@ -1,19 +1,20 @@
-import { Outlet } from "react-router-dom";
-import { palettes, sans } from "./theme";
+import { useEffect, useState } from "react";
+import { AppShell } from "./components/AppShell";
+import { applyTheme, initialTheme, ThemeContext, type Theme } from "./theme";
 
+// Layout route element: owns theme state, provides it, renders the shell.
 export function App() {
-  const p = palettes.dark;
+  const [theme, setTheme] = useState<Theme>(initialTheme);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  const toggle = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
+
   return (
-    <div
-      style={{
-        height: "100vh",
-        overflow: "hidden",
-        background: p.bg,
-        color: p.textPrimary,
-        fontFamily: sans,
-      }}
-    >
-      <Outlet />
-    </div>
+    <ThemeContext.Provider value={{ theme, toggle }}>
+      <AppShell />
+    </ThemeContext.Provider>
   );
 }

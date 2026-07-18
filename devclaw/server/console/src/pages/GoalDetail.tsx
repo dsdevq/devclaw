@@ -1,562 +1,233 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { cancelGoal, fetchGoal, steerGoal, type GoalDetail as GD, type Verdict } from "../api";
+import { cancelGoal, fetchGoal, steerGoal, tokenQueryString, type GoalDetail as GD } from "../api";
 import { EventFeed } from "../components/EventFeed";
 import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
 import { TasksSection } from "../components/TasksSection";
-import { mono, palettes } from "../theme";
+import { IconAlert, IconSteer, IconStop } from "../icons";
+import { phaseColor, VERDICT_LABEL, verdictColor } from "../status";
+import { Badge, ErrorNote, Loading, Modal, StatusDot, Tabs } from "../ui";
 
-// PR#3 delivers the static frame of Goal Detail.dc.html: header, breadcrumb,
-// objective, phase/lifecycle/verdict pills, Cancel + Steer buttons (visual
-// only), and the 5-node phase timeline with pulse on the current node.
-// The live event stream + kind filters + row expand land in PR#4-5.
+type Tab = "timeline" | "tasks" | "prs" | "activity" | "schedule";
 
-const VERSION_LABEL = "v0.7.2";
-
-// Timeline nodes want a compact "HH:MM" tag if the phase was entered today,
-// otherwise a short "MM/DD" — matches the Goal Detail mock's ephemeral time
-// labels (e.g. "09:01") for phases that transitioned during the same session.
-function formatTimestampShort(ms: number | null): string {
+function shortTime(ms: number | null): string {
   if (ms === null) return "—";
   const d = new Date(ms);
   const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  if (sameDay) {
-    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  }
-  return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}`;
+  const sameDay = d.toDateString() === now.toDateString();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return sameDay ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : `${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
 }
-
-const VERDICT_LABEL: Record<Verdict, string> = {
-  on_track: "On track",
-  off_track: "Off track",
-  achieved: "Achieved",
-  stalled: "Stalled",
-  needs_human: "Needs human",
-};
-
-const pulseKeyframes = `
-@keyframes devclaw-pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(94,106,210,0.55); }
-  70%  { box-shadow: 0 0 0 7px rgba(94,106,210,0); }
-  100% { box-shadow: 0 0 0 0 rgba(94,106,210,0); }
-}
-`;
 
 export function GoalDetail() {
   const { id } = useParams<{ id: string }>();
-  const p = palettes.dark;
+  const qs = tokenQueryString();
   const [data, setData] = useState<GD | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("timeline");
   const [busy, setBusy] = useState<"cancel" | "steer" | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
+  const [steerOpen, setSteerOpen] = useState(false);
+  const [steerMsg, setSteerMsg] = useState("");
+  const [cancelOpen, setCancelOpen] = useState(false);
 
-  const isTerminal =
-    data?.phase === "done" ||
-    data?.phase === "cancelled" ||
-    data?.phase === "achieved" ||
-    data?.phase === "error";
+  const terminal = ["done", "cancelled", "achieved", "error"].includes(data?.phase ?? "");
 
-  const reload = () => {
-    if (!id) return;
-    fetchGoal(id).then(setData).catch((e) => setErr(String(e)));
-  };
-
-  const onCancel = async () => {
-    if (!id || busy || isTerminal) return;
-    if (!window.confirm(`Cancel goal ${id}? This tears down any in-flight work.`))
-      return;
-    setBusy("cancel");
-    setFlash(null);
-    try {
-      const r = await cancelGoal(id);
-      setFlash(r.cancelled ? "goal cancelled" : `no-op: ${r.reason ?? r.phase}`);
-      reload();
-    } catch (e) {
-      setFlash(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onSteer = async () => {
-    if (!id || busy || isTerminal) return;
-    const msg = window.prompt("Steering message:");
-    if (msg === null || msg.trim() === "") return;
-    setBusy("steer");
-    setFlash(null);
-    try {
-      await steerGoal(id, msg.trim());
-      setFlash("steer sent");
-      reload();
-    } catch (e) {
-      setFlash(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
+  const reload = () => id && fetchGoal(id).then(setData).catch((e) => setErr(String(e)));
 
   useEffect(() => {
     if (!id) return;
     let alive = true;
     setData(null);
     setErr(null);
-    fetchGoal(id)
-      .then((d) => alive && setData(d))
-      .catch((e) => alive && setErr(String(e)));
+    fetchGoal(id).then((d) => alive && setData(d)).catch((e) => alive && setErr(String(e)));
     return () => {
       alive = false;
     };
   }, [id]);
 
-  const verdictMeta = useMemo(() => {
-    if (!data?.direction) {
-      return { label: "—", color: p.textMuted };
+  const doSteer = async () => {
+    if (!id || !steerMsg.trim()) return;
+    setBusy("steer");
+    setSteerOpen(false);
+    try {
+      await steerGoal(id, steerMsg.trim());
+      setFlash("Steer sent");
+      setSteerMsg("");
+      reload();
+    } catch (e) {
+      setFlash(String(e));
+    } finally {
+      setBusy(null);
     }
-    const v = data.direction.verdict;
-    const label = VERDICT_LABEL[v] ?? v;
-    const color =
-      v === "achieved" || v === "on_track"
-        ? p.green
-        : v === "off_track" || v === "stalled"
-          ? p.amber
-          : v === "needs_human"
-            ? p.red
-            : p.textMuted;
-    return { label, color };
-  }, [data, p]);
+  };
+
+  const doCancel = async () => {
+    if (!id) return;
+    setBusy("cancel");
+    setCancelOpen(false);
+    try {
+      const r = await cancelGoal(id);
+      setFlash(r.cancelled ? "Goal cancelled" : `No-op: ${r.reason ?? r.phase}`);
+      reload();
+    } catch (e) {
+      setFlash(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const tabs: { id: Tab; label: string; count?: number }[] = [
+    { id: "timeline", label: "Timeline" },
+    { id: "tasks", label: "Tasks", count: data?.tasks?.length },
+    { id: "prs", label: "Pull requests" },
+    { id: "activity", label: "Activity" },
+    { id: "schedule", label: "Schedule" },
+  ];
 
   return (
-    <div
-      style={{
-        height: "100vh",
-        width: "100%",
-        boxSizing: "border-box",
-        display: "flex",
-        flexDirection: "column",
-        overflow: "hidden",
-      }}
-    >
-      <style>{pulseKeyframes}</style>
-
-      <div
-        style={{
-          height: 56,
-          flexShrink: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0 40px",
-          boxSizing: "border-box",
-          borderBottom: `1px solid ${p.border}`,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-          <div style={{ fontSize: 14, fontWeight: 600, letterSpacing: "-0.01em" }}>
-            devclaw console
-          </div>
-          <div style={{ width: 1, height: 16, background: p.border }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13 }}>
-            <Link
-              to="/"
-              style={{ color: p.textSecondary, textDecoration: "none" }}
-            >
-              projects
-            </Link>
-            <span style={{ color: p.textMuted }}>/</span>
-            <span style={{ color: p.textPrimary }}>{id}</span>
-          </div>
-        </div>
-        <div style={{ fontFamily: mono, fontSize: 12, color: p.textMuted }}>
-          {VERSION_LABEL}
-        </div>
+    <div className="page" style={{ maxWidth: 980 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+        <Link to={`/goals${qs}`} className="secondary">Goals</Link>
+        <span className="muted">›</span>
+        {data && <span className="mono muted">{id}</span>}
       </div>
 
-      {err && (
-        <div style={{ padding: "22px 40px", fontSize: 13, color: p.red }}>
-          {err}
-        </div>
-      )}
-      {!data && !err && (
-        <div style={{ padding: "22px 40px", fontSize: 13, color: p.textMuted }}>
-          Loading…
-        </div>
-      )}
+      {err && <ErrorNote>{err}</ErrorNote>}
+      {!data && !err && <Loading />}
 
       {data && (
         <>
-          <div
-            style={{
-              flexShrink: 0,
-              padding: "22px 40px 20px",
-              boxSizing: "border-box",
-              borderBottom: `1px solid ${p.border}`,
-              display: "flex",
-              flexDirection: "column",
-              gap: 14,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 15,
-                lineHeight: 1.5,
-                color: p.textPrimary,
-                maxWidth: 900,
-              }}
-            >
+          <div style={{ margin: "16px 0 18px" }}>
+            <p style={{ fontSize: 15.5, lineHeight: 1.55, margin: "0 0 16px", maxWidth: 820 }}>
               {data.objective || "—"}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 20,
-                flexWrap: "wrap",
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  flexWrap: "wrap",
-                }}
-              >
-                <Pill
-                  labelColor={p.textMuted}
-                  border={p.border}
-                  label="Phase"
-                  value={data.phaseLabel}
-                  dotColor={p.accent}
-                />
-                <Pill
-                  labelColor={p.textMuted}
-                  border={p.border}
-                  label="Lifecycle"
-                  value={data.lifecycle ?? "—"}
-                />
-                <Pill
-                  labelColor={p.textMuted}
-                  border={p.border}
-                  label="Verdict"
-                  value={verdictMeta.label}
-                  dotColor={verdictMeta.color}
-                />
+            </p>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <Badge k="Phase" dot={phaseColor(data.phase)}>{data.phaseLabel}</Badge>
+                <Badge k="Lifecycle">{data.lifecycle ?? "—"}</Badge>
+                {data.direction && (
+                  <Badge k="Verdict" dot={verdictColor(data.direction.verdict)}>
+                    {VERDICT_LABEL[data.direction.verdict] ?? data.direction.verdict}
+                  </Badge>
+                )}
                 {data.dispatchCap > 0 && (
-                  <Pill
-                    labelColor={p.textMuted}
-                    border={p.border}
-                    label="Dispatched"
-                    value={`${data.actionsDispatched} / ${data.dispatchCap}`}
-                    dotColor={
-                      data.actionsDispatched >= data.dispatchCap
-                        ? p.amber
-                        : p.textMuted
-                    }
-                  />
+                  <Badge k="Dispatched">{data.actionsDispatched} / {data.dispatchCap}</Badge>
                 )}
               </div>
-              <div
-                style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}
-              >
-                {flash && (
-                  <span
-                    style={{
-                      fontFamily: mono,
-                      fontSize: 11.5,
-                      color: p.textSecondary,
-                      marginRight: 4,
-                    }}
-                  >
-                    {flash}
-                  </span>
-                )}
-                <button
-                  disabled={busy !== null || isTerminal}
-                  onClick={onCancel}
-                  style={{
-                    background: "transparent",
-                    color: p.red,
-                    border: `1px solid ${p.red}`,
-                    padding: "8px 18px",
-                    borderRadius: 5,
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor:
-                      busy !== null || isTerminal ? "not-allowed" : "pointer",
-                    opacity: busy !== null || isTerminal ? 0.5 : 1,
-                    fontFamily: "'Inter', sans-serif",
-                  }}
-                >
-                  {busy === "cancel" ? "…" : "Cancel"}
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {flash && <span className="mono secondary" style={{ fontSize: 12 }}>{flash}</span>}
+                <button className="btn danger sm" disabled={busy !== null || terminal} onClick={() => setCancelOpen(true)}>
+                  <IconStop size={14} /> Cancel
                 </button>
-                <button
-                  disabled={busy !== null || isTerminal}
-                  onClick={onSteer}
-                  style={{
-                    background: p.accent,
-                    color: "#ffffff",
-                    border: "none",
-                    padding: "8px 18px",
-                    borderRadius: 5,
-                    fontSize: 13,
-                    fontWeight: 600,
-                    cursor:
-                      busy !== null || isTerminal ? "not-allowed" : "pointer",
-                    opacity: busy !== null || isTerminal ? 0.5 : 1,
-                    fontFamily: "'Inter', sans-serif",
-                  }}
-                >
-                  {busy === "steer" ? "…" : "Steer"}
+                <button className="btn primary sm" disabled={busy !== null || terminal} onClick={() => setSteerOpen(true)}>
+                  <IconSteer size={14} /> Steer
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Scroll region: the header + objective/pills frame stays pinned;
-              everything below (timeline, blocked banner, tasks, PRs, events)
-              owns the scroll. flex:1 + minHeight:0 is what lets a flex child
-              actually scroll inside the height:100vh; overflow:hidden column —
-              without it the content stacks past the viewport and gets clipped
-              with no scroll anywhere (fixed 2026-07-05). The timeline lives
-              inside the scroll region (not pinned) so its absolutely-positioned
-              node labels don't overlap the scrolled rows below it. */}
-          <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-            <PhaseTimeline nodes={data.timeline} palette={p} />
+          {data.phase === "blocked" && <BlockedBanner blockedOn={data.blockedOn} />}
 
-            {data.phase === "blocked" && (
-              <BlockedBanner blockedOn={data.blockedOn} palette={p} />
+          <Tabs tabs={tabs} active={tab} onChange={setTab} />
+
+          <div style={{ paddingTop: 22 }}>
+            {tab === "timeline" && <Timeline data={data} />}
+            {tab === "tasks" && (
+              <TasksSection tasks={data.tasks ?? []} emptyLabel="No tasks dispatched yet — the heartbeat files them here." />
             )}
-
-            <GoalRunWindow goalId={data.id} />
-
-            <TasksSection
-              title="Dispatched tasks"
-              tasks={data.tasks ?? []}
-              emptyLabel="No tasks dispatched yet — the goal heartbeat will file them here"
-            />
-
-            <PRList goalId={data.id} />
-
-            <EventFeed goalId={data.id} />
+            {tab === "prs" && <PRList goalId={data.id} />}
+            {tab === "activity" && <EventFeed goalId={data.id} />}
+            {tab === "schedule" && <GoalRunWindow goalId={data.id} />}
           </div>
         </>
       )}
-    </div>
-  );
-}
 
-function Pill({
-  label,
-  value,
-  labelColor,
-  border,
-  dotColor,
-}: {
-  label: string;
-  value: string;
-  labelColor: string;
-  border: string;
-  dotColor?: string;
-}) {
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 7,
-        padding: "5px 10px",
-        border: `1px solid ${border}`,
-        borderRadius: 5,
-        fontSize: 12,
-      }}
-    >
-      {dotColor && (
-        <span
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            background: dotColor,
-            flexShrink: 0,
-          }}
-        />
+      {steerOpen && (
+        <Modal
+          title="Steer this goal"
+          onClose={() => setSteerOpen(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setSteerOpen(false)}>Cancel</button>
+              <button className="btn primary" disabled={!steerMsg.trim()} onClick={doSteer}>Send steer</button>
+            </>
+          }
+        >
+          <p className="secondary" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
+            A nudge to the goal's direction — applied on the next heartbeat. It refines the objective, it doesn't replace it.
+          </p>
+          <textarea
+            className="field"
+            rows={4}
+            autoFocus
+            value={steerMsg}
+            onChange={(e) => setSteerMsg(e.target.value)}
+            placeholder="e.g. Prioritize the settings page before the dashboard."
+          />
+        </Modal>
       )}
-      <span
-        style={{
-          color: labelColor,
-          textTransform: "uppercase",
-          fontSize: 10,
-          letterSpacing: "0.04em",
-        }}
-      >
-        {label}
-      </span>
-      <span>{value}</span>
+
+      {cancelOpen && (
+        <Modal
+          title={`Cancel ${id}?`}
+          onClose={() => setCancelOpen(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setCancelOpen(false)}>Keep running</button>
+              <button className="btn danger" onClick={doCancel}>Cancel goal</button>
+            </>
+          }
+        >
+          <p style={{ fontSize: 13.5, lineHeight: 1.55, margin: 0 }}>
+            This tears down any in-flight work and moves the goal to a terminal state. It can't be resumed — you'd file a new goal.
+          </p>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function BlockedBanner({
-  blockedOn,
-  palette: p,
-}: {
-  blockedOn: string | null;
-  palette: (typeof palettes)["dark"];
-}) {
-  // A blocked goal is common on standing missions — dispatch cap held so the
-  // owner can review. The banner names *why* rather than just showing a stalled
-  // pill; the hint routes the owner at the PR list below when the reason
-  // mentions dispatch cap.
+function BlockedBanner({ blockedOn }: { blockedOn: string | null }) {
   const isDispatchCap = (blockedOn ?? "").toLowerCase().includes("dispatch cap");
   return (
     <div
-      style={{
-        flexShrink: 0,
-        padding: "12px 40px",
-        boxSizing: "border-box",
-        borderBottom: `1px solid ${p.border}`,
-        background: `${p.amber}18`,
-        display: "flex",
-        gap: 12,
-        alignItems: "center",
-      }}
+      className="card"
+      style={{ display: "flex", gap: 11, padding: "13px 15px", margin: "0 0 20px", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", background: "var(--amber-soft)" }}
     >
-      <span
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          background: p.amber,
-          flexShrink: 0,
-        }}
-      />
-      <div style={{ flex: 1, minWidth: 0, fontSize: 13 }}>
-        <span style={{ color: p.textPrimary, fontWeight: 600 }}>
-          Goal is blocked.
-        </span>{" "}
-        <span style={{ color: p.textSecondary }}>
-          {blockedOn ?? "Reason unknown — check the log."}
-        </span>
-        {isDispatchCap && (
-          <span style={{ color: p.textMuted, marginLeft: 6 }}>
-            Merge one of the open PRs below to unblock the loop.
-          </span>
-        )}
+      <span style={{ color: "var(--amber)", flexShrink: 0 }}><IconAlert size={17} /></span>
+      <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+        <span style={{ fontWeight: 600 }}>Blocked — waiting on you.</span>{" "}
+        <span className="secondary">{blockedOn ?? "Reason unknown — check the activity log."}</span>
+        {isDispatchCap && <span className="muted"> Merge an open PR under Pull requests to unblock the loop.</span>}
       </div>
     </div>
   );
 }
 
-function PhaseTimeline({
-  nodes,
-  palette: p,
-}: {
-  nodes: GD["timeline"];
-  palette: (typeof palettes)["dark"];
-}) {
-  const currentIndex = nodes.findIndex((n) => n.current);
-  const lineFraction =
-    nodes.length > 1
-      ? ((currentIndex === -1 ? 0 : currentIndex) / (nodes.length - 1)) * 100
-      : 0;
+function Timeline({ data }: { data: GD }) {
+  const nodes = data.timeline;
+  const current = nodes.findIndex((n) => n.current);
+  const pct = nodes.length > 1 ? ((current === -1 ? 0 : current) / (nodes.length - 1)) * 100 : 0;
   return (
-    <div
-      style={{
-        flexShrink: 0,
-        padding: "16px 40px",
-        boxSizing: "border-box",
-        borderBottom: `1px solid ${p.border}`,
-      }}
-    >
-      <div style={{ position: "relative", height: 4, margin: "0 8px" }}>
-        <div
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 2,
-            background: `linear-gradient(to right, ${p.accent} 0%, ${p.accent} ${lineFraction}%, ${p.border} ${lineFraction}%, ${p.border} 100%)`,
-          }}
-        />
-        <div
-          style={{
-            position: "absolute",
-            top: -6,
-            left: 0,
-            right: 0,
-            display: "flex",
-            justifyContent: "space-between",
-          }}
-        >
-          {nodes.map((n) => {
-            let bg = p.bg;
-            let border = p.border;
-            let extra: React.CSSProperties = {};
-            if (n.current) {
-              bg = p.accent;
-              border = p.accent;
-              extra = { animation: "devclaw-pulse 2s infinite" };
-            } else if (n.reached) {
-              bg = p.accent;
-              border = p.accent;
-              extra = { opacity: 0.5 };
-            }
-            const labelColor = n.current
-              ? p.textPrimary
-              : n.reached
-                ? p.textSecondary
-                : p.textMuted;
-            return (
-              <div
-                key={n.name}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  alignItems: "center",
-                  gap: 5,
-                  width: 70,
-                }}
-              >
-                <span
-                  style={{
-                    display: "block",
-                    width: 10,
-                    height: 10,
-                    borderRadius: "50%",
-                    background: bg,
-                    border: `2px solid ${border}`,
-                    boxSizing: "border-box",
-                    ...extra,
-                  }}
-                />
-                <span
-                  style={{
-                    fontSize: 11,
-                    fontWeight: n.current ? 600 : 500,
-                    color: labelColor,
-                  }}
-                >
-                  {n.name}
-                </span>
-                <span
-                  style={{
-                    fontFamily: mono,
-                    fontSize: 9.5,
-                    color: p.textMuted,
-                  }}
-                >
-                  {formatTimestampShort(n.timestampMs)}
-                </span>
-              </div>
-            );
-          })}
+    <div className="card" style={{ padding: "28px 26px" }}>
+      <div style={{ position: "relative", margin: "0 6px" }}>
+        <div style={{ position: "absolute", top: 5, left: 0, right: 0, height: 2, background: "var(--border)" }} />
+        <div style={{ position: "absolute", top: 5, left: 0, width: `${pct}%`, height: 2, background: "var(--accent)" }} />
+        <div style={{ position: "relative", display: "flex", justifyContent: "space-between" }}>
+          {nodes.map((n) => (
+            <div key={n.name} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8, width: 74 }}>
+              <StatusDot
+                color={n.current || n.reached ? "var(--accent)" : "var(--border-strong)"}
+                live={n.current}
+              />
+              <span style={{ fontSize: 11.5, fontWeight: n.current ? 600 : 500, color: n.current ? "var(--text)" : n.reached ? "var(--text-secondary)" : "var(--text-muted)", textAlign: "center" }}>
+                {n.name}
+              </span>
+              <span className="mono muted" style={{ fontSize: 10 }}>{shortTime(n.timestampMs)}</span>
+            </div>
+          ))}
         </div>
       </div>
     </div>

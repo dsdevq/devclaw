@@ -1,16 +1,8 @@
 import { useEffect, useState } from "react";
 import { fetchGoalSchedule, setGoalSchedule, type RunSchedule } from "../api";
-import { mono, palettes } from "../theme";
 
-// Per-goal run window: a night/off-hours narrowing on top of the GLOBAL dispatch
-// window (DispatchControls in the header). A goal dispatches only if BOTH the
-// global controls AND its own window allow — so a token-heavy standing goal can
-// be confined to nights while the rest of the engine runs all day. Backend gate:
-// server/http.py GET/POST /goals/{id}/schedule → tick_all's per-goal loop.
-// Enabled ⇒ the goal only ticks inside [start, end); outside it's held (0 tokens,
-// in-flight finishes). Disabled ⇒ the goal follows the global window only.
-
-const p = palettes.dark;
+// Per-goal run window: a nights/off-hours narrowing on top of the GLOBAL window.
+// A goal dispatches only if BOTH the global controls AND its own window allow.
 
 export function GoalRunWindow({ goalId }: { goalId: string }) {
   const [draft, setDraft] = useState<RunSchedule | null>(null);
@@ -26,7 +18,6 @@ export function GoalRunWindow({ goalId }: { goalId: string }) {
         if (!live) return;
         setDraft(s);
         setSaved(s);
-        setErr(null);
       })
       .catch((e) => live && setErr(String(e instanceof Error ? e.message : e)));
     return () => {
@@ -35,12 +26,9 @@ export function GoalRunWindow({ goalId }: { goalId: string }) {
   }, [goalId]);
 
   const dirty =
-    !!draft &&
-    !!saved &&
-    (draft.enabled !== saved.enabled ||
-      draft.start !== saved.start ||
-      draft.end !== saved.end ||
-      draft.tz !== saved.tz);
+    !!draft && !!saved &&
+    (draft.enabled !== saved.enabled || draft.start !== saved.start ||
+      draft.end !== saved.end || draft.tz !== saved.tz);
 
   const save = async () => {
     if (!draft) return;
@@ -59,161 +47,60 @@ export function GoalRunWindow({ goalId }: { goalId: string }) {
     }
   };
 
-  const summary = saved?.enabled
-    ? `Nights only · ${saved.start}–${saved.end} ${saved.tz}`
-    : "Follows the global window";
+  if (!draft) return <div className="secondary" style={{ fontSize: 13 }}>{err ?? "Loading…"}</div>;
 
   return (
-    <section style={{ padding: "18px 40px", borderTop: `1px solid ${p.border}` }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            color: p.textSecondary,
-          }}
-        >
-          Run window
-        </div>
-        <div style={{ fontFamily: mono, fontSize: 11.5, color: p.textMuted }}>{summary}</div>
+    <div className="card" style={{ padding: 18, maxWidth: 560 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Run window</div>
+      <p className="secondary" style={{ fontSize: 12.5, margin: "0 0 16px" }}>
+        Confine this goal to a time window on top of the global schedule — useful for
+        pinning a token-heavy standing goal to nights.
+      </p>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 13, cursor: "pointer", marginBottom: 14 }}>
+        <input
+          type="checkbox"
+          checked={draft.enabled}
+          onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
+        />
+        Only dispatch inside a time window
+      </label>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <input
+          type="time"
+          className="field"
+          value={draft.start}
+          disabled={!draft.enabled}
+          onChange={(e) => setDraft({ ...draft, start: e.target.value })}
+        />
+        <span className="muted" style={{ fontSize: 12 }}>to</span>
+        <input
+          type="time"
+          className="field"
+          value={draft.end}
+          disabled={!draft.enabled}
+          onChange={(e) => setDraft({ ...draft, end: e.target.value })}
+        />
+        <input
+          type="text"
+          className="field"
+          style={{ width: 160 }}
+          value={draft.tz}
+          spellCheck={false}
+          disabled={!draft.enabled}
+          placeholder="Europe/Kyiv"
+          onChange={(e) => setDraft({ ...draft, tz: e.target.value })}
+        />
       </div>
 
-      {!draft && !err && (
-        <div style={{ fontSize: 12.5, color: p.textMuted }}>Loading…</div>
-      )}
-
-      {draft && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-            flexWrap: "wrap",
-          }}
-        >
-          <label
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              fontSize: 12.5,
-              color: p.textPrimary,
-              cursor: "pointer",
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={draft.enabled}
-              onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
-            />
-            Only dispatch inside a time window
-          </label>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <TimeField
-              value={draft.start}
-              disabled={!draft.enabled}
-              onChange={(v) => setDraft({ ...draft, start: v })}
-            />
-            <span style={{ color: p.textMuted, fontSize: 12 }}>to</span>
-            <TimeField
-              value={draft.end}
-              disabled={!draft.enabled}
-              onChange={(v) => setDraft({ ...draft, end: v })}
-            />
-          </div>
-
-          <input
-            type="text"
-            value={draft.tz}
-            spellCheck={false}
-            disabled={!draft.enabled}
-            placeholder="Europe/Kyiv"
-            onChange={(e) => setDraft({ ...draft, tz: e.target.value })}
-            style={{
-              height: 28,
-              width: 150,
-              padding: "0 10px",
-              borderRadius: 6,
-              border: `1px solid ${p.border}`,
-              background: p.rowHover,
-              color: p.textPrimary,
-              fontFamily: mono,
-              fontSize: 12,
-              opacity: draft.enabled ? 1 : 0.5,
-            }}
-          />
-
-          <button
-            disabled={busy || !dirty}
-            onClick={save}
-            style={{
-              height: 30,
-              padding: "0 16px",
-              borderRadius: 6,
-              border: `1px solid ${p.accent}`,
-              background: dirty ? p.accent : "transparent",
-              color: dirty ? "#ffffff" : p.accent,
-              fontFamily: mono,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: busy || !dirty ? "not-allowed" : "pointer",
-              opacity: busy || !dirty ? 0.5 : 1,
-            }}
-          >
-            {busy ? "…" : "Save"}
-          </button>
-
-          {flash && (
-            <span style={{ fontFamily: mono, fontSize: 11.5, color: p.green }}>{flash}</span>
-          )}
-        </div>
-      )}
-
-      {err && (
-        <div style={{ marginTop: 10, fontSize: 11.5, color: p.red, fontFamily: mono }}>
-          {err}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function TimeField({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <input
-      type="time"
-      value={value}
-      disabled={disabled}
-      onChange={(e) => onChange(e.target.value)}
-      style={{
-        height: 28,
-        padding: "0 8px",
-        borderRadius: 6,
-        border: `1px solid ${p.border}`,
-        background: p.rowHover,
-        color: p.textPrimary,
-        fontFamily: mono,
-        fontSize: 12,
-        opacity: disabled ? 0.5 : 1,
-      }}
-    />
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 16 }}>
+        <button className="btn primary sm" disabled={busy || !dirty} onClick={save}>
+          {busy ? "Saving…" : "Save window"}
+        </button>
+        {flash && <span className="mono" style={{ fontSize: 12, color: "var(--green)" }}>{flash}</span>}
+        {err && <span className="mono" style={{ fontSize: 12, color: "var(--red)" }}>{err}</span>}
+      </div>
+    </div>
   );
 }

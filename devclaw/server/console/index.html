@@ -4,25 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>devclaw console</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
+    <!-- Fonts are self-hosted via @font-face in src/index.css — no CDN. -->
     <style>
-      html,
-      body {
-        margin: 0;
-        padding: 0;
+      /* Pre-paint background so the first frame isn't a white flash before the
+         CSS-variable theme loads. index.css owns everything after mount. */
+      html {
+        background: #0b0c0f;
       }
-      body {
-        background: #0a0a0b;
-        color: #ededef;
-        font-family: "Inter", system-ui, sans-serif;
-      }
-      ::selection {
-        background: rgba(94, 106, 210, 0.35);
+      html[data-theme="light"] {
+        background: #fbfbfc;
       }
     </style>
   </head>
