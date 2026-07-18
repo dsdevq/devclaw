@@ -5,6 +5,7 @@ import { IconAlert, IconExternal } from "../icons";
 import { phaseColor, phaseIsLive } from "../status";
 import { relativeTime } from "../util/time";
 import { EmptyState, ErrorNote, Loading, SectionLabel, StatusDot } from "../ui";
+import { ProjectSettings } from "../components/ProjectSettings";
 import { TasksSection } from "../components/TasksSection";
 
 const COLS = "minmax(0,1.3fr) 140px minmax(0,1fr) 100px";
@@ -125,12 +126,17 @@ export function ProjectDetail() {
             </section>
           )}
 
-          <section>
+          <section style={{ marginBottom: 30 }}>
             <SectionLabel count={(data.tasks ?? []).length}>Recent tasks</SectionLabel>
             <TasksSection
               tasks={data.tasks ?? []}
               emptyLabel="No standalone tasks — features/fixes dispatched without a goal land here."
             />
+          </section>
+
+          <section>
+            <SectionLabel>Settings · overrides</SectionLabel>
+            {id && <ProjectSettings projectId={id} />}
           </section>
         </>
       )}

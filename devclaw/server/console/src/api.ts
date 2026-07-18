@@ -311,6 +311,65 @@ export async function fetchGoalSchedule(id: string): Promise<RunSchedule> {
   return j.schedule as RunSchedule;
 }
 
+// ---- configuration: read-only env catalog (A) + per-project overrides (B) --
+
+export interface EnvVar {
+  group: string;
+  key: string;
+  default: string;
+  purpose: string;
+  value: string;
+  isSet: boolean;
+  secret: boolean;
+}
+
+export async function fetchEnvConfig(): Promise<EnvVar[]> {
+  const r = await fetch(`/config/env.json${tokenQS()}`);
+  if (!r.ok) throw new Error(`config/env.json ${r.status}`);
+  const j = await r.json();
+  return (j.vars ?? []) as EnvVar[];
+}
+
+export interface ProjectOverrides {
+  automerge: boolean | null;
+  autodeploy: boolean | null;
+  review_gate: boolean | null;
+  verify_done: boolean | null;
+  merge_strategy: string | null;
+  browser_gate_mode: string | null;
+}
+
+export async function fetchProjectConfig(id: string): Promise<ProjectOverrides> {
+  const r = await fetch(`/projects/${encodeURIComponent(id)}/config.json${tokenQS()}`);
+  if (r.status === 404) throw new Error(`project not found: ${id}`);
+  if (!r.ok) throw new Error(`project config ${id}: ${r.status}`);
+  const j = await r.json();
+  return j.overrides as ProjectOverrides;
+}
+
+export async function setProjectConfig(
+  id: string,
+  patch: Partial<ProjectOverrides>,
+): Promise<ProjectOverrides> {
+  const r = await fetch(`/projects/${encodeURIComponent(id)}/config${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) {
+    let msg = `save config: ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.error) msg = `${j.error}${j.field ? ` (${j.field})` : ""}`;
+    } catch {
+      /* keep status message */
+    }
+    throw new Error(msg);
+  }
+  const j = await r.json();
+  return j.overrides as ProjectOverrides;
+}
+
 export async function setGoalSchedule(
   id: string,
   s: RunSchedule,

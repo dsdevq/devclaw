@@ -10,6 +10,7 @@ import asyncio
 import datetime as _dt
 import json
 import mimetypes
+import os
 from pathlib import Path
 
 from starlette.requests import Request
@@ -452,6 +453,135 @@ async def goal_answer(request: Request) -> Response:
     except ValueError as exc:
         return JSONResponse({"error": "bad_answers", "detail": str(exc)}, status_code=400)
     return JSONResponse(result)
+
+
+# ── configuration surfaces ─────────────────────────────────────────────────
+# A: a READ-ONLY catalog of the runtime env vars, parsed live from the enforced
+#    single-source-of-truth doc (docs/reference/env-vars.md) so the table never
+#    drifts. Secret values are masked — the value is never echoed to the browser.
+# B: the EDITABLE per-project overrides (already DB-backed + live-resolved by the
+#    registry; no restart needed). Global env stays read-only on purpose — those
+#    are read at process start and can't be hot-edited, and a free-form env
+#    editor would be a vector to inject a metered API key (the OAuth-only
+#    invariant strips ANTHROPIC_* — never make them settable here).
+
+_ENV_DOC = Path(__file__).resolve().parents[2] / "docs" / "reference" / "env-vars.md"
+_SECRET_HINTS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
+
+
+def _strip_md(s: str) -> str:
+    return s.replace("`", "").replace("**", "").strip()
+
+
+def _env_var_catalog() -> list[dict]:
+    """Parse the env-var reference doc into rows the console renders: group, key,
+    default, purpose, and the CURRENT value (masked for secrets). Best-effort —
+    a missing/renamed doc degrades to [] rather than 500-ing the settings view."""
+    try:
+        text = _ENV_DOC.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    rows: list[dict] = []
+    group = ""
+    for line in text.splitlines():
+        st = line.strip()
+        if st.startswith("## "):
+            group = st[3:].strip()
+            continue
+        if not st.startswith("|") or "`" not in st:
+            continue
+        cells = [c.strip() for c in st.strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        keycell = cells[0]
+        if keycell.lower() == "var" or set(keycell) <= set("-: "):
+            continue  # header / separator row
+        key = keycell.split("`")[1].strip()  # first backticked token
+        if not (key.isupper() and "_" in key and key.replace("_", "").isalnum()):
+            continue
+        default = _strip_md(cells[1])
+        if default in ("—", "(unset)", "*(unset)*"):
+            default = ""
+        secret = any(h in key for h in _SECRET_HINTS)
+        raw = os.environ.get(key, "")
+        rows.append(
+            {
+                "group": group,
+                "key": key,
+                "default": default,
+                "purpose": _strip_md("|".join(cells[2:])),
+                "value": ("••••••" if raw else "") if secret else raw,
+                "isSet": bool(raw),
+                "secret": secret,
+            }
+        )
+    return rows
+
+
+@mcp.custom_route("/config/env.json", methods=["GET"])
+async def config_env_json(_request: Request) -> Response:
+    """Read-only catalog of every runtime env var + its current value (secrets
+    masked). Editing global env needs a container restart, so this view is
+    deliberately read-only; the editable knobs live per-project (below)."""
+    return JSONResponse({"vars": _env_var_catalog()})
+
+
+#: per-project override fields the console may edit, with their validators.
+_OVR_BOOL = ("automerge", "autodeploy", "review_gate", "verify_done")
+_OVR_STR = {"merge_strategy": ("squash", "merge", "rebase"),
+            "browser_gate_mode": ("flexible", "strict")}
+
+
+def _project_overrides(p) -> dict:
+    return {
+        "automerge": p.automerge,
+        "autodeploy": p.autodeploy,
+        "review_gate": p.review_gate,
+        "verify_done": p.verify_done,
+        "merge_strategy": p.merge_strategy,
+        "browser_gate_mode": p.browser_gate_mode,
+    }
+
+
+@mcp.custom_route("/projects/{project_id}/config.json", methods=["GET"])
+async def project_config_get(request: Request) -> Response:
+    """A project's editable overrides. `null` = inherit the devclaw-wide default;
+    a value = pinned for this repo. Resolution is live (registry read per call)."""
+    pid = request.path_params["project_id"]
+    p = registry.get(pid)
+    if p is None:
+        return JSONResponse({"error": "not_found", "id": pid}, status_code=404)
+    return JSONResponse({"overrides": _project_overrides(p)})
+
+
+@mcp.custom_route("/projects/{project_id}/config", methods=["POST"])
+async def project_config_set(request: Request) -> Response:
+    """Update a project's overrides. Body `{field: value|null}` — only listed
+    fields change (`null` clears back to the default). Unknown fields or bad
+    values are rejected 400; secrets/infra env are NOT reachable here by design."""
+    pid = request.path_params["project_id"]
+    if registry.get(pid) is None:
+        return JSONResponse({"error": "not_found", "id": pid}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    if not isinstance(body, dict) or not body:
+        return JSONResponse({"error": "empty_patch"}, status_code=400)
+    patch: dict = {}
+    for k, v in body.items():
+        if k in _OVR_BOOL:
+            if v is not None and not isinstance(v, bool):
+                return JSONResponse({"error": "bad_value", "field": k, "hint": "bool|null"}, status_code=400)
+            patch[k] = v
+        elif k in _OVR_STR:
+            if v is not None and v not in _OVR_STR[k]:
+                return JSONResponse({"error": "bad_value", "field": k, "hint": f"one of {_OVR_STR[k]}|null"}, status_code=400)
+            patch[k] = v
+        else:
+            return JSONResponse({"error": "unknown_field", "field": k}, status_code=400)
+    registry.update(pid, **patch)
+    return JSONResponse({"overrides": _project_overrides(registry.get(pid))})
 
 
 @mcp.custom_route("/control.json", methods=["GET"])

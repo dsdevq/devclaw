@@ -7,6 +7,7 @@ import {
   type ControlState,
   type RunSchedule,
 } from "../api";
+import { EnvConfigTable } from "../components/EnvConfigTable";
 import { IconMoon, IconPause, IconPlay, IconSun } from "../icons";
 import { useTheme } from "../theme";
 import { ErrorNote, Loading, SectionLabel, StatusDot } from "../ui";
@@ -138,6 +139,12 @@ export function Settings() {
             {theme === "dark" ? "Dark" : "Light"}
           </button>
         </div>
+      </section>
+
+      {/* ── Environment ──────────────────────────────────── */}
+      <section style={{ marginBottom: 34 }}>
+        <SectionLabel>Environment</SectionLabel>
+        <EnvConfigTable />
       </section>
 
       {/* ── About ────────────────────────────────────────── */}
