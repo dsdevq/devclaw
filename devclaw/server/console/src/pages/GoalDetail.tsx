@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { cancelGoal, fetchGoal, steerGoal, tokenQueryString, type GoalDetail as GD } from "../api";
+import { answerGoal, cancelGoal, fetchGoal, resumeGoal, steerGoal, tokenQueryString, type GoalDetail as GD } from "../api";
 import { EventFeed } from "../components/EventFeed";
 import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
@@ -26,11 +26,13 @@ export function GoalDetail() {
   const [data, setData] = useState<GD | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("timeline");
-  const [busy, setBusy] = useState<"cancel" | "steer" | null>(null);
+  const [busy, setBusy] = useState<"cancel" | "steer" | "resume" | "answer" | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [steerOpen, setSteerOpen] = useState(false);
   const [steerMsg, setSteerMsg] = useState("");
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [answerOpen, setAnswerOpen] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, string>>({});
 
   const terminal = ["done", "cancelled", "achieved", "error"].includes(data?.phase ?? "");
 
@@ -77,6 +79,40 @@ export function GoalDetail() {
       setBusy(null);
     }
   };
+
+  const doResume = async () => {
+    if (!id) return;
+    setBusy("resume");
+    try {
+      const r = await resumeGoal(id);
+      setFlash(r.resumed ? "Resumed — re-attempting on the next tick" : r.message ?? "Not resumable");
+      reload();
+    } catch (e) {
+      setFlash(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doAnswer = async () => {
+    if (!id) return;
+    setBusy("answer");
+    setAnswerOpen(false);
+    try {
+      await answerGoal(id, answers);
+      setFlash("Answers sent");
+      setAnswers({});
+      reload();
+    } catch (e) {
+      setFlash(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const hasUnknowns = (data?.unknowns?.length ?? 0) > 0;
+  const answersComplete =
+    hasUnknowns && (data?.unknowns ?? []).every((u) => (answers[u.id] ?? "").trim());
 
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: "timeline", label: "Timeline" },
@@ -128,7 +164,15 @@ export function GoalDetail() {
             </div>
           </div>
 
-          {data.phase === "blocked" && <BlockedBanner blockedOn={data.blockedOn} />}
+          {data.phase === "blocked" && (
+            <BlockedBanner
+              blockedOn={data.blockedOn}
+              hasUnknowns={hasUnknowns}
+              busy={busy}
+              onResume={doResume}
+              onAnswer={() => setAnswerOpen(true)}
+            />
+          )}
 
           <Tabs tabs={tabs} active={tab} onChange={setTab} />
 
@@ -185,23 +229,75 @@ export function GoalDetail() {
           </p>
         </Modal>
       )}
+
+      {answerOpen && data && (
+        <Modal
+          title="Answer to unblock"
+          onClose={() => setAnswerOpen(false)}
+          footer={
+            <>
+              <button className="btn" onClick={() => setAnswerOpen(false)}>Cancel</button>
+              <button className="btn primary" disabled={!answersComplete} onClick={doAnswer}>Send answers</button>
+            </>
+          }
+        >
+          <p className="secondary" style={{ fontSize: 12.5, margin: "0 0 16px" }}>
+            The goal is waiting on these before it can proceed. Answer every question.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {data.unknowns.map((u) => (
+              <div key={u.id}>
+                <div style={{ fontSize: 13, fontWeight: 550, marginBottom: 2 }}>{u.question}</div>
+                {u.why && <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{u.why}</div>}
+                <textarea
+                  className="field"
+                  rows={2}
+                  value={answers[u.id] ?? ""}
+                  onChange={(e) => setAnswers((a) => ({ ...a, [u.id]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
-function BlockedBanner({ blockedOn }: { blockedOn: string | null }) {
+function BlockedBanner({
+  blockedOn,
+  hasUnknowns,
+  busy,
+  onResume,
+  onAnswer,
+}: {
+  blockedOn: string | null;
+  hasUnknowns: boolean;
+  busy: string | null;
+  onResume: () => void;
+  onAnswer: () => void;
+}) {
   const isDispatchCap = (blockedOn ?? "").toLowerCase().includes("dispatch cap");
   return (
     <div
       className="card"
-      style={{ display: "flex", gap: 11, padding: "13px 15px", margin: "0 0 20px", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", background: "var(--amber-soft)" }}
+      style={{ display: "flex", gap: 12, padding: "13px 15px", margin: "0 0 20px", alignItems: "center", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", background: "var(--amber-soft)" }}
     >
       <span style={{ color: "var(--amber)", flexShrink: 0 }}><IconAlert size={17} /></span>
-      <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+      <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.5 }}>
         <span style={{ fontWeight: 600 }}>Blocked — waiting on you.</span>{" "}
         <span className="secondary">{blockedOn ?? "Reason unknown — check the activity log."}</span>
         {isDispatchCap && <span className="muted"> Merge an open PR under Pull requests to unblock the loop.</span>}
       </div>
+      {hasUnknowns ? (
+        <button className="btn primary sm" disabled={busy !== null} onClick={onAnswer} style={{ flexShrink: 0 }}>
+          Answer
+        </button>
+      ) : (
+        <button className="btn primary sm" disabled={busy !== null} onClick={onResume} style={{ flexShrink: 0 }}>
+          {busy === "resume" ? "…" : "Resume"}
+        </button>
+      )}
     </div>
   );
 }

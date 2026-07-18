@@ -128,6 +128,14 @@ export interface TimelineNode {
   timestampMs: number | null;
 }
 
+/** A firming question the goal is blocked on (present only when blocked awaiting
+ *  owner answers). Answered via answerGoal. */
+export interface Unknown {
+  id: string;
+  question: string;
+  why: string;
+}
+
 export interface GoalDetail {
   id: string;
   objective: string;
@@ -140,6 +148,9 @@ export interface GoalDetail {
   inFlight: { tool: string; id: string; is_done_check: boolean } | null;
   timeline: TimelineNode[];
   blockedOn: string | null;
+  blockedKind: string;
+  /** Firming questions to answer when blocked awaiting owner input; else []. */
+  unknowns: Unknown[];
   projectId?: string;
   /** Every task the goal heartbeat dispatched (parent_goal_id = this goal). */
   tasks: TaskRow[];
@@ -334,6 +345,45 @@ export async function steerGoal(id: string, message: string): Promise<{ steered:
   if (!r.ok) {
     const err = await r.text();
     throw new Error(`steer ${id}: ${r.status} ${err}`);
+  }
+  return r.json();
+}
+
+export async function resumeGoal(id: string): Promise<{ resumed: boolean; message?: string }> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/resume${tokenQS()}`, { method: "POST" });
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) {
+    let msg = `resume ${id}: ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.detail) msg = j.detail;
+    } catch {
+      /* keep status message */
+    }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+export async function answerGoal(
+  id: string,
+  answers: Record<string, string>,
+): Promise<unknown> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/answer${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ answers }),
+  });
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) {
+    let msg = `answer ${id}: ${r.status}`;
+    try {
+      const j = await r.json();
+      if (j?.detail) msg = j.detail;
+    } catch {
+      /* keep status message */
+    }
+    throw new Error(msg);
   }
   return r.json();
 }
