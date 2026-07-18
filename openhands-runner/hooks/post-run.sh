@@ -44,6 +44,13 @@ changed_ui=""
 if [ -n "$pre_head" ] && [ -d "$workspace_dir/.git" ]; then
   changed_ui=$(git -C "$workspace_dir" diff --name-only "$pre_head" -- \
     '**/*.component.ts' '**/*.component.html' '*/src/app/**' 'angular.json' 2>/dev/null || true)
+  # Library surface (src/lib) is exempt from the host browser gate — a
+  # library-only slice wires nothing into a running app route, and its proof is
+  # the story+spec the library build/test gate already requires. Mirror the
+  # exemption here so the agent is never nudged into writing a full-app
+  # Playwright spec for a library slice (the cmn-tab-group diff blow-up,
+  # 2026-07-18). One remaining app-surface path keeps the warning.
+  changed_ui=$(echo "$changed_ui" | grep -v '/src/lib/' || true)
 fi
 if [ -n "$changed_ui" ] && [ -n "$verify_cmd" ] && ! echo "$verify_cmd" | grep -qiE 'playwright'; then
   echo "warn: web-UI source changed but verify_cmd runs no browser E2E — the browser gate will fail this CLOSED:"
