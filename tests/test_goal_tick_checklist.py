@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from devclaw.goal import tick_settle
 from devclaw.goal.checklist import dump_checklist
 from devclaw.goal.models import Checklist, ChecklistItem, GoalStatus, InFlight, PollResult
 from devclaw.goal.store import GoalStore
@@ -210,6 +211,48 @@ def test_settle_addressed_items_unknown_id_silently_skipped(tmp_path):
 
     scaffold = next(i for i in updated.items if i.id == "scaffold")
     assert scaffold.status == "done"
+
+
+# ---- #6 structural per-item circuit breaker --------------------------------
+
+
+def test_settle_increments_attempts_on_failure(tmp_path):
+    # A failed settle bumps the item's attempt counter; below the cap it stays
+    # in the pick-pool so the planner can re-attempt.
+    checklist = _example_checklist()
+    poll = PollResult(terminal=True, status="failed", pr_url=None, gate_passed=None)
+    updated = _settle_addressed_items(checklist, ["scaffold"], poll)
+    item = next(i for i in updated.items if i.id == "scaffold")
+    assert item.status == "not_started"
+    assert item.attempts == 1
+
+
+def test_settle_resets_attempts_on_success(tmp_path):
+    # A proven item carries no stale failure count — a later steer that re-opens
+    # it for rework starts fresh rather than pre-tripping the breaker.
+    cl = Checklist(items=[
+        ChecklistItem(**{**vars(_example_checklist().items[0]), "attempts": 2}),
+    ])
+    poll = PollResult(terminal=True, status="done", pr_url="https://x/pr/1", gate_passed=True)
+    updated = _settle_addressed_items(cl, ["scaffold"], poll)
+    assert updated.items[0].status == "done"
+    assert updated.items[0].attempts == 0
+
+
+def test_settle_trips_circuit_breaker_at_cap(tmp_path, monkeypatch):
+    # At the cap the item flips to `blocked` (NOT back to the pick-pool), so the
+    # planner stops re-picking a ticket that has failed N straight times.
+    monkeypatch.setattr(tick_settle, "ITEM_MAX_ATTEMPTS", 3)
+    cl = Checklist(items=[
+        ChecklistItem(**{**vars(_example_checklist().items[0]),
+                         "status": "in_flight", "attempts": 2}),
+    ])
+    poll = PollResult(terminal=True, status="done", pr_url="https://x/pr/1", gate_passed=False)
+    updated = _settle_addressed_items(cl, ["scaffold"], poll)
+    item = updated.items[0]
+    assert item.attempts == 3
+    assert item.status == "blocked"
+    assert "circuit breaker" in (item.evidence or "")
 
 
 # ---- decomposer-after-brief lifecycle (the end-to-end Pillar 1 wire) -------
@@ -706,3 +749,55 @@ async def test_settled_addressed_action_gate_failed_reverts_to_not_started(tmp_p
     # Back in the pick-pool, no evidence yet
     assert scaffold.status == "not_started"
     assert scaffold.evidence is None
+
+
+@pytest.mark.asyncio
+async def test_repeated_item_failure_trips_breaker_and_blocks_goal(tmp_path, monkeypatch):
+    # #6: once an item has failed ITEM_MAX_ATTEMPTS straight times, the settle
+    # hook trips the STRUCTURAL breaker — the item flips to `blocked`, the goal
+    # is parked (blocked_kind=needs_human), and the owner is pinged — instead of
+    # the planner re-picking the same failing ticket forever (the closeloop-bench
+    # 2026-07-18 pattern). Replaces the planner-authored "CIRCUIT BREAKER" prose
+    # that a forgetful planner sometimes never wrote.
+    monkeypatch.setattr(tick_settle, "ITEM_MAX_ATTEMPTS", 3)
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    cl0 = _example_checklist()
+    # scaffold has already failed twice; this settle is the 3rd (= cap) failure.
+    cl_inflight = Checklist(items=[
+        ChecklistItem(**{**vars(cl0.items[0]), "status": "in_flight", "attempts": 2}),
+        cl0.items[1],
+    ])
+    store.write_checklist("g", cl_inflight)
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="executing",
+        in_flight=InFlight(
+            "devclaw", "fix_bug", "t3", "task", "Create the csproj.", addresses=["scaffold"],
+        ),
+    ))
+
+    planner = FakeClaude(json.dumps({"decision": "sleep", "note": "ok"}), role="planner")
+    engine = FakeEngine(poll_result=PollResult(
+        terminal=True, status="done", pr_url="https://x/pr/1", gate_passed=False,
+        detail="failed again",
+    ))
+    notifier = RecordingNotifier()
+
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=notifier, prepare_ws=fake_prepare,
+    )
+
+    assert out is Outcome.BLOCKED
+    status = store.load_status("g")
+    assert status.phase == "blocked"
+    assert status.blocked_kind == "needs_answer"
+    assert "circuit breaker" in (status.blocked_on or "")
+    scaffold = next(i for i in store.read_checklist("g").items if i.id == "scaffold")
+    assert scaffold.status == "blocked"
+    assert scaffold.attempts == 3
+    # the breaker blocked BEFORE any fresh planning (zero-token on the block
+    # path) and the owner was pinged.
+    assert planner.calls == 0
+    assert any("circuit breaker" in m for m in notifier.sent)

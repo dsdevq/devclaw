@@ -311,6 +311,17 @@ class ChecklistItem:
     #: never "ships broken or untested." Tag CONSERVATIVELY: only clear generator-
     #: output steps. Default False = a normal, fully-reviewed item.
     scaffold: bool = False
+    #: how many times a dispatch addressing this item has come back FAILED
+    #: (gate-failed or errored) — incremented at settle by
+    #: :func:`devclaw.goal.tick_settle._settle_addressed_items`. Drives the
+    #: structural per-item circuit breaker (#6): once it reaches
+    #: ``DEVCLAW_ITEM_MAX_ATTEMPTS`` the item is flipped to ``blocked`` and the
+    #: goal is parked for a human, instead of the planner re-picking the same
+    #: failing ticket indefinitely (the closeloop-bench 2026-07-18 pattern where
+    #: a hand-written "CIRCUIT BREAKER" clause in the task prose was the only —
+    #: and unreliable — thing stopping a 4th identical attempt). Reset to 0 on a
+    #: successful settle of the item. Persisted in checklist.yaml only when > 0.
+    attempts: int = 0
 
 
 @dataclass(frozen=True)

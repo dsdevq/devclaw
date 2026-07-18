@@ -57,6 +57,23 @@ def test_parse_happy_path():
     assert cl.notes == ["The contract test items all touch the same file — serialize them."]
 
 
+def test_attempts_round_trips_and_is_omitted_when_zero():
+    # #6 circuit-breaker counter persists across dump→parse (so a mid-flight
+    # attempt count survives a restart), but stays out of the YAML at the
+    # default 0 to keep the round-trip byte-stable for the common case.
+    parsed = parse_checklist(_GOOD)
+    assert all(i.attempts == 0 for i in parsed.items)  # default when absent
+    assert "attempts:" not in dump_checklist(parsed)  # omitted at 0
+
+    bumped = Checklist(items=[
+        ChecklistItem(**{**vars(parsed.items[0]), "attempts": 2}),
+        parsed.items[1],
+    ])
+    reloaded = parse_checklist(dump_checklist(bumped))
+    assert reloaded.items[0].attempts == 2
+    assert reloaded.items[1].attempts == 0
+
+
 # ---- preamble + fence tolerance (the model's first-pass output had both) ---
 
 

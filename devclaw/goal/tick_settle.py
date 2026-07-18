@@ -11,6 +11,7 @@ tick.py (tick._tick_goal_impl chains through _resolve_polling_action).
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from typing import Tuple, Union
 
@@ -35,15 +36,28 @@ from .transitions import Event
 from ..loom import trace as _trace
 
 
+#: structural per-item circuit breaker (#6): after this many FAILED settles of
+#: the SAME checklist item, stop re-picking it — flip it to ``blocked`` and park
+#: the goal for a human, instead of the planner spinning the same failing ticket
+#: (the closeloop-bench 2026-07-18 pattern where a hand-written "CIRCUIT BREAKER"
+#: clause in the task prose was the only — and unreliable — brake on a 4th
+#: identical attempt). Mirrors the per-workspace breaker's 3-failure instinct
+#: (task_queue._check_and_trip_breaker). Env-overridable; ``<= 0`` disables it.
+ITEM_MAX_ATTEMPTS = int(os.environ.get("DEVCLAW_ITEM_MAX_ATTEMPTS", "3"))
+
+
 def _settle_addressed_items(
     checklist: "Checklist", addresses: list[str], poll: PollResult,
 ) -> "Checklist":
     """Compute the checklist with the addressed items settled. Successful
     task (poll.status == 'done' AND gate_passed in {None, True}) flips items
-    to ``done`` with grounded evidence (PR url + gate verdict); a failed
-    task flips them back to ``not_started`` so the planner can re-pick them
-    next tick (sharper instruction, different angle, or eventually block +
-    ask). The per-item gate (review_gate) verifies the diff against
+    to ``done`` with grounded evidence (PR url + gate verdict) and resets
+    ``attempts`` to 0; a failed task increments each addressed item's
+    ``attempts`` and flips it back to ``not_started`` so the planner can
+    re-pick it next tick — UNTIL it has failed :data:`ITEM_MAX_ATTEMPTS`
+    straight times, at which point the structural per-item circuit breaker
+    (#6) flips it to ``blocked`` instead (the caller then parks the goal for a
+    human). The per-item gate (review_gate) verifies the diff against
     ``evidence_target`` separately — session 4.
 
     PR7: pure — returns the updated :class:`Checklist` instead of writing it.
@@ -69,19 +83,43 @@ def _settle_addressed_items(
             # devclaw's sandbox verify_cmd, not the target repo's CI.
             ev_parts.append("sandbox gate=passed" if poll.gate_passed else "sandbox gate=FAILED")
         evidence = " · ".join(ev_parts) or "settled (no PR or gate)"
-        new_status = "done"
-    else:
-        # leave evidence None — the item is back in the pick-pool, not yet proven
-        evidence = None
-        new_status = "not_started"
+        updated = checklist
+        for item_id in addresses:
+            try:
+                # attempts reset to 0: a proven item carries no stale failure
+                # count, so a later steer that re-opens it for rework starts
+                # fresh rather than pre-tripping the breaker.
+                updated = _checklist.update_item(
+                    updated, item_id, status="done", evidence=evidence, attempts=0,
+                )
+            except KeyError:
+                continue
+        return updated
+
+    # Failure: bump each addressed item's attempt count. Below the cap it goes
+    # back to ``not_started`` (the pick-pool, evidence left as-is — not yet
+    # proven); AT the cap the circuit breaker trips it to ``blocked`` so the
+    # planner stops re-picking it and the caller parks the goal for a human.
+    by_id = {i.id: i for i in checklist.items}
     updated = checklist
     for item_id in addresses:
-        try:
-            updated = _checklist.update_item(
-                updated, item_id, status=new_status, evidence=evidence,
-            )
-        except KeyError:
+        item = by_id.get(item_id)
+        if item is None:
             continue
+        n = item.attempts + 1
+        if ITEM_MAX_ATTEMPTS > 0 and n >= ITEM_MAX_ATTEMPTS:
+            updated = _checklist.update_item(
+                updated, item_id, status="blocked", attempts=n,
+                evidence=(
+                    f"circuit breaker: {n} straight failed attempts — parked "
+                    f"for a human decision (steer with a different approach, "
+                    f"fix by hand, or re-scope the item)"
+                ),
+            )
+        else:
+            updated = _checklist.update_item(
+                updated, item_id, status="not_started", attempts=n,
+            )
     return updated
 
 
@@ -399,6 +437,42 @@ async def _resolve_polling_action(
         goal_id=goal_id, action_label=_action_label(ref),
         gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
     )
+
+    # ---- structural per-item circuit breaker (#6) --------------------------
+    # If this failed settle just tripped an addressed item to ``blocked``
+    # (ITEM_MAX_ATTEMPTS straight failures — see _settle_addressed_items), the
+    # planner must stop re-picking it: park the whole goal for a human with a
+    # named OWNER ping, rather than spinning the same ticket. This is the
+    # STRUCTURAL replacement for the planner-authored "CIRCUIT BREAKER" prose
+    # that was the only brake in the closeloop-bench 2026-07-18 run — and that
+    # a forgetful planner sometimes never wrote (the parallel closeloop
+    # deletion loop got three drift-accumulating attempts with no clause). The
+    # block rides a SEPARATE transition after the settle committed, CAS'd
+    # against the just-written status; auto-merge below is skipped anyway on a
+    # non-``done`` poll, so ordering is safe.
+    if updated_checklist is not None:
+        tripped = [
+            i.id for i in updated_checklist.items
+            if i.id in addresses and i.status == "blocked"
+        ]
+        if tripped:
+            reason = (
+                f"circuit breaker: checklist item(s) {', '.join(tripped)} failed "
+                f"{ITEM_MAX_ATTEMPTS} straight attempts — parked for your decision. "
+                f"Steer a different approach, fix by hand, or re-scope the item(s)."
+            )
+            ctx.store.transition(
+                goal_id, Event.BLOCK,
+                replace(new_status, phase="blocked", blocked_on=reason,
+                        blocked_kind="needs_answer"),
+                expect=new_status,
+            )
+            ctx.store.append_log(goal_id, reason)
+            await _notify(
+                ctx.notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] {reason}",
+                summarize=ctx.summary_caller,
+            )
+            return Outcome.BLOCKED
 
     # ---- post-commit tail: auto-merge / program-reconcile (real awaits) ----
     # Moved here (from before the status write, pre-PR7) so both now run
