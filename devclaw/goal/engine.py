@@ -183,6 +183,12 @@ class InProcessEngine:
         traces (raw runner SDK events)."""
         return self._store.maybe_prune_events()
 
+    def vacuum(self) -> bool:
+        """Weekly VACUUM that reclaims the disk the retention prunes free
+        (volume hygiene, 2026-07-18). Delegates to :meth:`StateStore.maybe_vacuum`
+        — same getattr seam as :meth:`prune_traces`."""
+        return self._store.maybe_vacuum()
+
     def goal_operator_block(self, goal_id: str, now_ms: int) -> tuple[bool, str]:
         """A single goal's OWN run-window gate — applied on top of the engine-wide
         :meth:`operator_block` so a goal dispatches only if the global controls AND

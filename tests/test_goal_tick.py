@@ -2924,12 +2924,13 @@ async def test_trend_sweep_skips_cancelled_and_done_goals(tmp_path):
 
 
 class PruningEngine(FakeEngine):
-    """FakeEngine that exposes both retention prune seams."""
+    """FakeEngine that exposes both retention prune seams + the vacuum seam."""
 
     def __init__(self):
         super().__init__()
         self.prunes = 0
         self.event_prunes = 0
+        self.vacuums = 0
 
     def prune_traces(self) -> int:
         self.prunes += 1
@@ -2938,6 +2939,10 @@ class PruningEngine(FakeEngine):
     def prune_events(self) -> int:
         self.event_prunes += 1
         return 0
+
+    def vacuum(self) -> bool:
+        self.vacuums += 1
+        return False
 
 
 @pytest.mark.asyncio
@@ -3030,3 +3035,48 @@ async def test_events_prune_failure_never_breaks_the_heartbeat(tmp_path):
     )
 
     assert out["g"] is Outcome.IDLE    # the sweep survived the events-prune crash
+
+
+@pytest.mark.asyncio
+async def test_tick_all_runs_vacuum_on_cheap_path_with_zero_tokens(tmp_path):
+    """tick_all invokes the engine's weekly VACUUM once per sweep, AFTER the
+    cheap gates, beside the prunes — and it costs zero LLM calls."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    engine = PruningEngine()
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=engine, planner_caller=planner, evaluator_caller=evaluator,
+        notifier=notifier, notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert engine.vacuums == 1
+    assert out["g"] is Outcome.IDLE
+    assert planner.calls == 0          # <-- the quota guardrail holds
+    assert evaluator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_vacuum_failure_never_breaks_the_heartbeat(tmp_path):
+    """A VACUUM crash is swallowed like the prunes — maintenance must not take
+    down the sweep; goals still tick."""
+    store = _store(tmp_path, Clock())
+    seed_goal(tmp_path, "g")
+    store.save_status("g", GoalStatus(phase="idle", last_plan_at=store.now_iso()))
+
+    class ExplodingVacuumEngine(FakeEngine):
+        def vacuum(self) -> bool:
+            raise RuntimeError("disk full")
+
+    planner, evaluator, notifier = FakeClaude(ACT), FakeClaude(), RecordingNotifier()
+
+    out = await tick_all(
+        store=store, engine=ExplodingVacuumEngine(), planner_caller=planner,
+        evaluator_caller=evaluator, notifier=notifier,
+        notify_url="http://relay", prepare_ws=fake_prepare,
+    )
+
+    assert out["g"] is Outcome.IDLE    # the sweep survived the vacuum crash
