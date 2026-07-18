@@ -34,6 +34,7 @@ _ROLE_TIER: dict[str, str | None] = {
     "goal_eval": MODEL_STANDARD,    # direction evaluator
     "grill": MODEL_STANDARD,        # scope_grill conversation turns
     "review": MODEL_STANDARD,       # pre-PR adversarial review gate
+    "reachability": MODEL_STANDARD, # browser-gate reachability escape-valve judge
     "trend": MODEL_STANDARD,        # trend-signal summarize/classify
     "judge": MODEL_LIGHT,           # failure-analysis judge
     "summary": MODEL_LIGHT,         # per-delivery plain-prose summary
