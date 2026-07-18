@@ -92,6 +92,17 @@ DEFAULT_FRONTEND_GLOBS: tuple[str, ...] = (
 #: is its story+spec, which the library build/test gate already requires. A
 #: diff whose frontend paths are ALL library surface exempts the gate; ANY
 #: app-surface path (including ``angular.json``) keeps it required.
+#:
+#: ACCEPTED RESIDUAL (recorded 2026-07-18): a library component that IS
+#: rendered by an in-repo demo/consuming app ships without a browser run at
+#: library-slice time — a cmn-select-shaped break in the component itself is
+#: NOT caught here. The contract is that integration proof belongs to the
+#: CONSUMING diff: wiring the component into a route touches app surface, so
+#: the gate fires there and the integrated component gets browser-exercised
+#: then. Chosen over routing library-only diffs through the reachability
+#: judge (owner call, Exhibit C steer): the judge costs a cognition call per
+#: library slice, and for a repo WITH a demo app it would answer "reachable"
+#: and re-create the very wedge this exemption removes.
 DEFAULT_LIBRARY_GLOBS: tuple[str, ...] = ("*/src/lib/*",)
 
 #: Playwright config filenames that mark a project as having a browser suite.
