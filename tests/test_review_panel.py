@@ -355,3 +355,187 @@ async def test_panel_votes_persist_as_review_vote_events(store, monkeypatch):
     import json as _json
     lenses = {_json.loads(e.payload_json)["lens"] for e in votes}
     assert lenses == set(_REVIEW_LENSES)
+
+
+# ============================ cognition-timeout degradation ladder ====
+#
+# A large-but-legitimate diff can exhaust the review budget → the caller raises a
+# timeout PlannerError → the gate fails CLOSED with no agent retry (#186). The
+# ladder (PR4 / systemic fix #5) adds ONE rung *before* that hard fail: on a
+# TIMEOUT, split the diff per file, review each independently, and union the
+# verdicts. When the rung can't help it re-raises → the SAME fail-closed path.
+
+_DIFF_A = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+aaa\n"
+_DIFF_B = "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -0,0 +1 @@\n+bbb\n"
+_MULTI = _DIFF_A + _DIFF_B
+
+_TIMEOUT_MSG = "claude --print timed out after 180000ms"
+
+
+def _timeout_on_full_diff(per_file):
+    """A caller that TIMES OUT on the whole-diff prompt (both files present) and
+    otherwise delegates to ``per_file(prompt)`` for a per-file sub-diff prompt.
+    Detects the full diff by the presence of BOTH file paths in the prompt."""
+    async def caller(prompt: str) -> str:
+        if "a/a.py" in prompt and "a/b.py" in prompt:
+            raise PlannerError(_TIMEOUT_MSG)
+        return await per_file(prompt)
+    return caller
+
+
+async def test_review_timeout_degrades_per_file_then_unions_verdicts():
+    """The documented symptom: the whole diff times out. The ladder re-reviews it
+    one file at a time and UNIONS the verdicts (evidence wins) — a single file's
+    blocker forces request_changes, so the degraded verdict is >= as strict as a
+    whole-diff review would have been, never laxer."""
+    async def per_file(prompt: str) -> str:
+        if "a/a.py" in prompt:
+            return _blocker_json("a.py", "off-by-one")
+        return _approve_json()
+
+    result = await review_panel(
+        goal="g", kind="implement_feature", diff=_MULTI,
+        claude_caller=_timeout_on_full_diff(per_file), n=1,
+    )
+    assert result["verdict"] == "request_changes"
+    assert any(i["location"] == "a.py" for i in result["blocking"])
+    assert "per-file" in result["summary"]
+
+
+async def test_review_timeout_degraded_all_approve_ships():
+    """When every per-file sub-review approves, the unioned verdict is approve —
+    the ladder lets a legitimate large diff earn a real pass instead of the hard
+    timeout fail it used to hit."""
+    async def per_file(prompt: str) -> str:
+        return _approve_json()
+
+    result = await review_panel(
+        goal="g", kind="implement_feature", diff=_MULTI,
+        claude_caller=_timeout_on_full_diff(per_file), n=1,
+    )
+    assert result["verdict"] == "approve"
+    assert result["blocking"] == []
+
+
+async def test_review_timeout_degrades_then_still_fails_closed_when_exhausted():
+    """Ladder EXHAUSTED: a single-file diff can't be split any further, so a
+    timeout re-raises the PlannerError → the queue's crash-marker, no-agent-retry
+    fail-closed path (#186). Degradation NEVER manufactures an approval."""
+    async def always_timeout(prompt: str) -> str:
+        raise PlannerError(_TIMEOUT_MSG)
+
+    with pytest.raises(PlannerError, match="timed out"):
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_DIFF,
+            claude_caller=always_timeout, n=1,
+        )
+
+
+async def test_review_timeout_ladder_fails_closed_when_a_sub_review_still_times_out():
+    """A per-file sub-review that STILL times out (one genuinely huge file) RAISES
+    through the ladder → the whole diff fails closed, never approved on the
+    silence of the files that did come back."""
+    async def always_timeout(prompt: str) -> str:
+        raise PlannerError(_TIMEOUT_MSG)
+
+    with pytest.raises(PlannerError, match="timed out"):
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_MULTI,
+            claude_caller=always_timeout, n=1,
+        )
+
+
+async def test_review_ladder_disabled_reraises_timeout_without_fanning_out(monkeypatch):
+    """DEVCLAW_REVIEW_DEGRADE=0 restores the pre-ladder gate exactly: a timeout
+    re-raises immediately and NO per-file fan-out happens (the caller is invoked
+    once, for the whole diff)."""
+    monkeypatch.setenv("DEVCLAW_REVIEW_DEGRADE", "0")
+    calls = {"n": 0}
+
+    async def timing_out(prompt: str) -> str:
+        calls["n"] += 1
+        raise PlannerError(_TIMEOUT_MSG)
+
+    with pytest.raises(PlannerError, match="timed out"):
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_MULTI,
+            claude_caller=timing_out, n=1,
+        )
+    assert calls["n"] == 1  # the ladder never engaged — one whole-diff call only
+
+
+async def test_review_ladder_over_file_cap_fails_closed(monkeypatch):
+    """A diff with more files than DEVCLAW_REVIEW_DEGRADE_MAX_FILES is NOT degraded
+    (the fan-out would be too large a burst); it fails closed and a human splits
+    it. Cap=1 with a 2-file diff → the original timeout re-raises."""
+    monkeypatch.setenv("DEVCLAW_REVIEW_DEGRADE_MAX_FILES", "1")
+
+    async def timing_out(prompt: str) -> str:
+        raise PlannerError(_TIMEOUT_MSG)
+
+    with pytest.raises(PlannerError, match="timed out"):
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_MULTI,
+            claude_caller=timing_out, n=1,
+        )
+
+
+async def test_unparseable_verdict_is_not_degraded_and_still_fails_closed():
+    """The trigger is TIMEOUT ONLY. An UNPARSEABLE-verdict crash re-raises
+    unchanged (re-running per file reproduces the same non-JSON), so it never
+    fans out — it stays on the fail-closed + fast path."""
+    calls = {"n": 0}
+
+    async def not_json(prompt: str) -> str:
+        calls["n"] += 1
+        return "this is prose, not a verdict"
+
+    with pytest.raises(PlannerError):
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_MULTI,
+            claude_caller=not_json, n=1,
+        )
+    assert calls["n"] == 1  # one whole-diff call — the ladder did not engage
+
+
+async def test_ladder_preserves_raw_response_for_quota_classification():
+    """Fail-closed with fidelity: if a per-file sub-review comes back as usage-
+    limit PROSE (no JSON), the PlannerError that propagates out of the ladder must
+    still carry that raw text on ``.raw`` — the queue's quota guard classifies the
+    STRING, and without the prose a session limit reads as a permanent defect
+    (the 2026-07-14 shape). The ladder must not swallow it."""
+    async def per_file(prompt: str) -> str:
+        return "You've hit your session limit · resets 5:20pm (Europe/Dublin)"
+
+    with pytest.raises(PlannerError) as ei:
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_MULTI,
+            claude_caller=_timeout_on_full_diff(per_file), n=1,
+        )
+    assert "session limit" in (getattr(ei.value, "raw", "") or "")
+
+
+async def test_queue_review_timeout_exhausted_fails_closed_without_agent_retry(
+    store, monkeypatch
+):
+    """End-to-end through the queue: an unsplittable review timeout rides the
+    SAME crash-marker, no-agent-retry path as any review crash (#186) — the task
+    fails closed with the actionable 'split / review by hand' reason and the agent
+    is NOT re-run. (The autouse fixture's _git_diff returns a single-file diff, so
+    the ladder can't split → re-raises the timeout.)"""
+    import functools
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 3)  # generous — must NOT be used
+    calls: list = []
+
+    async def timing_out(prompt: str) -> str:
+        raise PlannerError(_TIMEOUT_MSG)
+
+    reviewer = functools.partial(review_panel, claude_caller=timing_out, n=1)
+    q = TaskQueue(store, runner=_ok_gate_runner(calls), reviewer=reviewer)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    await q.drain()
+    t = store.get_task(tid)
+    assert t.status == "failed"
+    assert "review gate crashed" in (t.error or "")   # _REVIEW_CRASH_MARKER
+    assert "Not auto-retried" in (t.error or "")       # actionable fail-fast
+    assert len(calls) == 1                              # NO agent retry on an exhausted ladder

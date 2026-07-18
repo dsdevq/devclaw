@@ -452,7 +452,7 @@ def _panel_summary(outcomes: list[_PanelOutcome], verdict: str, n_blocking: int)
     return f"{head}. Lens verdicts: {per_lens}." if per_lens else head
 
 
-async def review_panel(
+async def _review_panel_core(
     *,
     goal: str,
     kind: str,
@@ -550,3 +550,206 @@ async def review_panel(
         "issues": merged_issues,
         "blocking": blocking,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cognition-TIMEOUT degradation ladder (systemic fix #5).
+#
+# The review model gets a fixed per-call budget (REVIEW_TIMEOUT_MS). On a large-
+# but-legitimate diff it can exhaust that budget, the caller raises a timeout
+# PlannerError, and the task fails CLOSED with no agent retry (#186 — re-running
+# reproduces the same over-large diff and re-times-out identically). Correct, but
+# it gives up on the WHOLE diff without trying anything cheaper first. This ladder
+# adds ONE degradation rung *before* that hard fail: when the full-diff review
+# times out, split the diff into one sub-diff PER FILE and review each
+# independently, then UNION the verdicts with the exact evidence-wins semantics
+# the panel already uses (a single sub-review's blocker forces request_changes).
+# Each per-file review is smaller, so it fits the budget where the whole diff did
+# not — a legitimate large diff can still earn a real verdict.
+#
+# Fail-closed is preserved end to end:
+#   - Trigger is TIMEOUT ONLY (the documented symptom). An unparseable-verdict
+#     crash re-raises unchanged — re-running per file reproduces the same
+#     unparseable output, so degrading it is futile; it stays fail-closed + fast.
+#   - Each per-file sub-review STILL fails closed: a sub-review that times out or
+#     can't be parsed RAISES, which propagates out of the ladder → the whole diff
+#     fails closed (never an approval), carrying its raw response so a quota-shaped
+#     sub-failure is still classified as quota by the queue and PAUSES.
+#   - When the ladder can't help (a single unsplittable file still times out, or
+#     the diff has more files than the fan-out cap), it RE-RAISES the original
+#     timeout → the same crash-marker, no-agent-retry path (#186). Degradation
+#     NEVER manufactures a passing verdict.
+#
+# Opt-out via DEVCLAW_REVIEW_DEGRADE=0 (then a timeout re-raises immediately,
+# byte-identical to the pre-ladder gate). The per-file fan-out is bounded by
+# DEVCLAW_REVIEW_DEGRADE_MAX_FILES so a pathologically wide diff can't spray
+# hundreds of model calls — over the cap it fails closed and a human splits it.
+# ---------------------------------------------------------------------------
+
+#: Default per-file fan-out cap. A diff with more reviewable files than this is
+#: NOT degraded (the fan-out would be too large a burst); it fails closed and the
+#: owner splits the commit. Env-tunable via DEVCLAW_REVIEW_DEGRADE_MAX_FILES.
+_DEGRADE_MAX_FILES_DEFAULT = 40
+
+
+def _degrade_enabled() -> bool:
+    """Whether the timeout degradation ladder runs. Default ON; an operator opts
+    out with ``DEVCLAW_REVIEW_DEGRADE=0`` (or false/no/off), which restores the
+    pre-ladder behaviour exactly (a review timeout re-raises immediately)."""
+    raw = os.environ.get("DEVCLAW_REVIEW_DEGRADE", "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+def _degrade_max_files() -> int:
+    """Per-file fan-out cap from ``DEVCLAW_REVIEW_DEGRADE_MAX_FILES``, clamped to
+    >=1. Unparseable / <1 → the default. Above the cap the ladder declines to
+    degrade and the diff fails closed."""
+    raw = os.environ.get("DEVCLAW_REVIEW_DEGRADE_MAX_FILES", "")
+    try:
+        v = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return _DEGRADE_MAX_FILES_DEFAULT
+    return max(1, v)
+
+
+def _is_review_timeout(err: Exception) -> bool:
+    """True iff ``err`` is a cognition TIMEOUT — the documented degradation
+    trigger. Matches the planner's timeout message ("claude --print timed out
+    after ...ms") and the panel's sub-quorum raise when panelist timeouts drove
+    it. An unparseable-verdict crash is deliberately NOT a trigger."""
+    return isinstance(err, PlannerError) and "timed out" in str(err).lower()
+
+
+def _split_diff_by_file(diff: str) -> list[str]:
+    """Split a unified diff into one sub-diff per ``diff --git`` block, so an
+    over-large diff that timed out as a whole can be reviewed file-by-file. Any
+    preamble before the first header is prepended to the first block so nothing is
+    dropped. A diff with no header (or blank) yields at most one element — the
+    caller then can't degrade and fails closed. Expects an already
+    reviewable-filtered diff (generated/lock/vendored blocks removed)."""
+    if not diff.strip():
+        return []
+    if "diff --git " not in diff:
+        return [diff]
+    preamble: list[str] = []
+    blocks: list[list[str]] = []
+    current: Optional[list[str]] = None
+    for line in diff.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if current is not None:
+                blocks.append(current)
+            current = [line]
+        elif current is None:
+            preamble.append(line)
+        else:
+            current.append(line)
+    if current is not None:
+        blocks.append(current)
+    texts = ["".join(b) for b in blocks]
+    pre = "".join(preamble)
+    if pre.strip() and texts:
+        texts[0] = pre + texts[0]
+    return texts
+
+
+def _aggregate_file_reviews(results: list[dict], *, n_files: int) -> dict:
+    """Union per-file sub-review verdicts into one, with the SAME evidence-wins
+    semantics the panel uses: issues are unioned + deduped by (location,
+    severity), the blocking subset is the blocker/major issues, and the verdict is
+    request_changes iff any blocking issue exists. So a single file's blocker
+    still forces request_changes.
+
+    IMPORTANT — this is NOT strictly >= as strict as a whole-diff review: reviewing
+    each file in ISOLATION loses cross-file context, so a regression that only
+    shows up across files (a symbol renamed in one file but still referenced in
+    another — the ``regression_risk`` lens's target) can pass per-file where a
+    whole-diff review would have blocked it. This is an accepted thoroughness
+    trade-off, engaged ONLY on a path that otherwise hard-fails the diff outright:
+    a degraded real verdict on most of the diff beats no verdict at all, and every
+    fail-closed guarantee (a sub-review that can't produce a verdict still raises →
+    the whole diff fails closed) is preserved."""
+    merged_issues = _dedup_issues([i for r in results for i in r.get("issues", [])])
+    blocking = [i for i in merged_issues if i["severity"] in ("blocker", "major")]
+    verdict = "request_changes" if blocking else "approve"
+    summary = (
+        f"degraded per-file review — the full diff exceeded the review budget, so "
+        f"it was reviewed as {n_files} per-file sub-diffs and their verdicts "
+        f"unioned: {verdict} ({len(blocking)} blocking issue(s))."
+    )
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "issues": merged_issues,
+        "blocking": blocking,
+    }
+
+
+async def review_panel(
+    *,
+    goal: str,
+    kind: str,
+    diff: str,
+    repo_context: Optional[str] = None,
+    claude_caller: Callable[[str], Awaitable[str]] = review_caller,
+    record_vote: Optional[Callable[[dict], None]] = None,
+    n: Optional[int] = None,
+) -> dict:
+    """The wired review entry — the diverse-lens panel (:func:`_review_panel_core`)
+    wrapped in the cognition-timeout degradation ladder.
+
+    The happy path is byte-identical to the panel: this just returns
+    ``_review_panel_core(...)``. Only when that call raises a TIMEOUT does the
+    ladder engage — it re-reviews the diff one file at a time and unions the
+    verdicts (see the ladder note above). Every fail-closed invariant is
+    preserved; the ladder can only turn a whole-diff timeout into a real per-file
+    verdict OR fall through to the same fail-closed raise, never into an approval."""
+    try:
+        return await _review_panel_core(
+            goal=goal, kind=kind, diff=diff, repo_context=repo_context,
+            claude_caller=claude_caller, record_vote=record_vote, n=n,
+        )
+    except PlannerError as err:
+        # Only a TIMEOUT triggers the ladder, and only when enabled. Anything else
+        # (an unparseable verdict, a quota-shaped crash) re-raises UNCHANGED so the
+        # queue's fail-closed / quota-classify paths see it exactly as before.
+        if not _degrade_enabled() or not _is_review_timeout(err):
+            raise
+        sub_diffs = _split_diff_by_file(filter_reviewable_diff(diff))
+        # Can't split further (0 or 1 reviewable file) → nothing cheaper to try →
+        # re-raise the ORIGINAL timeout so the diff fails closed on the same
+        # crash-marker, no-agent-retry path (#186).
+        if len(sub_diffs) <= 1:
+            raise
+        # Too many files to fan out safely → decline to degrade (a burst of that
+        # many model calls is its own hazard) and fail closed; a human splits it.
+        if len(sub_diffs) > _degrade_max_files():
+            raise
+        # Review each file's sub-diff independently through the SAME panel core.
+        # A sub-review that RAISES (still times out on one huge file, or
+        # unparseable) must propagate straight out of the ladder → the whole diff
+        # fails closed (never approved), carrying its raw response for the queue's
+        # quota classifier. On that first failure we CANCEL the still-running
+        # siblings: the ladder has already decided to fail closed, so leaving the
+        # other per-file `claude` calls running only burns OAuth quota. (Plain
+        # gather raises but ORPHANS the siblings — hence explicit tasks + cancel.)
+        tasks = [
+            asyncio.ensure_future(
+                _review_panel_core(
+                    goal=goal, kind=kind, diff=sub, repo_context=repo_context,
+                    claude_caller=claude_caller, record_vote=record_vote, n=n,
+                )
+            )
+            for sub in sub_diffs
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for t in tasks:
+                t.cancel()
+            # Let the cancellations settle (swallow their CancelledError/results)
+            # before re-raising the original sub-review failure.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        return _aggregate_file_reviews(results, n_files=len(sub_diffs))
