@@ -197,6 +197,20 @@ class InProcessEngine:
         actual ping happens at the tick call site, not here."""
         return self._store.check_db_size_alert()
 
+    def db_size_bytes(self) -> int:
+        """On-disk size of ``devclaw.db`` (incl. WAL sidecar), for grounding the
+        self-triage step's proposed retention fix. Same delegating getattr seam
+        as :meth:`check_db_size_alert` — the store owns the stat, the goal layer
+        only reads it through here."""
+        return self._store.db_size_bytes()
+
+    def list_problems(self, *, category: "str | None" = None, limit: int = 100) -> list[dict]:
+        """The deduplicated problems catalog (:meth:`StateStore.list_problems`) —
+        the dedup substrate the self-triage step reasons against. Read-only
+        SELECT, no LLM; reached through the engine so the tick layer never
+        touches the StateStore directly (single-writer / layering invariant)."""
+        return self._store.list_problems(category=category, limit=limit)
+
     def goal_operator_block(self, goal_id: str, now_ms: int) -> tuple[bool, str]:
         """A single goal's OWN run-window gate — applied on top of the engine-wide
         :meth:`operator_block` so a goal dispatches only if the global controls AND

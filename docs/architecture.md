@@ -31,7 +31,7 @@ the technical sense — the rest is orchestration.
 |---|---|---|---|
 | 1 | **MCP surface** | `devclaw/server/` | tools, auth, dashboard, transport — pure protocol |
 | 2 | **GoalService + heartbeat** | `devclaw/goal/` | the goal state machine + the ~15-min tick |
-| 3 | **Cognition callers** | `goal/{planner,evaluator,decomposer,research,world_research,summary}.py`, `goal/phases/firming.py`, `devclaw/planner.py`, `devclaw/elicitation.py` | one-shot `claude --print` prompt/parse calls |
+| 3 | **Cognition callers** | `goal/{planner,evaluator,decomposer,research,world_research,summary,triage}.py`, `goal/phases/firming.py`, `devclaw/planner.py`, `devclaw/elicitation.py` | one-shot `claude --print` prompt/parse calls |
 | 4 | **TaskQueue + engine** | `task_queue.py`, `devclaw/engine/` | dispatch, concurrency, the container launcher, the settle/gate path |
 | 5 | **Worker harness** | `openhands-runner/runner.py` (inside the sandbox) | the in-sandbox agent turn-loop, skills, hooks, `verify_cmd` |
 
@@ -159,6 +159,21 @@ This is the **capture + dedup + count** layer; the `list_problems` MCP tool
 filter) is the read surface over it. Any dreaming / auto-approval on top remains
 a deliberate follow-up. See `devclaw/state_store/problems.py` and the tool in
 `devclaw/server/tools.py`.
+
+**Self-triage — the propose-only interceptor (slice 1, 2026-07-18).** The first
+consumer of that catalog. Before an **eligible** owner ping fires (an allowlist,
+`tick_context.TRIAGE_ELIGIBLE` — slice 1 registers exactly one key, `db_size`,
+the DB-size alarm), a bounded layer-3 triage cognition step (`goal/triage.py`,
+prompt `prompts/self-triage.md`) dedupes the problem against `list_problems` and
+drafts a **proposed** resolution, so the owner receives "problem + proposed fix +
+how to approve" instead of a bare "there's a problem" — an approver, not the sole
+diagnostician. It is **propose-only** (never auto-acts) and **fails toward the
+owner**: it runs only when a real ping fires (never idle — the zero-token guard
+holds), and any triage failure delivers the original raw ping unchanged. The
+caller returns parsed output only; layer 2 (`tick_context.triaged_notify`)
+renders + delivers. `DEVCLAW_SELF_TRIAGE=0` reverts every eligible ping to the
+raw path. Auto-resolve on top is a deliberate follow-up. See `goal/triage.py`
+and `tests/test_self_triage.py`.
 
 ---
 

@@ -26,6 +26,7 @@ from . import planner as goal_planner
 from . import remote_checks as goal_remote_checks
 from . import research as goal_research
 from . import summary as goal_summary
+from . import triage as goal_triage
 from .engine import InProcessEngine
 from .evaluator import ClaudeCaller
 from .models import Goal, GoalStatus
@@ -101,6 +102,7 @@ class GoalService:
         planner_caller: Optional[ClaudeCaller] = None,
         evaluator_caller: Optional[ClaudeCaller] = None,
         summary_caller: Optional[ClaudeCaller] = None,
+        triage_caller: Optional[ClaudeCaller] = None,
         notifier: Optional[Notifier] = None,
         project_registry: "Optional[ProjectRegistry]" = None,
     ) -> None:
@@ -118,6 +120,7 @@ class GoalService:
         self._planner_caller = planner_caller  # bound lazily (avoids SDK import in tests)
         self._evaluator_caller = evaluator_caller
         self._summary_caller = summary_caller
+        self._triage_caller = triage_caller
         #: used only to resolve per-project automerge overrides (see _merger).
         #: None is fine — automerge just falls back to the global default.
         self._project_registry = project_registry
@@ -152,6 +155,17 @@ class GoalService:
         if self._summary_caller is None:
             self._summary_caller = goal_summary.default_caller()
         return self._summary_caller
+
+    def _triage(self) -> "Optional[ClaudeCaller]":
+        """Cognition caller for the propose-only self-triage interceptor. Off
+        (returns None → every eligible owner ping stays on the raw path) when
+        DEVCLAW_SELF_TRIAGE=0. Bound lazily so tests / cold-starts don't import
+        the claude bindings prematurely — same shape as _summary()."""
+        if not goal_triage.enabled():
+            return None
+        if self._triage_caller is None:
+            self._triage_caller = goal_triage.default_caller()
+        return self._triage_caller
 
     def _merger(self, goal: "Optional[Goal]" = None) -> "Optional[goal_merge.Merger]":
         """The auto-merger for hands-off delivery (decision 2) — resolved for
@@ -380,6 +394,7 @@ class GoalService:
             tracer_factory=self._make_tracer,
             trend_detector=self._trend_detector(),
             remote_checker=self._remote_checker(),
+            triage_caller=self._triage(),
         )
         return {gid: o.value for gid, o in outcomes.items()}
 

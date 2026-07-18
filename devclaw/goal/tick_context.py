@@ -137,6 +137,56 @@ async def _notify(
     await notifier.send(text)
 
 
+#: The self-triage allowlist (slice 1). Only owner pings whose ``kind`` is in
+#: this set route through the propose-only triage interceptor; every other ping
+#: stays on the raw path, byte-identical. Trigger granularity is deliberately an
+#: ALLOWLIST, not "every owner ping" — the blast radius stays tiny and each new
+#: trigger is an explicit, reviewed addition. Slice 1 registers exactly one key;
+#: a future ``needs_answer`` wire adds "needs_answer" here and calls
+#: :func:`triaged_notify` from the block path.
+TRIAGE_ELIGIBLE = {"db_size"}
+
+
+async def triaged_notify(
+    notifier: Notifier, level: NotifyLevel, raw_text: str,
+    *, kind: str, triage_caller: "ClaudeCaller | None",
+    catalog: str = "", repo_context: str = "",
+    summarize: "ClaudeCaller | None" = None,
+) -> None:
+    """The propose-only interception choke point (self-triage slice 1).
+
+    Before an OWNER ping goes out, if its ``kind`` is on the :data:`TRIAGE_ELIGIBLE`
+    allowlist AND a ``triage_caller`` is wired, route it through the bounded
+    triage cognition step: dedupe against the ``problems`` catalog + draft a
+    proposed fix, then deliver "problem + proposed fix + how to approve" instead
+    of the bare alert. Otherwise (no caller, or an ineligible kind) this is
+    byte-identical to a plain :func:`_notify`.
+
+    Fails toward the owner: triage never raises, and if it returns no proposal
+    (LLM error, invalid JSON, empty fix) the ORIGINAL raw ping is delivered
+    unchanged — loud, not silent. Zero-token idle guard intact: this only runs
+    when the caller already decided a real ping should fire (never on idle).
+
+    ``summarize`` is applied ONLY to the raw fallback path — an enriched proposal
+    is already plain owner-facing prose and must not be re-summarized (that would
+    risk dropping the proposed fix / approve line)."""
+    if triage_caller is None or kind not in TRIAGE_ELIGIBLE:
+        await _notify(notifier, level, raw_text, summarize=summarize)
+        return
+    try:
+        from . import triage as _triage  # lazy — avoids any import cycle
+        proposal = await _triage.triage(
+            raw_text, catalog=catalog, repo_context=repo_context, caller=triage_caller,
+        )
+    except Exception:  # noqa: BLE001 — interception must never break the heartbeat
+        proposal = None
+    if proposal is None:
+        await _notify(notifier, level, raw_text, summarize=summarize)
+        return
+    from . import triage as _triage  # (cached import) render the enriched message
+    await _notify(notifier, level, _triage.render(proposal, raw_text))
+
+
 class Phase(str, Enum):
     """The reified state of a goal at the start of a tick — derived from
     ``status`` by :func:`_classify`. Drives the handler dispatch in
