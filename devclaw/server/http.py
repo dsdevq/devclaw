@@ -410,6 +410,50 @@ async def goal_steer(request: Request) -> Response:
     return JSONResponse(result)
 
 
+@mcp.custom_route("/goals/{goal_id}/resume", methods=["POST"])
+async def goal_resume(request: Request) -> Response:
+    """Console-facing Resume button — the recovery verb. Wraps
+    goal_service.resume_goal: re-attempts the SAME contract on a blocked goal
+    whose blocker was cleared out-of-band (no steering recorded, objective
+    untouched). Idempotent — a no-op on a goal that isn't blocked. A goal blocked
+    in FIRMING is refused by the service (answers must come through /answer)."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        result = goals.resume_goal(goal_id)
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": "cannot_resume", "detail": str(exc)}, status_code=400)
+    return JSONResponse(result)
+
+
+@mcp.custom_route("/goals/{goal_id}/answer", methods=["POST"])
+async def goal_answer(request: Request) -> Response:
+    """Console-facing Answer button for a goal blocked in firming. Body is JSON
+    `{"answers": {"<unknown_id>": "<answer>", ...}}` covering EVERY current
+    unknown. Wraps goal_service.answer_unknowns (fires the next firming round).
+    A partial/extra answer map, or a goal with no draft, returns 400 with the
+    reason rather than a silent no-op."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    answers = (body or {}).get("answers")
+    if not isinstance(answers, dict) or not answers:
+        return JSONResponse(
+            {"error": "answers_required", "hint": "POST {\"answers\": {id: str}}"},
+            status_code=400,
+        )
+    try:
+        result = await goals.answer_unknowns(goal_id, answers)
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": "bad_answers", "detail": str(exc)}, status_code=400)
+    return JSONResponse(result)
+
+
 @mcp.custom_route("/control.json", methods=["GET"])
 async def control_json(request: Request) -> Response:
     """Dispatch-control state for the console: the manual operator hold, the daily
@@ -667,6 +711,20 @@ async def goal_json(request: Request) -> Response:
         _task_row(t)
         for t in store.list_tasks(parent_goal_id=goal_id, limit=50)
     ]
+    # Firming unknowns — only meaningful (and only read) when the goal is blocked
+    # awaiting owner answers. Best-effort: a torn/absent draft degrades to [] so
+    # the console shows a plain Resume rather than 500-ing the detail view.
+    unknowns: list[dict] = []
+    if phase == "blocked":
+        try:
+            draft = goals._goal_store.read_firmed_draft(goal_id)
+            if draft is not None:
+                unknowns = [
+                    {"id": u.id, "question": u.question, "why": getattr(u, "why", "")}
+                    for u in draft.unknowns
+                ]
+        except Exception:
+            unknowns = []
     return JSONResponse(
         {
             "id": g["id"],
@@ -680,6 +738,8 @@ async def goal_json(request: Request) -> Response:
             "inFlight": g.get("in_flight"),
             "timeline": timeline,
             "blockedOn": g.get("blocked_on"),
+            "blockedKind": g.get("blocked_kind", ""),
+            "unknowns": unknowns,
             "tasks": dispatched_tasks,
         }
     )
