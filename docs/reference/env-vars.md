@@ -45,6 +45,7 @@ default; copy it to `.env` and uncomment what you want to change.
 | `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | Wall-clock cap for the `verify_cmd` step (the gate that runs after the agent finishes). |
 | `DEVCLAW_TRACE_RETENTION_DAYS` | `30` | Days of `traces`-table telemetry to keep. The goal heartbeat prunes older rows once a day on its cheap path (batched DELETEs, pure SQLite, zero LLM). `0`, a negative value, or an unparseable value disables pruning gracefully. |
 | `DEVCLAW_EVENTS_RETENTION_DAYS` | `30` | Days of `events`-table history to keep (raw runner SDK events, one row per agent action — the highest-volume append-only log after traces). Pruned by the same daily, batched, pure-SQLite, zero-LLM heartbeat pass as the trace prune, on an independent watermark. `0`, a negative value, or an unparseable value disables pruning gracefully. |
+| `DEVCLAW_DB_SIZE_ALERT_MB` | `2000` | Size (MB) at which the heartbeat pings the owner ONCE that `devclaw.db` (incl. the WAL sidecar) has grown too large despite retention+VACUUM — the loud-not-silent guard against a silent disk-fill wedge. Re-arms when size drops back under. `0`, a negative value, or an unparseable value disables the alarm gracefully. |
 
 ## Engine selection
 

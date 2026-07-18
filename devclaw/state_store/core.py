@@ -112,6 +112,38 @@ def events_retention_days() -> int:
     )
 
 
+# ---- DB-size alarm (loud, not silent, 2026-07-18) ---------------------------
+# Retention + VACUUM keep a healthy devclaw.db small, but if something writes
+# faster than it prunes (or a prune is misconfigured off), the file grows until
+# the VPS disk fills and the whole loop wedges — SILENTLY, because nothing
+# watches size. This converts that silent wedge into ONE loud owner ping when
+# the .db crosses a threshold (and re-arms when it drops back under). Pure stat,
+# zero LLM, on the heartbeat cheap path beside the prunes/VACUUM.
+#: Default alert threshold in MB when ``DEVCLAW_DB_SIZE_ALERT_MB`` is unset. The
+#: 2026-07 incident that motivated retention was 402MB; 2GB is a clear "this is
+#: wrong" line well above any healthy steady state.
+DB_SIZE_ALERT_MB_DEFAULT = 2000
+#: meta flag: "1" once the owner has been pinged about the current over-threshold
+#: episode — cleared when size drops back under, so each crossing pings once.
+_DB_SIZE_ALERTED_META_KEY = "db_size_alerted"
+
+
+def db_size_alert_bytes() -> int:
+    """Alert threshold in BYTES from ``DEVCLAW_DB_SIZE_ALERT_MB``. Unset/blank →
+    the 2000MB default; ``0``, negative, or unparseable → ``0`` (alarm disabled,
+    gracefully — a typo must never crash the heartbeat). The env read is a
+    literal so the doc-sync test (test_env_vars_doc_sync.py) sees it."""
+    raw = os.environ.get("DEVCLAW_DB_SIZE_ALERT_MB")
+    if raw is None or not raw.strip():
+        mb = DB_SIZE_ALERT_MB_DEFAULT
+    else:
+        try:
+            mb = int(raw.strip())
+        except ValueError:
+            return 0
+    return mb * 1024 * 1024 if mb > 0 else 0
+
+
 class StateStore(ControlPlaneMixin, ProblemsMixin):
     def __init__(self, db_path: str) -> None:
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
@@ -995,6 +1027,54 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
             # full week. Symmetric with the transaction-defer path above.
             self.set_meta(_VACUUM_META_KEY, str(now))
             return True
+
+    def db_size_bytes(self) -> int:
+        """On-disk size of the SQLite database, INCLUDING the WAL sidecar (an
+        un-checkpointed WAL can itself be large). Best-effort: a missing file
+        (e.g. an in-memory DB) counts as 0, never raises."""
+        total = 0
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                total += os.path.getsize(self._db_path + suffix)
+            except OSError:
+                pass
+        return total
+
+    def check_db_size_alert(
+        self, *, threshold_bytes: Optional[int] = None, now_ms: Optional[int] = None
+    ) -> Optional[str]:
+        """One-shot DB-size alarm — the loud-not-silent guard against the .db
+        quietly growing until the disk fills and the loop wedges.
+
+        Returns a plain owner-facing message the FIRST tick the file crosses
+        ``threshold_bytes`` (deduped via the ``db_size_alerted`` meta flag), and
+        ``None`` on every tick after that until the size drops back under, which
+        RE-ARMS the alarm (clears the flag) so a later re-crossing pings again.
+        Disabled (``threshold_bytes`` resolves to 0) → always ``None``.
+
+        Pure stat + a meta read/write — zero LLM, safe on the zero-token idle
+        path. The ``now_ms`` arg is accepted for signature symmetry with the
+        prunes/VACUUM and to keep the message deterministic in tests."""
+        threshold = db_size_alert_bytes() if threshold_bytes is None else threshold_bytes
+        if threshold <= 0:
+            return None
+        size = self.db_size_bytes()
+        alerted = self.get_meta(_DB_SIZE_ALERTED_META_KEY) == "1"
+        if size < threshold:
+            if alerted:
+                self.delete_meta(_DB_SIZE_ALERTED_META_KEY)  # re-arm for next crossing
+            return None
+        if alerted:
+            return None  # already pinged for this episode
+        self.set_meta(_DB_SIZE_ALERTED_META_KEY, "1")
+        gb = size / (1024 * 1024 * 1024)
+        thr_gb = threshold / (1024 * 1024 * 1024)
+        return (
+            f"⚠️ devclaw.db has grown to {gb:.2f} GB (alarm threshold "
+            f"{thr_gb:.2f} GB). Retention/VACUUM may be falling behind, a "
+            f"retention env var may be disabled, or something is writing faster "
+            f"than it prunes. Check the VPS disk and DEVCLAW_*_RETENTION_DAYS."
+        )
 
     def list_events(
         self,
