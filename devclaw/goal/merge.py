@@ -24,6 +24,7 @@ because nothing ever read it — the only real switch was the global env var).
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
@@ -38,6 +39,12 @@ AUTOMERGE_ENABLED = False
 #: the devclaw-wide default merge strategy — a project may override it.
 _VALID_STRATEGIES = ("squash", "merge", "rebase")
 DEFAULT_MERGE_STRATEGY = "squash"
+#: The commit-status context devclaw posts when its own gates pass. A repo can
+#: require it in branch protection so GitHub-native auto-merge (``--auto``) has a
+#: required check to gate on — devclaw becomes the authoritative CI, no GitHub
+#: Actions needed. devclaw only reaches merge AFTER verify+integrity+review+browser
+#: gates passed, so a ``success`` here is truthful.
+GATE_STATUS_CONTEXT = "devclaw/gate"
 
 
 def resolve_automerge(
@@ -68,30 +75,85 @@ def resolve_merge_strategy(
     return strategy if strategy in _VALID_STRATEGIES else DEFAULT_MERGE_STRATEGY
 
 
-async def merge_pr(pr_url: str, strategy: str = DEFAULT_MERGE_STRATEGY) -> bool:
-    """Merge a PR via gh with the given strategy (default from
-    ``DEVCLAW_GOAL_MERGE_STRATEGY``). Best-effort: returns False on any failure
-    (the caller leaves the PR open for manual review). Deletes the merged
-    branch."""
-    if not pr_url:
-        return False
-    flag = "--" + (strategy if strategy in _VALID_STRATEGIES else DEFAULT_MERGE_STRATEGY)
+async def _run_gh(*argv: str) -> tuple[int, str]:
+    """Run a subprocess, returning ``(returncode, combined stdout+stderr)``.
+    Best-effort: a spawn failure returns ``(-1, "<Exc>: msg")`` and never raises
+    into the tick. Shared by the SHA fetch, the status post, and the merge call."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "gh", "pr", "merge", pr_url, flag, "--delete-branch",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
         out, _ = await proc.communicate()
     except Exception as exc:  # noqa: BLE001 — best-effort; never break the tick
-        sys.stderr.write(f"merge.merge_pr: {pr_url} crashed: {exc.__class__.__name__}: {exc}\n")
+        return -1, f"{exc.__class__.__name__}: {exc}"
+    return proc.returncode, out.decode(errors="replace").strip()
+
+
+def _owner_repo(pr_url: str) -> Optional[str]:
+    """``owner/repo`` from a GitHub PR url, else None."""
+    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)/pull/\d+", pr_url)
+    return m.group(1) if m else None
+
+
+async def _post_gate_status(pr_url: str) -> None:
+    """Post ``GATE_STATUS_CONTEXT=success`` on the PR's head commit so a
+    branch-protected repo's GitHub-native auto-merge has its required check
+    satisfied. Best-effort + never raises: harmless where the check isn't
+    required (just an extra green check), and a failure only means ``--auto``
+    falls back to a direct merge below. Truthful — devclaw reaches here only
+    after its own gates passed."""
+    repo = _owner_repo(pr_url)
+    if not repo:
+        return
+    rc, sha = await _run_gh("gh", "pr", "view", pr_url, "--json", "headRefOid",
+                            "-q", ".headRefOid")
+    if rc != 0 or not sha:
+        return
+    await _run_gh(
+        "gh", "api", "--method", "POST", f"repos/{repo}/statuses/{sha}",
+        "-f", "state=success", "-f", f"context={GATE_STATUS_CONTEXT}",
+        "-f", "description=devclaw gates passed (verify+integrity+review+browser)",
+    )
+
+
+async def merge_pr(pr_url: str, strategy: str = DEFAULT_MERGE_STRATEGY) -> bool:
+    """Merge a PR via gh with the given strategy (default from
+    ``DEVCLAW_GOAL_MERGE_STRATEGY``). Best-effort: returns False on any failure
+    (the caller leaves the PR open for manual review). Deletes the merged branch.
+
+    Prefers **GitHub-native auto-merge** (``gh pr merge --auto``): GitHub resolves
+    mergeability and waits on the required check SERVER-SIDE, then merges. This
+    kills the client-side mergeability race — a fresh PR reports ``mergeable:
+    UNKNOWN`` for seconds after creation, and an immediate blind ``gh pr merge``
+    fails on that, so the goal wrongly blocked "please merge" and stalled for
+    hours (finance-sentry, 2026-07-17). With ``--auto`` a True return means the
+    merge is *enabled/queued* (GitHub completes it) — the caller's tip re-check
+    before the next task tolerates the eventual-merge delay.
+
+    Falls back to a direct merge for repos where GitHub auto-merge isn't enabled
+    (``--auto`` errors "clean status"/"not allowed") — byte-identical to the
+    pre-change behavior there, so nothing regresses without the repo config."""
+    if not pr_url:
         return False
-    if proc.returncode != 0:
-        # Surface WHY to the logs — the caller only sees the bool and pings the
-        # owner, but the operator debugging "automerge isn't firing" needs the gh
-        # reason (pending checks, not mergeable, auth). The reason is otherwise
-        # swallowed. Observable, still best-effort (never raises into the tick).
-        reason = (out.decode(errors="replace").strip() or "no output")[:300]
-        sys.stderr.write(f"merge.merge_pr: {pr_url} not merged (rc={proc.returncode}): {reason}\n")
+    flag = "--" + (strategy if strategy in _VALID_STRATEGIES else DEFAULT_MERGE_STRATEGY)
+    # Post devclaw's own gate as the required check first, so --auto has something
+    # green to merge on where branch protection requires it.
+    await _post_gate_status(pr_url)
+    rc, out = await _run_gh("gh", "pr", "merge", pr_url, "--auto", flag, "--delete-branch")
+    if rc == 0:
+        return True
+    # --auto declined (repo has no auto-merge enabled) → direct merge, as before.
+    sys.stderr.write(
+        f"merge.merge_pr: {pr_url} --auto declined (rc={rc}: {out[:200] or 'no output'}) "
+        f"— falling back to a direct {flag} merge\n"
+    )
+    rc2, out2 = await _run_gh("gh", "pr", "merge", pr_url, flag, "--delete-branch")
+    if rc2 != 0:
+        # Surface WHY — the caller only sees the bool and pings the owner, but the
+        # operator debugging "automerge isn't firing" needs the gh reason.
+        sys.stderr.write(
+            f"merge.merge_pr: {pr_url} not merged (rc={rc2}): {out2[:300] or 'no output'}\n"
+        )
         return False
     return True
 
