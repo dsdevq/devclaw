@@ -32,6 +32,7 @@ _ROLE_TIER: dict[str, str | None] = {
     "world_research": MODEL_DEEP,   # investigation discovery brief
     "goal_planner": MODEL_STANDARD, # next-action pick (bounded JSON, light)
     "goal_eval": MODEL_STANDARD,    # direction evaluator
+    "triage": MODEL_STANDARD,       # self-triage propose step (dedupe + one-line fix)
     "grill": MODEL_STANDARD,        # scope_grill conversation turns
     "review": MODEL_STANDARD,       # pre-PR adversarial review gate
     "reachability": MODEL_STANDARD, # browser-gate reachability escape-valve judge

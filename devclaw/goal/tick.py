@@ -29,6 +29,7 @@ from . import evaluator as _evaluator
 from . import merge as _merge
 from . import planner as _planner
 from . import remote_checks as _remote_checks
+from . import triage as _triage
 # _deploy stays at tick.py level even though only tick_donegate._auto_deploy calls
 # it: tests monkeypatch ``devclaw.goal.tick._deploy.deploy_project`` and both
 # modules bind the SAME ..delivery.deploy module object, so patching it here is
@@ -72,6 +73,7 @@ from .tick_context import (  # noqa: F401 (re-exported)
     _run_atomic,
     _TICK_LOCKS,
     _tick_lock,
+    triaged_notify,
 )
 from .tick_guards import (  # noqa: F401 (re-exported)
     CORRUPT_DOC_HEAL_CAP,
@@ -613,6 +615,7 @@ async def tick_all(
     tracer_factory: "Callable[[str], _trace.Tracer | None] | None" = None,
     trend_detector: "object | None" = None,
     remote_checker: "_remote_checks.RemoteChecker | None" = None,
+    triage_caller: "ClaudeCaller | None" = None,
 ) -> dict[str, Outcome]:
     """Tick every goal. One goal's failure never stops the others, and a usage
     limit pauses the whole layer (0 tokens) rather than crashing per-goal.
@@ -696,7 +699,7 @@ async def tick_all(
     # despite retention+VACUUM, ping the owner ONCE (re-armed when it drops back
     # under) — a silent disk-fill wedge is the failure mode this whole tranche
     # exists to prevent. Zero LLM (raw owner ping, no summarizer).
-    await _maybe_alert_db_size(engine, notifier)
+    await _maybe_alert_db_size(engine, notifier, triage_caller=triage_caller)
 
     for goal_id in store.list_goal_ids():
         # Per-goal run-window: a goal can carry its OWN night/off-hours schedule
@@ -812,12 +815,26 @@ def _engine_vacuum(engine: GoalEngine) -> None:
         pass
 
 
-async def _maybe_alert_db_size(engine: GoalEngine, notifier: Notifier) -> None:
+async def _maybe_alert_db_size(
+    engine: GoalEngine, notifier: Notifier, *, triage_caller: "ClaudeCaller | None" = None,
+) -> None:
     """Check the DB-size alarm via the engine and, if it just crossed the
     threshold, ping the owner ONCE. Best-effort on both legs: a stat failure or
-    a notifier outage must never break the heartbeat. The ping is a RAW owner
-    send (no summarizer) so it stays zero-token on the cheap path — the message
-    is already plain and terse."""
+    a notifier outage must never break the heartbeat.
+
+    Zero-token idle guard: ``check_db_size_alert`` returns a message ONLY on the
+    tick the .db crosses the threshold (deduped by the ``db_size_alerted`` meta
+    flag). On every idle / under-threshold tick it returns ``None`` and this
+    function returns before any cognition — so the guarantee holds regardless of
+    whether triage is wired.
+
+    When ``triage_caller`` is set (production, via GoalService), the alert routes
+    through the propose-only self-triage interceptor (:func:`triaged_notify`,
+    ``kind="db_size"``): it dedupes against the ``problems`` catalog and proposes
+    a grounded retention fix, delivering "problem + proposed fix + how to
+    approve" instead of the bare alert. ``triage_caller=None`` (the default, and
+    every existing test) keeps the RAW owner send, byte-identical to before. A
+    triage failure falls back to the raw alert — loud, not silent."""
     fn = getattr(engine, "check_db_size_alert", None)
     if not callable(fn):
         return
@@ -825,8 +842,30 @@ async def _maybe_alert_db_size(engine: GoalEngine, notifier: Notifier) -> None:
         msg = fn()
     except Exception:  # noqa: BLE001 — maintenance must not break the heartbeat
         return
-    if msg:
+    if not msg:
+        return
+    if triage_caller is None:
         await _notify(notifier, NotifyLevel.OWNER, msg)
+        return
+    # A real problem fired — enrich it. Catalog + size read through the engine
+    # seam (never the StateStore directly); both best-effort so a hiccup degrades
+    # to the raw ping rather than swallowing the alarm.
+    catalog = ""
+    size_bytes = 0
+    try:
+        lp = getattr(engine, "list_problems", None)
+        if callable(lp):
+            catalog = _triage.format_catalog(lp())
+        sb = getattr(engine, "db_size_bytes", None)
+        if callable(sb):
+            size_bytes = sb()
+    except Exception:  # noqa: BLE001 — grounding is best-effort
+        catalog, size_bytes = "", 0
+    await triaged_notify(
+        notifier, NotifyLevel.OWNER, msg,
+        kind="db_size", triage_caller=triage_caller,
+        catalog=catalog, repo_context=_triage.retention_context(size_bytes),
+    )
 
 
 def _engine_clear_pause(engine: GoalEngine) -> None:

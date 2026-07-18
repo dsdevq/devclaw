@@ -38,6 +38,9 @@ class FakeEngine:
     def __init__(
         self, poll_result: PollResult | None = None, dispatch_ref: InFlight | None = None,
         poll_exc: Exception | None = None,
+        db_size_alert_msg: str | None = None,
+        problems: list[dict] | None = None,
+        db_size_bytes_val: int = 0,
     ) -> None:
         self.poll_result = poll_result
         self.dispatch_ref = dispatch_ref
@@ -46,6 +49,21 @@ class FakeEngine:
         self.poll_exc = poll_exc
         self.dispatched: list[tuple[Action, Goal, str]] = []
         self.polls = 0
+        #: self-triage / DB-size-alarm seams. Default None/empty/0 so a plain
+        #: FakeEngine reports NO alert — the alarm getattr seam returns None and
+        #: _maybe_alert_db_size is a no-op, exactly as before this seam existed.
+        self.db_size_alert_msg = db_size_alert_msg
+        self.problems = problems or []
+        self.db_size_bytes_val = db_size_bytes_val
+
+    def check_db_size_alert(self) -> str | None:
+        return self.db_size_alert_msg
+
+    def list_problems(self, *, category: str | None = None, limit: int = 100) -> list[dict]:
+        return self.problems
+
+    def db_size_bytes(self) -> int:
+        return self.db_size_bytes_val
 
     async def dispatch(self, action: Action, goal: Goal, notify_url: str) -> InFlight:
         self.dispatched.append((action, goal, notify_url))

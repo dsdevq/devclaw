@@ -129,6 +129,7 @@ three precedence layers with divergent defaults was a debugging trap.
 | `DEVCLAW_GOAL_NOTIFY_URL` | — | Notify-relay endpoint for goal-level Telegram messages (free-text `/text` passthrough). |
 | `DEVCLAW_GOAL_PLAIN_SUMMARY` | `1` | One-line plain-prose summary per delivery for `deliveries.md` (quota lever — one `claude` call per delivery). |
 | `DEVCLAW_NOTIFY_ALTITUDE` | `owner` | Floor for goal-layer notifications: `owner` (only real blockers / direction questions / completions) or `task` (also includes per-task chatter). |
+| `DEVCLAW_SELF_TRIAGE` | `1` | Propose-only self-triage interceptor: before an **eligible** owner ping fires (slice 1 allowlist = the DB-size alarm), a bounded triage cognition step dedupes it against the `problems` catalog and drafts a proposed fix, delivering "problem + proposed fix + how to approve" instead of a bare alert. Runs ONLY when a real ping fires (never idle — zero-token guard intact); any triage failure falls back to the raw ping (loud, not silent). `0`/`false` reverts every eligible ping to the raw path. |
 
 ## Deploy hosting
 
