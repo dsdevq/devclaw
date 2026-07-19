@@ -149,7 +149,7 @@ DevClaw is all Python. The only language boundary left is the process boundary: 
 | `review_repository(workspace_dir, …)` | Deprecated alias — forwards to `dispatch_task(kind="review_repository")` (read-only) |
 | `onboard(workspace_dir, …)` | Analyze a repo and write a draft `AGENTS.md` (comprehension only) |
 | `create_repo(name, …)` | Stand up a fresh GitHub repo for a from-scratch goal |
-| `start_program(workspace_dir, goal, …)` | Decompose a large goal into a task DAG and run it |
+| `start_program(workspace_dir, goal, …)` | DEPRECATED sugar for `create_goal(mode='one_shot')` — files a one-shot goal that plans the brief end-to-end and runs the checklist as one parallel program |
 | `get_program(program_id)` / `list_programs()` | Program status + task DAG |
 | `get_status(task_id)` / `list_tasks(...)` / `get_events(...)` | Task history + replayable event feed (live SSE over HTTP) |
 | `get_scorecard_metrics(window_hours?)` | Rolling scorecard over the last N hours (default 1 week): merge rate, evaluator-verdict distribution, steer rate, first-pass hit rate, workspace breaks — a cheap SQLite read, callable from Telegram/dashboards |
@@ -160,12 +160,17 @@ Async by default: a tool call returns a `task_id` immediately and the work runs 
 
 ### Durable goals (the goal layer)
 
-A `program` runs once to completion; a **goal** is a standing intent DevClaw advances across many heartbeats — and judges for *direction*, not just shipped PRs.
+**One primitive, one dial** (ADR 0003): a goal and a program are the same thing — a goal — differing only in *re-evaluation cadence*, selected by `create_goal(mode=…)`:
+
+- **`long_lived`** (default): the per-tick loop — each heartbeat plans the single next action, judges *direction* (not just shipped PRs), and stays steerable mid-flight.
+- **`one_shot`**: plan once (same intake spine: grill → firm → decompose), then run the whole checklist as **one parallel program** with per-item verification and PR-per-slice delivery — zero per-tick planner cognition. When the checklist drains, done is proposed mechanically and still gated on the grounded done-gate review.
+
+Both modes share every gate, the delivery contract, and the close discipline. `start_program` survives as a deprecated alias for `create_goal(mode='one_shot')`; raw queue programs still exist underneath as the execution substrate a goal dispatches into.
 
 | Tool | Does |
 |---|---|
 | `scope_grill(idea, transcript?)` | One turn of the pre-goal scope interview with the waiter: given a rough idea + the transcript so far, returns the next question (with a reasoned default) or the final agreed spec — the input `create_goal` deserves |
-| `create_goal(goal_id, objective, workspace_dir, done_when, backlog, …)` | Register a durable goal DevClaw drives over time |
+| `create_goal(goal_id, objective, workspace_dir, done_when, backlog, mode, …)` | Register a goal DevClaw drives — `mode='long_lived'` (default, per-tick loop) or `'one_shot'` (plan once, run the checklist as one parallel program) |
 | `verify_goal(objective, workspace_dir, …)` | Pre-flight check — same admission validations as `create_goal`, no side effects; previews reject/warn conditions |
 | `get_goal(goal_id)` | Objective, phase, what's in flight, the latest direction verdict, recent log |
 | `list_goals()` | All goals + phase + direction |

@@ -10,7 +10,10 @@ A **software-development agentic loop**: you hand it a durable goal with verifia
 completion criteria, and a self-executing loop carries it — plan → sandboxed
 execution → verify gate → evaluate → iterate — with hard brakes (retry caps,
 no-progress watchdog, `stalled`/`needs_human` verdicts) so it never optimizes into
-the void. It sits **behind MCP** and is driven by an **OpenClaw waiter agent** that
+the void. **One primitive, one dial** (ADR 0003): goal and program are the same
+thing; `create_goal(mode=long_lived|one_shot)` selects the re-evaluation cadence —
+per-tick planning vs plan-once-run-the-checklist-as-one-parallel-program — over an
+identical execution stack (`start_program` is a deprecated alias for the latter). It sits **behind MCP** and is driven by an **OpenClaw waiter agent** that
 translates chat into tool calls; devclaw never talks to the user. Cognition is
 always `claude` over Pro/Max **OAuth — no API key, no metered billing**.
 
