@@ -25,6 +25,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -609,6 +610,27 @@ def _emit_event(payload: dict) -> None:
     _PROTO_OUT.flush()
 
 
+# The stock worker agent: Anthropic's ACP bridge for Claude Code. Kept as a
+# tuple so the default can't be mutated by a caller.
+_DEFAULT_ACP_COMMAND = ("claude-agent-acp",)
+
+
+def _resolve_acp_command(req: dict) -> list[str]:
+    """The ACP agent command the worker session runs on.
+
+    Payload first (the host passes it exactly like `model` — host env vars do
+    NOT cross the container boundary, so an env-only override would silently
+    do nothing in the sandbox), then DEVCLAW_ACP_COMMAND for a manual
+    `docker run` / host-engine run, then the claude-agent-acp default. A
+    string spec is shlex-split so quoted arguments survive
+    (`my-acp --profile 'a b'` → 3 argv entries).
+    """
+    raw = (req.get("acp_command") or os.environ.get("DEVCLAW_ACP_COMMAND") or "").strip()
+    if not raw:
+        return list(_DEFAULT_ACP_COMMAND)
+    return shlex.split(raw)
+
+
 def _refuse_api_key() -> None:
     """Refuse to run if an API key snuck into the env — preserves the
     Pro-subscription cost model (memory: pro-subscription-is-the-design)."""
@@ -646,6 +668,23 @@ def main() -> None:
     # Model tier for the agent. The host passes it in the payload; fall back to
     # DEVCLAW_EXEC_MODEL for a manual `docker run`. None → the ACP server default.
     acp_model = req.get("model") or os.environ.get("DEVCLAW_EXEC_MODEL") or None
+    # The ACP agent binary itself — payload → env → claude-agent-acp default.
+    try:
+        acp_command = _resolve_acp_command(req)
+    except ValueError as exc:
+        # shlex refuses e.g. an unbalanced quote. Fail loud with the knob's
+        # name instead of a bare traceback — an operator typo would otherwise
+        # fail every dispatch with no hint where the bad spec lives.
+        _emit_result(
+            {
+                "status": "error",
+                "error": (
+                    "invalid ACP command spec (payload acp_command / "
+                    f"DEVCLAW_ACP_COMMAND): {exc}"
+                ),
+            }
+        )
+        sys.exit(2)
     verify_cmd = req.get("verify_cmd")  # optional gate run after the agent finishes
     if not workspace_dir or not goal:
         _emit_result(
@@ -790,15 +829,19 @@ def main() -> None:
 
     try:
         with contextlib.redirect_stdout(captured_stdout):
+            # acp_command is configurable (DEVCLAW_ACP_COMMAND / payload); the
+            # acp_env below is still claude-shaped (CLAUDE_* vars are harmless
+            # extras to a non-claude agent, but a real swap likely needs its own
+            # env threaded too — see docs/reference/env-vars.md).
             agent = ACPAgent(
-                acp_command=["claude-agent-acp"],
+                acp_command=acp_command,
                 acp_env={
                     "CLAUDE_CODE_EXECUTABLE": claude_exec,
                     "CLAUDE_CONFIG_DIR": claude_cfg,
                     "PATH": os.environ.get("PATH", ""),
                     "HOME": os.environ.get("HOME", ""),
                 },
-                # Tier the agent's model; None → claude-agent-acp's default.
+                # Tier the agent's model; None → the ACP server's default.
                 acp_model=acp_model,
             )
             conversation = Conversation(

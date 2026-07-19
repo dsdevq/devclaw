@@ -47,6 +47,16 @@ DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
 # `acp_model` (Claude ACP selects it via session _meta). Must be a full model id,
 # not an alias. Empty → the ACP server's default.
 EXEC_MODEL = os.environ.get("DEVCLAW_EXEC_MODEL", "claude-sonnet-4-6") or None
+# The ACP agent command the in-sandbox worker session runs on. Unset → the
+# runner's claude-agent-acp default (the only ACP binary the stock image bakes).
+# Set DEVCLAW_ACP_COMMAND to swap the worker for any CLI speaking ACP — the
+# value rides the runner JSON payload (host env vars do NOT cross the container
+# boundary) and the runner shlex-splits it. Scope caveat: the surrounding
+# plumbing is still claude-shaped (acp_env, the ~/.claude auth mounts,
+# DEVCLAW_EXEC_MODEL's claude model ids, the auth/rate-limit classifiers), and
+# the alternate binary must be baked into the sandbox image — this var is the
+# seam, not the whole swap.
+ACP_COMMAND = os.environ.get("DEVCLAW_ACP_COMMAND", "") or None
 # Per-sandbox resource caps. The task queue bounds the NUMBER of concurrent
 # builds (DEVCLAW_MAX_CONCURRENT), but without a per-container memory ceiling N
 # parallel builds can still OOM a small VPS. --memory-swap == --memory disables
@@ -325,6 +335,23 @@ def _build_docker_args(
     ]
 
 
+def _build_payload(req: EngineRequest) -> dict:
+    """The runner JSON payload for one task. Pure (no I/O) so the host→sandbox
+    contract — the ONLY channel that crosses the container boundary; host env
+    vars deliberately do not — is unit-testable without docker."""
+    return {
+        "kind": req.kind,
+        "workspace_dir": CONTAINER_WORKSPACE,
+        "goal": req.goal,
+        "model": EXEC_MODEL,  # the in-sandbox agent's tier; None → ACP default
+        # the ACP agent command itself; None → runner's claude-agent-acp default
+        "acp_command": ACP_COMMAND,
+        # verify gate runs INSIDE the container after the agent finishes —
+        # same toolchain + workspace the agent built in (None → no gate).
+        "verify_cmd": req.verify_cmd,
+    }
+
+
 async def run_sandcastle(req: EngineRequest) -> EngineResult:
     """Run one task inside a fresh sandbox container. An :class:`~devclaw.engine.Engine`
     — resolves with an EngineResult dict so TaskQueue can drive it."""
@@ -345,17 +372,7 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
     # Per-task container name for greppable logs + manual cleanup if --rm fails.
     container_name = f"devclaw-{uuid.uuid4().hex[:8]}"
 
-    payload = json.dumps(
-        {
-            "kind": req.kind,
-            "workspace_dir": CONTAINER_WORKSPACE,
-            "goal": req.goal,
-            "model": EXEC_MODEL,  # the in-sandbox agent's tier; None → ACP default
-            # verify gate runs INSIDE the container after the agent finishes —
-            # same toolchain + workspace the agent built in (None → no gate).
-            "verify_cmd": req.verify_cmd,
-        }
-    )
+    payload = json.dumps(_build_payload(req))
 
     docker_args = _build_docker_args(
         container_name=container_name,
