@@ -358,3 +358,72 @@ async def test_one_shot_never_dispatches_dependents_of_a_breaker_blocked_item(tm
     # only the unaffected item rides; the blocked chain (mid, leaf) is held
     assert action.addresses == ["free"]
     assert [p.key for p in action.planned] == ["free"]
+
+
+# ---- the shakedown finding (2026-07-19): one_shot IMPLIES decompose ---------
+
+_BRIEF = "## Current state\nEmpty repo.\n\n## Gap to good\nEverything.\n\n## What good looks like\n- mathx"
+
+_YAML = """checklist:
+  - id: pkg
+    requirement: Create the mathx package
+    evidence_target: mathx/__init__.py exists and imports add and mul
+"""
+
+
+@pytest.mark.asyncio
+async def test_one_shot_decomposes_even_with_flag_off_and_empty_done_when(tmp_path):
+    """Live-found 2026-07-19 (first real-pipeline run of the alias): a
+    one-shot goal filed spec-only (empty done_when, firming off) with the
+    default env (DEVCLAW_GOAL_DECOMPOSE=0) skipped decompose silently and
+    ALWAYS hit the loud no-checklist block. One-shot IS its checklist — the
+    mode must override both the migration flag and the done_when gate."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g", mode="one_shot", done_when="")
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="investigating",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "discovery", is_discovery=True),
+    ))
+    research = FakeClaude(_BRIEF, role="research")
+    decomposer = FakeClaude(_YAML, role="decomposer")
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="analysis"))
+
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=FakeClaude(role="planner"), evaluator_caller=research,
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+        decompose_enabled=False,          # the production default that bit live
+        decomposer_caller=decomposer,
+    )
+
+    assert out is Outcome.ADVANCED
+    assert decomposer.calls == 1
+    cl = store.read_checklist("g")
+    assert cl is not None and [i.id for i in cl.items] == ["pkg"]
+
+
+@pytest.mark.asyncio
+async def test_long_lived_decompose_gates_unchanged_by_the_one_shot_override(tmp_path):
+    """The override is scoped to one_shot: a long-lived goal with the flag off
+    still skips decompose (the migration default is untouched)."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")  # long_lived
+    store.save_status("g", GoalStatus(
+        phase="in_flight", lifecycle="investigating",
+        in_flight=InFlight("devclaw", "review_repository", "rev1", "task", "discovery", is_discovery=True),
+    ))
+    decomposer = FakeClaude(_YAML, role="decomposer")
+    engine = FakeEngine(poll_result=PollResult(terminal=True, status="done", detail="analysis"))
+
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=FakeClaude(role="planner"),
+        evaluator_caller=FakeClaude(_BRIEF, role="research"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+        decompose_enabled=False,
+        decomposer_caller=decomposer,
+    )
+
+    assert out is Outcome.ADVANCED
+    assert decomposer.calls == 0
+    assert store.read_checklist("g") is None

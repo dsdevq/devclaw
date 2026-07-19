@@ -472,7 +472,19 @@ async def _resolve_discovery(
     from .phases.firming import FIRMING_ENABLED as _FIRMING_ENABLED_FOR_DECOMPOSE
 
     decompose_ok = False
-    if decompose_enabled and goal.done_when and not _FIRMING_ENABLED_FOR_DECOMPOSE:
+    # A ONE-SHOT goal IS its checklist (ADR 0003 stage 2): without one it can
+    # only hit the loud no-checklist block — so one_shot overrides BOTH the
+    # DEVCLAW_GOAL_DECOMPOSE migration flag AND the done_when presence gate
+    # (the start_program alias files spec-only goals whose done_when is empty
+    # until firming derives it; the decomposer prompt renders "(not
+    # specified)" and plans from objective + brief + digest). Live-found
+    # 2026-07-19 shakedown: with default env the alias ALWAYS blocked here.
+    must_decompose = goal.mode == "one_shot"
+    if (
+        (decompose_enabled or must_decompose)
+        and (goal.done_when or must_decompose)
+        and not _FIRMING_ENABLED_FOR_DECOMPOSE
+    ):
         # Mechanical repo identity rides along with the digest — the digest is
         # the agent's prose, the snapshot is git's own facts (remote/branch/
         # key-file probes). Best-effort, never raises (see _collect_repo_context).
@@ -497,7 +509,12 @@ async def _resolve_discovery(
         except Exception as exc:  # noqa: BLE001 — decomposition must not wedge the goal
             store.append_log(
                 goal_id,
-                f"decomposition failed ({exc}) — falling back to backlog mode",
+                f"decomposition failed ({exc}) — "
+                + (
+                    "one-shot goal will block loudly next tick (no backlog fallback in this mode)"
+                    if must_decompose
+                    else "falling back to backlog mode"
+                ),
             )
 
     # Firming sits between investigating and executing when enabled — its
