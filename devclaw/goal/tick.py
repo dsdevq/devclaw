@@ -476,6 +476,28 @@ async def _handle_one_shot_executing(
         return Outcome.IDLE
     checklist = store.read_checklist(goal_id)
     if checklist is None or not checklist.items:
+        if not (store.read_discovery(goal_id) or "").strip():
+            # No checklist AND no discovery brief: investigation never
+            # produced its output — a prep failure blocked the discovery
+            # dispatch and the mechanical heal resumed PAST it (the prep
+            # block pins lifecycle=executing for blocked-routing; live-found
+            # 2026-07-19 shakedown). Go back and investigate — decompose
+            # rides that path (one_shot implies it). Bounded: a still-broken
+            # workspace re-enters the prep-block/heal budget, and a completed
+            # investigation whose DECOMPOSE fails leaves a brief behind, so
+            # the next pass falls through to the loud block below (no loop).
+            store.append_log(
+                goal_id,
+                "one-shot: no checklist and no discovery brief — re-entering "
+                "investigation to rebuild the plan",
+            )
+            store.transition(
+                goal_id, Event.REOPEN_INVESTIGATION,
+                replace(status, lifecycle="investigating", phase="idle",
+                        next="re-run investigation (one-shot plan missing)"),
+                expect=status,
+            )
+            return Outcome.ADVANCED
         # A one-shot goal with no plan can never progress — the per-tick loop's
         # backlog fallback doesn't exist here. Fail loud, not idle-forever.
         reason = (

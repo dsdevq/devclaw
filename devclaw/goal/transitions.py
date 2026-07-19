@@ -57,6 +57,12 @@ class Event(str, Enum):
     OPEN_DONE_GATE = "open_done_gate"
     DONE_GATE_SETTLED = "done_gate_settled"
     RESUME_IDLE = "resume_idle"
+    #: one-shot recovery (2026-07-19 shakedown): the goal reached executing
+    #: with NO checklist and NO discovery brief — investigation was skipped
+    #: (a prep failure blocked the discovery dispatch and the mechanical heal
+    #: resumed PAST it; the prep block pins lifecycle=executing for
+    #: blocked-routing). Re-enter investigating so the plan gets built.
+    REOPEN_INVESTIGATION = "reopen_investigation"
     ACHIEVE = "achieve"
     BLOCK = "block"
     UNBLOCK = "unblock"
@@ -135,6 +141,7 @@ LEGAL: dict[tuple[State, Event], frozenset[State]] = {
     (State.EXECUTING_IDLE, Event.DISPATCH_ACTION): frozenset({State.ACTION_IN_FLIGHT}),
     (State.EXECUTING_IDLE, Event.OPEN_DONE_GATE): frozenset({State.VERIFYING}),
     (State.EXECUTING_IDLE, Event.RESUME_IDLE): frozenset({State.EXECUTING_IDLE}),
+    (State.EXECUTING_IDLE, Event.REOPEN_INVESTIGATION): frozenset({State.INVESTIGATING_IDLE}),
     (State.EXECUTING_IDLE, Event.ACHIEVE): frozenset({State.DONE}),
     (State.EXECUTING_IDLE, Event.BLOCK): frozenset({State.BLOCKED}),
     (State.EXECUTING_IDLE, Event.CANCEL): frozenset({State.CANCELLED}),

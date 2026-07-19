@@ -204,10 +204,12 @@ async def test_one_shot_done_gate_not_achieved_blocks_for_owner_instead_of_loopi
 
 @pytest.mark.asyncio
 async def test_one_shot_without_checklist_blocks_loudly(tmp_path):
-    """A one-shot goal with no plan can never progress (there is no backlog
-    fallback in this mode) — fail loud, not idle-forever."""
+    """Investigation COMPLETED (a discovery brief exists) but no checklist —
+    decompose genuinely failed on good inputs. There is no backlog fallback
+    in this mode — fail loud, not idle-forever."""
     store = _store(tmp_path)
     seed_goal(tmp_path, "g", mode="one_shot")   # no checklist written
+    store.write_discovery("g", "## Current state\nlooked at it")
     store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
     planner = FakeClaude(role="planner")
     notifier = RecordingNotifier()
@@ -427,3 +429,25 @@ async def test_long_lived_decompose_gates_unchanged_by_the_one_shot_override(tmp
     assert out is Outcome.ADVANCED
     assert decomposer.calls == 0
     assert store.read_checklist("g") is None
+
+
+@pytest.mark.asyncio
+async def test_one_shot_with_no_plan_and_no_brief_reenters_investigation(tmp_path):
+    """Live-found 2026-07-19 shakedown: a prep failure during the discovery
+    dispatch blocks the goal with lifecycle pinned to executing; the
+    mechanical heal then resumes it PAST investigation — no brief, no
+    checklist, and the old behavior dead-ended in the cancel-and-re-file
+    block. The recovery: no checklist AND no discovery brief means
+    investigation never ran to completion — re-enter it (decompose rides
+    that path, since one_shot implies decompose)."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g", mode="one_shot")   # no checklist, no discovery
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+    planner = FakeClaude(role="planner")
+
+    out = await _tick(store, "g", planner, FakeClaude(role="evaluator"), FakeEngine(), RecordingNotifier())
+
+    assert out is Outcome.ADVANCED
+    assert planner.calls == 0
+    s2 = store.load_status("g")
+    assert s2.lifecycle == "investigating" and s2.phase == "idle"
