@@ -76,6 +76,12 @@ def _str_list(raw: object) -> list[str]:
     return out
 
 
+#: newest failure notes kept per item — enough to rule out repeated
+#: approaches without growing the brief unboundedly (ITEM_MAX_ATTEMPTS is 3,
+#: so 5 covers the breaker window even after a manual unblock + re-run).
+FAILURE_LOG_KEEP = 5
+
+
 def _parse_item(raw: object) -> ChecklistItem | None:
     """Validate one item. Returns ``None`` (caller filters) if a required
     field is missing or malformed — better to drop a bad item than reject the
@@ -125,6 +131,8 @@ def _parse_item(raw: object) -> ChecklistItem | None:
     elif isinstance(attempts_raw, str) and attempts_raw.strip().isdigit():
         attempts = int(attempts_raw.strip())
 
+    failure_log = _str_list(raw.get("failure_log"))[-FAILURE_LOG_KEEP:]
+
     return ChecklistItem(
         id=id_,
         requirement=requirement,
@@ -139,6 +147,7 @@ def _parse_item(raw: object) -> ChecklistItem | None:
         milestone=milestone,
         scaffold=_parse_bool(raw.get("scaffold")),
         attempts=attempts,
+        failure_log=failure_log,
     )
 
 
@@ -215,6 +224,7 @@ def validate_checklist(parsed: object) -> Checklist:
                 milestone=item.milestone,
                 scaffold=item.scaffold,
                 attempts=item.attempts,
+                failure_log=list(item.failure_log),
             )
         )
 
@@ -263,6 +273,8 @@ def dump_checklist(checklist: Checklist) -> str:
             d["scaffold"] = True
         if item.attempts:
             d["attempts"] = item.attempts
+        if item.failure_log:
+            d["failure_log"] = list(item.failure_log)
         return d
 
     payload: dict[str, object] = {
@@ -294,11 +306,17 @@ def update_item(
     status: ItemStatus | None = None,
     evidence: str | None = None,
     attempts: int | None = None,
+    failure_note: str | None = None,
+    clear_failure_log: bool = False,
 ) -> Checklist:
     """Return a new Checklist with the named item updated. Pure — does not
     mutate the input. Used by the runner's settle hook (status=done +
-    evidence), the scheduler (status=in_flight at dispatch), and the settle
-    hook's per-item circuit breaker (``attempts`` bump on a failed settle)."""
+    evidence + ``clear_failure_log``), the scheduler (status=in_flight at
+    dispatch), and the settle hook's per-item circuit breaker (``attempts``
+    bump + ``failure_note`` append on a failed settle). ``failure_note``
+    APPENDS to the item's bounded ``failure_log`` (newest
+    :data:`FAILURE_LOG_KEEP` kept); ``clear_failure_log`` empties it — a
+    proven item carries no stale failure history."""
     updated: list[ChecklistItem] = []
     found = False
     for item in checklist.items:
@@ -306,6 +324,12 @@ def update_item(
             updated.append(item)
             continue
         found = True
+        if clear_failure_log:
+            new_log: list[str] = []
+        elif failure_note is not None and failure_note.strip():
+            new_log = (list(item.failure_log) + [failure_note.strip()])[-FAILURE_LOG_KEEP:]
+        else:
+            new_log = list(item.failure_log)
         updated.append(
             ChecklistItem(
                 id=item.id,
@@ -321,6 +345,7 @@ def update_item(
                 milestone=item.milestone,
                 scaffold=item.scaffold,
                 attempts=attempts if attempts is not None else item.attempts,
+                failure_log=new_log,
             )
         )
     if not found:

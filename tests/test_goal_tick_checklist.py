@@ -801,3 +801,130 @@ async def test_repeated_item_failure_trips_breaker_and_blocks_goal(tmp_path, mon
     # path) and the owner was pinged.
     assert planner.calls == 0
     assert any("circuit breaker" in m for m in notifier.sent)
+
+
+# ---- cross-dispatch prior-attempts digest ----------------------------------
+#
+# The cross-dispatch half of the continuity gap: the planner sees the failure
+# history in its context, but the WORKER's brief was authored fresh each
+# dispatch, so a re-dispatched item re-discovered failed approaches one
+# attempt at a time. Failed settles now append a compact note to the item's
+# bounded failure_log; the dispatch seam renders those notes into the
+# DISPATCHED goal text only (status `next` + the log line stay clean).
+
+
+def test_failed_settle_appends_failure_note_to_item(tmp_path):
+    checklist = _example_checklist()
+    poll = PollResult(
+        terminal=True, status="done", detail="Verify gate `pytest`: FAILED tail-of-boom",
+        pr_url=None, gate_passed=False,
+    )
+    updated = _settle_addressed_items(checklist, ["scaffold"], poll)
+    item = next(i for i in updated.items if i.id == "scaffold")
+    assert item.attempts == 1
+    assert len(item.failure_log) == 1
+    assert "attempt 1:" in item.failure_log[0]
+    assert "sandbox gate=FAILED" in item.failure_log[0]
+    assert "tail-of-boom" in item.failure_log[0]
+
+    # a second failure APPENDS (history, not overwrite)
+    poll2 = PollResult(terminal=True, status="failed", detail="Error: other-boom",
+                       pr_url=None, gate_passed=None)
+    updated2 = _settle_addressed_items(updated, ["scaffold"], poll2)
+    item2 = next(i for i in updated2.items if i.id == "scaffold")
+    assert len(item2.failure_log) == 2
+    assert "attempt 2:" in item2.failure_log[1] and "other-boom" in item2.failure_log[1]
+
+
+def test_successful_settle_clears_failure_log_with_attempts(tmp_path):
+    # a proven item carries no stale failure history — same rationale as the
+    # attempts reset (a later steer that re-opens it starts fresh)
+    cl0 = Checklist(items=[
+        ChecklistItem(**{**vars(_example_checklist().items[0]),
+                         "attempts": 2, "failure_log": ["attempt 1: x", "attempt 2: y"]}),
+        _example_checklist().items[1],
+    ])
+    poll = PollResult(terminal=True, status="done", detail="", pr_url="https://x/pr/9",
+                      gate_passed=True)
+    updated = _settle_addressed_items(cl0, ["scaffold"], poll)
+    item = next(i for i in updated.items if i.id == "scaffold")
+    assert item.status == "done"
+    assert item.failure_log == []
+    assert item.attempts == 0
+
+
+def test_failure_log_round_trips_through_yaml_and_is_bounded(tmp_path):
+    from devclaw.goal.checklist import FAILURE_LOG_KEEP, dump_checklist, parse_checklist
+
+    notes = [f"attempt {i}: boom-{i}" for i in range(1, FAILURE_LOG_KEEP + 3)]
+    cl = Checklist(items=[
+        ChecklistItem(**{**vars(_example_checklist().items[0]), "failure_log": notes}),
+        _example_checklist().items[1],
+    ])
+    reloaded = parse_checklist(dump_checklist(cl))
+    item = next(i for i in reloaded.items if i.id == "scaffold")
+    # bounded on parse: only the NEWEST FAILURE_LOG_KEEP survive
+    assert item.failure_log == notes[-FAILURE_LOG_KEEP:]
+    # and an item with no failures serializes without the key at all
+    assert "failure_log" not in dump_checklist(
+        Checklist(items=[_example_checklist().items[1]])
+    )
+
+
+@pytest.mark.asyncio
+async def test_redispatch_brief_carries_prior_attempt_digest(tmp_path):
+    """The engine's dispatched goal carries the failure history; the recorded
+    action (status.next) stays clean — presence AND absence."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    cl = Checklist(items=[
+        ChecklistItem(**{**vars(_example_checklist().items[0]),
+                         "attempts": 1,
+                         "failure_log": ["attempt 1: settled failed · gate boom-approach"]}),
+        _example_checklist().items[1],
+    ])
+    store.write_checklist("g", cl)
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    planner = FakeClaude(_ACT_WITH_ADDRESSES, role="planner")  # addresses ["scaffold"]
+    engine = FakeEngine()
+
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+    )
+
+    assert out is Outcome.DISPATCHED
+    dispatched_action, _goal, _nu = engine.dispatched[0]
+    assert "PRIOR ATTEMPTS ON THIS WORK ITEM" in dispatched_action.goal
+    assert "boom-approach" in dispatched_action.goal
+    assert "[scaffold]" in dispatched_action.goal
+    # the recorded next stays the planner's clean goal text
+    status = store.load_status("g")
+    assert "PRIOR ATTEMPTS" not in (status.next or "")
+    assert "boom-approach" not in (status.next or "")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_without_failures_is_byte_identical(tmp_path):
+    """Blank-safe: no addressed item has failures → the dispatched goal is
+    EXACTLY the planner's text, no digest section."""
+    store = _store(tmp_path)
+    seed_goal(tmp_path, "g")
+    store.write_checklist("g", _example_checklist())
+    store.save_status("g", GoalStatus(phase="idle", lifecycle="executing"))
+
+    planner = FakeClaude(_ACT_WITH_ADDRESSES, role="planner")
+    engine = FakeEngine()
+
+    out = await tick_goal(
+        "g", store=store, engine=engine,
+        planner_caller=planner, evaluator_caller=FakeClaude(role="evaluator"),
+        notifier=RecordingNotifier(), prepare_ws=fake_prepare,
+    )
+
+    assert out is Outcome.DISPATCHED
+    dispatched_action, _goal, _nu = engine.dispatched[0]
+    assert dispatched_action.goal == "Create the csproj at backend/src/Foo.csproj"
+    assert "PRIOR ATTEMPTS" not in dispatched_action.goal

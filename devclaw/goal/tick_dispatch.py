@@ -74,6 +74,35 @@ def _flag_items_in_flight(store: GoalStore, goal_id: str, item_ids: list[str]) -
     store.write_checklist(goal_id, updated, render_view=False)
 
 
+def _prior_attempts_digest(checklist, addresses: list[str]) -> str:
+    """Blank-safe brief section from the addressed items' failure_log — the
+    cross-dispatch half of the continuity gap: the planner sees the failure
+    history in its context, but the WORKER's brief was authored fresh each
+    dispatch, so a re-dispatched item re-discovered failed approaches one
+    attempt at a time. Empty string when no addressed item has failures
+    (byte-identical dispatch — the common case). Rides INSIDE the dispatched
+    goal text (the same channel the acceptance criteria use), not the
+    recorded action: status `next` and the log line stay clean."""
+    if checklist is None or not addresses:
+        return ""
+    by_id = {i.id: i for i in checklist.items}
+    lines: list[str] = []
+    for item_id in addresses:
+        item = by_id.get(item_id)
+        if item is None or not item.failure_log:
+            continue
+        for note in item.failure_log:
+            lines.append(f"- [{item_id}] {note}")
+    if not lines:
+        return ""
+    header = (
+        "PRIOR ATTEMPTS ON THIS WORK ITEM (all failed - do not repeat "
+        "these approaches; diagnose why they failed and take a different "
+        "route):"
+    )
+    return "\n\n" + header + "\n" + "\n".join(lines)
+
+
 async def _dispatch_action(
     goal_id: str, goal: Goal, base: GoalStatus, action: Action,
     *, store: GoalStore, engine: GoalEngine, notifier: Notifier,
@@ -154,7 +183,11 @@ async def _dispatch_action(
     try:
         with store.transaction():
             try:
-                ref = _run_atomic(engine.dispatch(action, goal, notify_url))
+                digest = _prior_attempts_digest(checklist, list(action.addresses))
+                dispatch_action = (
+                    replace(action, goal=action.goal + digest) if digest else action
+                )
+                ref = _run_atomic(engine.dispatch(dispatch_action, goal, notify_url))
             except Exception as exc:  # noqa: BLE001 — caught again below, outside the txn
                 dispatch_exc = exc
                 raise
