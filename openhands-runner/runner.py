@@ -525,6 +525,61 @@ def _failure_result(error_text: str, **extra) -> dict:
     return payload
 
 
+# The engineer's return-contract (_RETURN_CONTRACT) tells it to end its final
+# message with a STATUS field whose value is either ``DONE`` or
+# ``BLOCKED: <one-line reason>`` when it genuinely cannot finish (a missing
+# capability, contradictory/impossible instructions). We honor that self-report
+# as a first-class terminal status instead of letting it ride invisibly inside
+# agent_output. Anchored to the START of a line (after an optional ``STATUS:``
+# prefix and light markdown decoration like ``**``/``>``) and case-sensitive on
+# the uppercase keyword the contract prescribes — so prose like "the run was
+# blocked: on X but I fixed it" mid-sentence can't false-positive. Model-agnostic:
+# it parses the agent's OWN plain-text hand-back, no vendor tool-wiring.
+_BLOCKED_LINE_RE = re.compile(
+    r"^[ \t>#*_-]*(?:STATUS:[ \t]*)?BLOCKED:[ \t]*(.*?)[ \t*_]*$",
+    re.MULTILINE,
+)
+
+
+def _parse_blocked_reason(agent_message: str | None) -> str | None:
+    """If the agent's final hand-back self-reports ``BLOCKED``, return the reason.
+
+    Returns None when there is no blocked self-report (the normal path). The LAST
+    matching line wins — the hand-back is rendered last, so a later BLOCKED line
+    is the authoritative terminal signal. A reason that parses to empty still
+    returns a non-None placeholder: an honest "I'm blocked" with no stated reason
+    must still surface as a block, never be lost as "no reason ⇒ not blocked".
+    """
+    if not agent_message:
+        return None
+    matches = _BLOCKED_LINE_RE.findall(agent_message)
+    if not matches:
+        return None
+    reason = matches[-1].strip().strip("*_ ").strip()
+    return reason or "worker reported BLOCKED without a stated reason"
+
+
+def _agent_message_text(payload: dict) -> str:
+    """Pull the plain text out of a MessageEvent payload (``model_dump`` shape).
+
+    The OpenHands ``MessageEvent`` carries ``llm_message.content`` — a list of
+    typed content parts; we concatenate the ``text`` parts. Defensive by design
+    (best-effort, never raises): a schema drift degrades to ``""`` rather than
+    crashing the event callback."""
+    if not isinstance(payload, dict):
+        return ""
+    msg = payload.get("llm_message")
+    if not isinstance(msg, dict):
+        return ""
+    parts: list[str] = []
+    for item in msg.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+    return "".join(parts)
+
+
 # `sys.__stdout__` is the original stdout the process was started with —
 # `contextlib.redirect_stdout` swaps `sys.stdout` but leaves `__stdout__`
 # alone. We write our prefixed protocol lines (`event:` / `result:`)
@@ -689,6 +744,12 @@ def main() -> None:
     captured_stdout = io.StringIO()
     os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
+    # Last text the AGENT itself emitted (a mutable holder so the callback can
+    # write it). We parse this — not the decorative captured_stdout, which also
+    # echoes the prompt's literal "BLOCKED: <reason>" contract text — for the
+    # engineer's honest-exit self-report after the run completes.
+    last_agent_message: list[str] = [""]
+
     def on_event(event: Event) -> None:
         """Forward each SDK Event to the TS caller as a prefixed JSON line.
 
@@ -701,6 +762,18 @@ def main() -> None:
         except Exception:
             # Some events may have unencodable fields in edge cases.
             payload = {"repr": repr(event)}
+        # Track the agent's own final message so we can honor a BLOCKED self-
+        # report after the run. Best-effort — a bad event must not crash the loop.
+        try:
+            if (
+                event.__class__.__name__ == "MessageEvent"
+                and str(getattr(event, "source", "")) == "agent"
+            ):
+                text = _agent_message_text(payload)
+                if text:
+                    last_agent_message[0] = text
+        except Exception:
+            pass
         try:
             _emit_event(
                 {
@@ -749,6 +822,27 @@ def main() -> None:
             err_payload["hook_warnings"] = hook_warnings
         _emit_result(err_payload)
         sys.exit(1)
+
+    # Honest-exit: the engineer's return-contract lets it self-report
+    # `BLOCKED: <reason>` when it genuinely cannot finish (a missing capability,
+    # contradictory or impossible instructions). Promote that self-report to a
+    # first-class terminal status so the host can surface it as a legible block
+    # instead of retry-burning a doomed generic failure — a block is NOT an
+    # approval, so we short-circuit BEFORE the verify gate and NEVER settle
+    # "ok" (fail-closed). Parsed from the agent's OWN final message, not the
+    # captured decorative stdout (which echoes the prompt's contract text).
+    blocked_reason = _parse_blocked_reason(last_agent_message[0])
+    if blocked_reason is not None:
+        blocked_payload: dict = {
+            "status": "blocked",
+            "reason": blocked_reason,
+            "workspace_dir": workspace_dir,
+            "agent_output": captured_stdout.getvalue(),
+        }
+        if hook_warnings:
+            blocked_payload["hook_warnings"] = hook_warnings
+        _emit_result(blocked_payload)
+        return
 
     # Post-run hook: mechanical checks against what the agent shipped (e.g.
     # "you added browser tests but verify_cmd is still pytest-only"). Runs

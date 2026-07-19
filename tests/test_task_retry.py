@@ -144,6 +144,30 @@ async def test_retry_reset_skipped_when_base_capture_missed(store, monkeypatch):
     assert resets == []  # but no reset attempted with an empty base
 
 
+async def test_worker_blocked_status_is_not_retried_and_surfaces_reason(store, monkeypatch):
+    # A worker honest-block (result status="blocked") fails CLOSED and FAST: the
+    # task is failed (never "done" — invariant #186), not retried (a re-run
+    # reproduces the same block), and the reason rides the failure so the goal
+    # layer can surface it to the owner.
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 3)  # retries available, must not be used
+    calls: list = []
+
+    async def blocked_runner(req: EngineRequest):
+        calls.append(req.goal)
+        return {"status": "blocked",
+                "reason": "the task needs a paid API key not present in the repo"}
+
+    q = TaskQueue(store, runner=blocked_runner)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="do X", verify_cmd="pytest")
+    await q.drain()
+    t = store.get_task(tid)
+    assert t.status == "failed"  # never "done" — a block is not an approval
+    assert len(calls) == 1  # not auto-retried despite retries being available
+    assert "worker reported BLOCKED:" in t.error
+    assert "the task needs a paid API key not present in the repo" in t.error
+    assert "Needs a human" in t.error
+
+
 async def test_timeout_is_not_retried(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     monkeypatch.setattr(task_queue, "TASK_TIMEOUT_S", 0.2)

@@ -52,8 +52,14 @@ class EngineRequest:
 
 #: Terminal verdict from one task. ``status == "ok"`` carries
 #: ``workspaceDir``/``message`` (+ ``agent_output`` for debugging);
-#: ``status == "error"`` carries ``error`` (+ optional ``trace``). When a
-#: ``verify_cmd`` ran, ``result["verify"]`` carries the gate verdict
+#: ``status == "error"`` carries ``error`` (+ optional ``trace``);
+#: ``status == "rate_limited"`` carries ``error`` + ``retry_after`` (the host
+#: pauses-and-resumes); ``status == "blocked"`` carries ``reason`` — the worker's
+#: honest self-report that it genuinely cannot finish (missing capability,
+#: contradictory/impossible instructions). A ``blocked`` verdict is NOT an
+#: approval: the host fails it CLOSED and does NOT retry (a re-run re-blocks
+#: identically), surfacing the reason instead. When a ``verify_cmd`` ran,
+#: ``result["verify"]`` carries the gate verdict
 #: ``{ran, cmd, passed, exit_code, timed_out, output}`` — the orchestration
 #: (not the engine) decides done-vs-failed from ``passed``.
 EngineResult = dict
