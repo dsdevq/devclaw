@@ -49,6 +49,35 @@ async def test_retry_then_success_feeds_failure_back(store, monkeypatch):
     assert "[Automatic retry 1/1]" in calls[1] and "boom-detail" in calls[1] and "do X" in calls[1]
 
 
+async def test_retry_prompt_accumulates_all_prior_failures(store, monkeypatch):
+    # The retry prompt used to carry ONLY the most-recent failure (overwritten
+    # string), so attempt 3 never learned what attempt 1 tried and could repeat
+    # a mistake already fed back once. Now every prior failure rides along,
+    # numbered, so the agent can rule out whole approaches.
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 2)
+    calls: list = []
+
+    async def runner(req: EngineRequest):
+        calls.append(req.goal)
+        # distinguishable failure per attempt
+        gate = _gate(passed=False, output=f"boom-{len(calls)}")
+        return {"status": "ok", "workspaceDir": req.workspace_dir, "verify": gate}
+
+    q = TaskQueue(store, runner=runner)
+    q.submit(kind="implement_feature", workspace_dir="/ws", goal="do X", verify_cmd="pytest")
+    await q.drain()
+    assert len(calls) == 3
+    # attempt 2 knows failure 1 — and cannot know a failure that hasn't happened
+    assert "Attempt 1:" in calls[1] and "boom-1" in calls[1]
+    assert "boom-2" not in calls[1]
+    # attempt 3 carries BOTH prior failures, numbered, in order
+    assert "Attempt 1:" in calls[2] and "boom-1" in calls[2]
+    assert "Attempt 2:" in calls[2] and "boom-2" in calls[2]
+    assert calls[2].index("boom-1") < calls[2].index("boom-2")
+    # and the original goal still rides along
+    assert "do X" in calls[2]
+
+
 async def test_retries_exhausted_then_failed(store, monkeypatch):
     monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
     calls: list = []
