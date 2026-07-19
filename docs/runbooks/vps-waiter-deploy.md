@@ -76,7 +76,7 @@ Available via `devclaw__*` MCP tools:
 - **Projects** (durable orders): register, get, list, update, delete.
 - **Goals** (standing orders): create, get, list, steer, resume, cancel; `tail_goal` for deep status.
 - **Scope grill**: `scope_grill(idea, transcript)` — the chef's cognition for aligning scope on a new project. Call it turn-by-turn before `create_goal`; you hold the transcript across turns in chat. When the response is `{"action":"done","spec":…}`, call `create_goal(..., spec=<spec>)` to file the order.
-- **Tasks** (single dishes): `implement_feature`, `fix_bug`, `review_repository`, `onboard`, `create_repo`. Plus `start_program` for multi-course. Status: `get_status`, `list_tasks`, `cancel_task`.
+- **Tasks** (single dishes): `implement_feature`, `fix_bug`, `review_repository`, `onboard`, `create_repo`. Plus `start_program` for multi-course (now a deprecated alias that files a one-shot GOAL — ADR 0003; poll it with `get_goal`, not `get_program`). Status: `get_status`, `list_tasks`, `cancel_task`.
 - **Deploy**: `deploy_project`, `deploy_status`, `stop_deploy`, `list_deploys`.
 
 ## Scope grilling — when to use it

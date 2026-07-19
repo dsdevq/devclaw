@@ -497,6 +497,7 @@ class GoalService:
             "cadence": g.cadence,
             "workspace_dir": g.workspace_dir,
             "backlog": g.backlog,
+            "mode": g.mode,
             "phase": s.phase,
             "lifecycle": s.lifecycle or "executing",
             "next": s.next,

@@ -117,14 +117,20 @@ whole engine seam (host → docker → runner → OpenHands → claude → back)
 mkdir -p /tmp/sc-l2 && cd /tmp/sc-l2 && git init -q && cd -
 python drive.py start_program \
   '{"workspace_dir":"/tmp/sc-l2","goal":"create a Python package mathx with an add() and a mul() function, each in its own module, plus a tests/ file that imports both"}'
-# → {"program_id":"…","status":"planning"}
+# → {"goal_id":"…","mode":"one_shot",…}   (ADR 0003: start_program files a ONE-SHOT GOAL)
 ```
 
 ```bash
-python drive.py get_program '{"program_id":"<id>"}'   # watch the task DAG fill in + advance
+python drive.py get_goal '{"goal_id":"<id>"}'         # watch the goal: investigating → executing
+python drive.py tail_goal '{"goal_id":"<id>"}'        # the log tail
+python drive.py list_programs '{}'                    # the CHILD program appears once the goal dispatches it
+python drive.py get_program '{"program_id":"<child>"}' # then watch its task DAG advance
 ```
 
-Confirm tasks run in dependency order and the program reaches `done`.
+The goal plans on its heartbeat (investigate → firm → decompose), then dispatches
+the whole checklist as one parallel program. Confirm the child program's tasks
+run in dependency order, the program reaches `done`, and the goal closes through
+its done-gate.
 
 ---
 

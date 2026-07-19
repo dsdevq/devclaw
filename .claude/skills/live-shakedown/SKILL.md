@@ -87,15 +87,20 @@ else can work — go to Troubleshooting.
 mkdir -p /tmp/sc-l2 && (cd /tmp/sc-l2 && git init -q)
 python $DRIVE start_program \
   '{"workspace_dir":"/tmp/sc-l2","goal":"create a Python package mathx with an add() and a mul() function, each in its own module, plus a tests/ file that imports both"}'
-# watch: python $DRIVE get_program '{"program_id":"<id>"}'
+# → {"goal_id":…, "mode":"one_shot"} — ADR 0003: this now files a ONE-SHOT GOAL.
+# watch: python $DRIVE get_goal '{"goal_id":"<id>"}'  (then list_programs for the CHILD program id,
+#        and get_program on it once the goal's heartbeat dispatches the checklist)
 ```
 
-**Pass:** task DAG fills in, tasks run in dependency order, program reaches `done`.
-**Proves:** planner → DAG → dispatch.
+**Pass:** the goal reaches `executing`, dispatches ONE child program, the DAG's tasks
+run in dependency order, the program reaches `done`, and the goal closes via its
+done-gate. NOTE: planning rides the goal heartbeat (investigate → firm → decompose),
+so allow a few minutes before the child program appears.
+**Proves:** the unified spine (intake → decompose → one planned program) → dispatch.
 
 ### L3 — crash recovery (durability)
 
-Start an L2-style program; while a task is `running`, kill the `devclaw-mcp`
+Start an L2-style one-shot goal; while a child task is `running`, kill the `devclaw-mcp`
 process, then restart it **with the same `DEVCLAW_DB`** (same shell env, same
 command). **Pass:** restart log shows `recovered=N` (N ≥ 1); orphaned `running`
 tasks reset to `pending` and re-run; the program reaches `done` with **no new

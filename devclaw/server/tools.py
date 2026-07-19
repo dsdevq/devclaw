@@ -184,22 +184,69 @@ async def onboard(
     return json.dumps({"task_id": task_id, "status": "pending"}, indent=2)
 
 
+def _one_shot_goal_id(goal: str) -> str:
+    """A stable-ish readable slug for a start_program-sugar goal: the first
+    few words of the brief + a uuid suffix (collision-proof without a retry
+    loop)."""
+    import re as _re
+    import uuid as _uuid
+
+    words = _re.findall(r"[a-z0-9]+", goal.lower())[:5]
+    slug = "-".join(words)[:40].strip("-") or "program"
+    return f"{slug}-{_uuid.uuid4().hex[:6]}"
+
+
 @mcp.tool
 async def start_program(
     workspace_dir: str, goal: str, notify_url: Optional[str] = None
 ) -> str:
-    """Submit a high-level coding goal for DevClaw to decompose into a DAG of
-    smaller OpenHands tasks. The planner (a Claude subprocess) writes the plan,
-    then tasks execute in dep order with bounded parallelism. Returns a
-    program_id immediately; poll get_program(program_id) or pass notify_url to
-    be pushed the final result when the whole program terminates. Use for goals
-    too large for one implement_feature call."""
+    """DEPRECATED sugar for create_goal(mode='one_shot') — ADR 0003 stage 2b:
+    a program and a goal are the same thing, differing only in the
+    re-evaluation dial. This tool now files a ONE-SHOT GOAL: the same intake
+    spine (investigate → firm → decompose) plans the brief end-to-end, then the
+    whole checklist runs as one parallel program with per-item verification,
+    PR-per-slice delivery, and a grounded done-gate close — plus steering,
+    resume, and console visibility that raw programs never had.
+
+    Returns {goal_id, mode, ...}; poll get_goal(goal_id) / tail_goal. The child
+    program appears in list_programs once the goal dispatches it. Prefer
+    calling create_goal(mode='one_shot') directly — this alias exists for
+    existing waiter flows and will be retired."""
     if not workspace_dir or not goal:
         raise ToolError("start_program requires workspace_dir and goal")
-    program_id = queue.submit_program(
-        workspace_dir=workspace_dir, goal=goal, notify_url=notify_url
-    )
-    return json.dumps({"program_id": program_id, "status": "planning"}, indent=2)
+    from ..goal.admission import GoalAdmissionRejected
+
+    goal_id = _one_shot_goal_id(goal)
+    try:
+        # The brief rides as the SPEC (the scope contract firming derives
+        # done_when from) — the same acceptance parity the old direct-queue
+        # path had: a substantial brief plans; there is no separate done_when.
+        result = goals.create_goal(
+            goal_id, objective=goal, workspace_dir=workspace_dir,
+            spec=goal, mode="one_shot",
+        )
+    except GoalAdmissionRejected as exc:
+        raise ToolError(json.dumps(exc.result.to_dict(), indent=2))
+    out = {
+        "goal_id": goal_id,
+        "mode": "one_shot",
+        "lifecycle": result.get("lifecycle", "investigating"),
+        "phase": result.get("phase", "idle"),
+        "note": (
+            "start_program now files a one-shot GOAL (ADR 0003). Poll "
+            "get_goal/tail_goal with goal_id; the child program appears in "
+            "list_programs once dispatched. Deliveries arrive as reviewable "
+            "PRs and the close is gated on a grounded done_when review."
+        ),
+    }
+    if notify_url:
+        # Goals notify through the configured goal-layer notifier, not a
+        # per-call URL — say so instead of silently dropping the contract.
+        out["notify_url_ignored"] = (
+            "goal-backed programs notify via the goal layer's configured "
+            "notifier; per-call notify_url is not supported"
+        )
+    return json.dumps(out, indent=2)
 
 
 @mcp.tool
@@ -227,7 +274,9 @@ async def get_program(program_id: str) -> str:
 
 @mcp.tool
 async def list_programs(limit: Annotated[int, Field(ge=1, le=1000)] = 50) -> str:
-    """List recent programs (goals submitted via start_program), most-recent
+    """List recent programs (parallel task DAGs — dispatched by goals; the
+    start_program alias now files a one-shot GOAL whose child program lands
+    here once dispatched), most-recent
     first. Use to discover program_ids for get_program, get_events, or
     /dashboard."""
     programs = store.list_programs(limit=limit)
