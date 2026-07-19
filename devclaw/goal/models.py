@@ -401,6 +401,9 @@ class PollResult:
     pr_url: Optional[str] = None
     #: verify-gate verdict (None if no gate ran)
     gate_passed: Optional[bool] = None
+    #: gate-time diff stats the queue captured (files/insertions/deletions),
+    #: None when absent — a stats hiccup never blocks a settle
+    diff_stats: Optional[dict] = None
 
     @property
     def running(self) -> bool:

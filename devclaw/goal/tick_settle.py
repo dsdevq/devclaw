@@ -436,6 +436,7 @@ async def _resolve_polling_action(
     _trace.record_delivery(
         goal_id=goal_id, action_label=_action_label(ref),
         gate_passed=poll.gate_passed, pr_url=poll.pr_url or "",
+        diff_stats=poll.diff_stats,
     )
 
     # ---- structural per-item circuit breaker (#6) --------------------------

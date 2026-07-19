@@ -180,6 +180,36 @@ async def _git_diff(host_dir: str, base: str = "") -> str:
     return await asyncio.to_thread(_git_diff_sync, host_dir, base)
 
 
+def _diff_stats(diff: str) -> dict | None:
+    """Files/insertions/deletions counted from unified-diff TEXT — the exact
+    span the gates judged and delivery ships, with no extra git call. Pure so
+    it's unit-testable; ``None`` on an empty/blank diff (nothing to count).
+    Feeds the settle-time DeliveryEvent → the per-goal run summary."""
+    if not diff or not diff.strip():
+        return None
+    files = insertions = deletions = 0
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            files += 1
+        elif line.startswith("+") and not line.startswith("+++"):
+            insertions += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deletions += 1
+    return {"files": files, "insertions": insertions, "deletions": deletions}
+
+
+def _attach_diff_stats(result: dict, diff: str) -> None:
+    """Best-effort, never-raises: stamp the gate-time diff stats onto the task
+    result so they flow to the settle-time DeliveryEvent. A stats hiccup must
+    never fail a task that already passed every gate."""
+    try:
+        stats = _diff_stats(diff)
+        if stats is not None:
+            result["diff_stats"] = stats
+    except Exception as err:  # noqa: BLE001 — observability, not correctness
+        sys.stderr.write(f"task-queue: diff-stats capture failed: {err}\n")
+
+
 async def _git_head(host_dir: str) -> str:
     """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
     return await asyncio.to_thread(_git_head_sync, host_dir)
@@ -1186,8 +1216,10 @@ class TaskQueue(_NotifyMixin):
                             last_failure = browser_fb
                         elif defer_done:
                             # caller delivers, then settles 'done' WITH pr_url atomically
+                            _attach_diff_stats(result, diff)
                             return result
                         else:
+                            _attach_diff_stats(result, diff)
                             self._store.mark_done(task_id, json.dumps(result))
                             return None
             # Worker honest-block: the engineer self-reported it cannot finish
