@@ -102,13 +102,17 @@ When the tick decides to *do* something (not just think):
 5. **The verify gate decides, not the agent** — after the agent finishes, the
    `verify_cmd` runs; its exit code settles done-vs-failed. The agent's
    self-report is never trusted. **The gate fails CLOSED**: a crash *in* the
-   gate settles the task `failed`, not approved. A change touching a web-UI path
-   also passes a **browser-E2E gate** (`quality/browser_gate.py`): it must carry
-   a passing real-browser Playwright run — proven via the runner's parsed JSON
-   `browser_report` counts, never a `verify_cmd` string-match — or it fails
-   closed (flexible mode waves through a project with no browser suite; strict
-   forces adoption). This closes the "green unit tests + static review, broken
-   in the running app" hole.
+   gate settles the task `failed`, not approved. A change touching an
+   app-surface web-UI path also passes a **browser-E2E gate**
+   (`quality/browser_gate.py`): it must carry a passing real-browser Playwright
+   run — proven via the runner's parsed JSON `browser_report` counts, never a
+   `verify_cmd` string-match — or it fails closed (flexible mode waves through
+   a project with no browser suite; strict forces adoption). A **library-only**
+   diff (every UI path under `*/src/lib/*`) is exempt from the trigger — it
+   wires nothing into a running app, so its proof is the story+spec the library
+   build/test gate already requires; evidence from a browser run that actually
+   executed still counts in full. This closes the "green unit tests + static
+   review, broken in the running app" hole without wedging library slices.
 6. **Deliver, then settle** — for `deliver=True` tasks the change becomes a
    branch/PR *before* `done` is observable, so a poller never reads "done
    without a PR". A delivery that can't push/PR settles `failed`, never a silent

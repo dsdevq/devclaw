@@ -9,8 +9,13 @@ design-system component no route imports yet; the finance-sentry ``cmn-tab-group
 that wedged for ~14h, 2026-07-17). Its real proof is its unit test + story, not a
 full-app browser run.
 
-Rather than a static "library-only" path allowlist (which rots and is
-project-specific), this module answers the GENERIC question: *is the changed UI
+The bulk library-only class is now exempted MECHANICALLY upstream
+(``browser_gate.DEFAULT_LIBRARY_GLOBS`` — every frontend path under
+``*/src/lib/*`` ⇒ ``not_triggered``, zero cognition; 2026-07-18). This judge
+remains the escape valve for the REMAINING false-positive class the glob can't
+express — an app-surface change that is nonetheless not rendered in the running
+app (a component under ``src/app`` no route imports yet, a repo-root
+``src/lib`` layout the glob doesn't match). It answers the GENERIC question: *is the changed UI
 reachable in the running application?* — reasoned per-change, grounded ONLY in the
 task workspace (the #227 discipline), and biased hard toward "require the run":
 

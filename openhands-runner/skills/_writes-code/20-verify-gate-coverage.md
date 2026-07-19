@@ -12,6 +12,8 @@ Before you finish:
 
 ## Web-UI changes are gated in a real browser
 
-If your change touches a web-UI path (`*.component.ts`, `*.component.html`, `src/app/**`, `angular.json`), the host **browser gate** fails it **closed** unless the verify gate ran a passing Playwright suite over it — unit tests + a build are not enough, because they never render the integrated app. The gate keys off a machine-readable **Playwright JSON report** (executed count > 0, zero failures), not a string-match of `verify_cmd`.
+If your change touches an **app-surface** web-UI path (`*.component.ts`, `*.component.html`, `src/app/**`, `angular.json`), the host **browser gate** fails it **closed** unless the verify gate ran a passing Playwright suite over it — unit tests + a build are not enough, because they never render the integrated app. The gate keys off a machine-readable **Playwright JSON report** (executed count > 0, zero failures), not a string-match of `verify_cmd`.
 
-So for a UI change: add a `@playwright/test` spec that exercises it in the running app, and make `verify_cmd` run `npx playwright test --reporter=json`. See `craft/playwright.md` for the config, the `webServer` boot, the console-error listeners, and the reporter-artifact contract.
+**Library-only exemption:** all UI paths under `src/lib/**` → the gate does not fire; skip the full-app spec — a library slice's proof is its unit test + story. Browser proof lands on the app-side diff that later routes it. Mixed diffs gate as usual.
+
+So for an app-surface UI change: add a `@playwright/test` spec that exercises it in the running app, and make `verify_cmd` run `npx playwright test --reporter=json`. See `craft/playwright.md` for the config, the `webServer` boot, the console-error listeners, and the reporter-artifact contract.

@@ -95,7 +95,22 @@ Recent work made the loop fail **loud, not silent**. Match it when you add code:
 
 Rule of thumb: **loud failure over silent degradation.**
 
-## Repo layout
+## Design doctrine — systemic over specific (Denys, 2026-07-18)
+
+We are building a **system**, not a pile of fixes attached to the cases that
+surfaced them. Apply this while triaging, planning, and fixing:
+
+- **Fix the class, not the instance.** When a concrete failure arrives (one
+  repo, one component, one gate misfire), first ask "what class of failure is
+  this an instance of?" and change the *rule* — e.g. a Playwright gate wedging
+  one library component is a trigger-semantics bug (app surface vs library
+  surface), not a that-component problem. A fix that only unwedges the case
+  that hurt today is a smell.
+- **Software development is the first domain, not the definition.** The mental
+  model (durable goal → plan → sandboxed execute → verify gate → evaluate →
+  iterate) is domain-agnostic. Keep domain specifics (code, PRs, repos,
+  Playwright) at the edges — worker skills, gates, prompts — so the loop could
+  someday drive a second domain without rewiring layers 1–4.
 
 ```
 devclaw/

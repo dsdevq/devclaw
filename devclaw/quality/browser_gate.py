@@ -27,8 +27,15 @@ exit code of 0 is necessary but not sufficient — the gate requires a positive
 
 Verdict semantics:
 
-- ``not_triggered`` → the diff touched no frontend path — the browser gate is N/A
-                      for this change; never blocks.
+- ``not_triggered`` → the diff touched no frontend path, OR every frontend path
+                      it touched is library surface (``*/src/lib/*`` — a
+                      library-only slice wires nothing into a running app, so a
+                      full-app E2E has nothing to visit; its proof is the
+                      story+spec the library build/test gate already requires) —
+                      the browser gate is N/A for this change; never blocks.
+                      The library exemption removes only the EXPECTATION of a
+                      run: if a browser suite actually executed, its evidence
+                      (``ran_passed``/``ran_failed``) is still processed in full.
 - ``ran_passed``    → a browser suite executed (executed count > 0) and nothing
                       failed → gate satisfied.
 - ``ran_failed``    → a browser suite executed and ≥1 test failed → blocks
@@ -75,6 +82,29 @@ DEFAULT_FRONTEND_GLOBS: tuple[str, ...] = (
     "*.component.css",
 )
 
+#: Library-source path globs. A frontend path under one of these is LIBRARY
+#: surface, not app surface: a library-only slice wires nothing into a running
+#: app route, so a full-app browser E2E has nothing to visit (the cmn-tab-group
+#: wedge, 2026-07-18 — a library-only diff verdicted ``never_ran`` in both
+#: modes and no retry could ever fix it). ``*/src/lib/*`` is the Angular
+#: workspace library convention (``projects/<name>/src/lib/…``) and also covers
+#: Nx (``libs/<name>/src/lib/…``). A library slice's browser-equivalent proof
+#: is its story+spec, which the library build/test gate already requires. A
+#: diff whose frontend paths are ALL library surface exempts the gate; ANY
+#: app-surface path (including ``angular.json``) keeps it required.
+#:
+#: ACCEPTED RESIDUAL (recorded 2026-07-18): a library component that IS
+#: rendered by an in-repo demo/consuming app ships without a browser run at
+#: library-slice time — a cmn-select-shaped break in the component itself is
+#: NOT caught here. The contract is that integration proof belongs to the
+#: CONSUMING diff: wiring the component into a route touches app surface, so
+#: the gate fires there and the integrated component gets browser-exercised
+#: then. Chosen over routing library-only diffs through the reachability
+#: judge (owner call, Exhibit C steer): the judge costs a cognition call per
+#: library slice, and for a repo WITH a demo app it would answer "reachable"
+#: and re-create the very wedge this exemption removes.
+DEFAULT_LIBRARY_GLOBS: tuple[str, ...] = ("*/src/lib/*",)
+
 #: Playwright config filenames that mark a project as having a browser suite.
 PLAYWRIGHT_CONFIG_NAMES: tuple[str, ...] = (
     "playwright.config.ts",
@@ -118,6 +148,30 @@ def diff_touches_frontend(
     return any(_fnmatch(p, g) for p in changed_paths(diff) for g in globs)
 
 
+def diff_is_library_only(
+    diff: str,
+    globs: tuple[str, ...] = DEFAULT_FRONTEND_GLOBS,
+    library_globs: tuple[str, ...] = DEFAULT_LIBRARY_GLOBS,
+) -> bool:
+    """Is every frontend-matching path in this diff library surface? True only
+    when the diff touches at least one frontend path AND each such path also
+    matches a library glob — then there is no app surface for a browser run to
+    exercise and the gate is N/A. One app-surface path (an ``src/app`` file,
+    ``angular.json``, an app component outside ``src/lib``) makes this False and
+    the gate stays REQUIRED. Non-frontend paths (docs, package.json, stories,
+    specs) never influence the decision — the gate only ever keyed on frontend
+    surface. Same mechanical, diff-driven shape as :func:`diff_touches_frontend`:
+    a trigger-scoping rule, never a verdict-weakening one."""
+    frontend = [
+        p
+        for p in changed_paths(diff)
+        if any(_fnmatch(p, g) for g in globs)
+    ]
+    return bool(frontend) and all(
+        any(_fnmatch(p, g) for g in library_globs) for p in frontend
+    )
+
+
 @dataclass(frozen=True)
 class BrowserGateResult:
     """The browser-gate verdict for one settled task."""
@@ -152,6 +206,7 @@ def browser_run_verdict(
     *,
     config_present: bool,
     globs: tuple[str, ...] = DEFAULT_FRONTEND_GLOBS,
+    library_globs: tuple[str, ...] = DEFAULT_LIBRARY_GLOBS,
 ) -> BrowserGateResult:
     """Fold (the verify result's ``browser_report``, the diff, whether a
     playwright config exists) into a browser-gate verdict. Pure.
@@ -165,8 +220,22 @@ def browser_run_verdict(
     if not diff_touches_frontend(diff, globs):
         return BrowserGateResult("not_triggered", "no frontend path in the diff")
 
+    # The library-only exemption removes the EXPECTATION of a browser run — it
+    # is consulted only on the no-run paths below. Evidence from a run that
+    # actually happened (a failing or passing report) is still processed in
+    # full: trigger-scoping, never verdict-weakening.
+    _library_only = BrowserGateResult(
+        "not_triggered",
+        "library-only frontend diff (every UI path under a library glob, no "
+        "app surface changed) — nothing for a full-app browser run to visit; "
+        "a library slice's browser-equivalent proof is its story+spec, which "
+        "the library build/test gate already requires",
+    )
+
     report = (verify_result or {}).get("browser_report")
     if not isinstance(report, dict):
+        if diff_is_library_only(diff, globs, library_globs):
+            return _library_only
         if not config_present:
             return BrowserGateResult(
                 "absent",
@@ -187,6 +256,8 @@ def browser_run_verdict(
         f"flaky={report.get('flaky', 0)} skipped={skipped}"
     )
     if executed == 0:
+        if diff_is_library_only(diff, globs, library_globs):
+            return _library_only
         return BrowserGateResult(
             "never_ran",
             f"a browser report exists but 0 tests executed ({summary}) — "
