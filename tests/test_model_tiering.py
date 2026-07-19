@@ -127,19 +127,31 @@ async def test_claude_with_model_forwards_timeout(monkeypatch):
 
 
 def test_shipped_default_tiers():
-    assert planner.PLANNER_MODEL == "opus"  # rare + high-leverage
+    from devclaw.goal.decomposer import DECOMPOSER_MODEL
+
+    assert DECOMPOSER_MODEL == "opus"  # the ONE planning spine — rare + high-leverage
     assert elicitation.GRILL_MODEL == "sonnet"  # conversational
     assert eval_judge.JUDGE_MODEL == "haiku"  # bounded classification
     assert sandcastle_runner.EXEC_MODEL == "claude-sonnet-4-6"  # the coding bulk
+
+
+def test_planner_role_retired_with_plan_goal():
+    """ADR 0003 stage 1: program planning routes through the decomposer, so the
+    'planner' tier row is gone — model_for fails loud on it rather than
+    silently tiering a dead role."""
+    from devclaw.model_tiers import model_for
+
+    with pytest.raises(KeyError):
+        model_for("planner")
 
 
 # ---- each role's default caller is wired to its tier ----
 
 
 def test_role_default_callers_are_tiered():
-    # plan_goal / plan_spec → planner tier
-    assert inspect.signature(planner.plan_goal).parameters["claude_caller"].default is planner._planner_caller
-    assert inspect.signature(planner.plan_spec).parameters["claude_caller"].default is planner._planner_caller
+    # program planning → the decomposer tier (plan_program binds lazily via
+    # goal.decomposer.default_caller; assert the factory is the decomposer's)
+    assert inspect.signature(planner.plan_program).parameters["claude_caller"].default is None
     # grill → grill tier (next_step binds lazily via default_caller; assert the
     # factory routes the configured tier)
     assert elicitation.default_caller.__module__ == "devclaw.elicitation"

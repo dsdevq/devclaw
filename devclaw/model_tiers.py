@@ -26,9 +26,8 @@ MODEL_DEEP = os.environ.get("DEVCLAW_MODEL_DEEP", "opus") or None
 #: calls at volume (reviews, evals, grilling). Light = mechanical prose
 #: (summaries, failure classification).
 _ROLE_TIER: dict[str, str | None] = {
-    "planner": MODEL_DEEP,          # plan_goal — one-shot DAG decomposition
     "firming": MODEL_DEEP,          # goal firming — the contract the rest executes
-    "decomposer": MODEL_DEEP,       # done_when → checklist
+    "decomposer": MODEL_DEEP,       # goal/program → checklist (the ONE planning spine)
     "world_research": MODEL_DEEP,   # investigation discovery brief
     "goal_planner": MODEL_STANDARD, # next-action pick (bounded JSON, light)
     "goal_eval": MODEL_STANDARD,    # direction evaluator

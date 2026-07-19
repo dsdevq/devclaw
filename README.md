@@ -243,21 +243,19 @@ devclaw trace report --since 24h               # deterministic day-report: tasks
 filters; default 200 rows, max 1000, newest-first) and the goal-scoped
 `get_trace` MCP tool.
 
-Dry-run the planner in isolation from execution — see how a big goal splits into
-a task DAG at the cost of ONE cognition call, with **no docker, no task queue,
-no state mutation**:
+Dry-run planning in isolation from execution — see how a goal decomposes into
+a milestone checklist (the ONE planning spine durable goals AND programs ride)
+at the cost of ONE cognition call, with **no docker, no task queue, no state
+mutation**:
 
 ```bash
-devclaw cognition plan "Build a fullstack accounts app" --repo ~/repos/accounts
-                          #   ^ one planner call → a rendered DAG: each task's key,
-                          #     kind, dependency edges (parallel vs sequential), and
-                          #     its acceptance-criteria/constraints brief. --repo grounds
-                          #     the plan in a REPOSITORY CONTEXT snapshot of that workspace.
-                          #     -v/--show-prompt prints the exact prompt; --json the raw plan.
 devclaw cognition decompose "Ship the accounts API" \
         --done-when "GET /accounts returns real data" --repo ~/repos/accounts
                           #   one decomposer call → the milestone checklist (items +
-                          #     evidence_target + deps + open_questions). Same -v/--json.
+                          #     evidence_target + deps + open_questions). --repo grounds
+                          #     it in a REPOSITORY CONTEXT snapshot of that workspace.
+                          #     -v/--show-prompt prints the exact prompt; --json the
+                          #     parsed checklist.
 ```
 
 Both print latency + token usage from the call. Inspection-only: they construct

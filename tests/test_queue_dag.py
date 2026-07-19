@@ -167,3 +167,34 @@ async def test_task_failure_propagates_to_program(store):
     await q.drain()
     p = store.get_program(program_id)
     assert p.status == "failed"
+
+
+async def test_program_child_task_row_carries_scaffold_flag(store):
+    """ADR 0003 stage 1 regression: a PlannedTask tagged scaffold (threaded
+    from ChecklistItem.scaffold by the decomposer adapter) must land on the
+    child task ROW — the review-gate skip reads row.scaffold at settle, so a
+    dropped thread would fail-close the gate on generator diffs."""
+    async def planner(goal, workspace_dir):
+        return [
+            PlannedTask(key="gen", goal="ng new app", kind="implement_feature",
+                        depends_on_keys=[], scaffold=True),
+            PlannedTask(key="real", goal="wire the endpoint", kind="implement_feature",
+                        depends_on_keys=["gen"]),
+        ]
+
+    q = TaskQueue(store, planner=planner, runner=_ok_runner([]))
+    program_id = q.submit_program(workspace_dir="/ws", goal="x")
+    await q.drain()
+    by_goal = {t.goal: bool(t.scaffold) for t in store.list_program_tasks(program_id)}
+    assert by_goal == {"ng new app": True, "wire the endpoint": False}
+
+
+async def test_program_default_planner_is_the_decomposer_adapter(store):
+    """The queue's default _planner slot routes through plan_program (the
+    decomposer spine), not the retired plan_goal."""
+    from devclaw import task_queue as tq
+
+    assert not hasattr(tq, "plan_goal")
+    q = TaskQueue(store, runner=_ok_runner([]))
+    # the default lambda closes over plan_program
+    assert "plan_program" in q._planner.__code__.co_names

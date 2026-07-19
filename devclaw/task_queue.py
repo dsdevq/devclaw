@@ -43,7 +43,7 @@ from .delivery import deliver_change, delivery_failed
 from .engine import Engine, EngineEvent, EngineRequest
 from .loom.limits import classify_failure, pause_seconds
 from .loom.test_integrity import present_test_names, scan_diff
-from .planner import PlannedTask, PlannerError, plan_goal
+from .planner import PlannedTask, PlannerError, plan_program
 from .quality import format_feedback, review_panel
 from .quality.browser_gate import PLAYWRIGHT_CONFIG_NAMES, browser_run_verdict
 from .quality.reachability import judge_reachability
@@ -356,7 +356,7 @@ class TaskQueue(_NotifyMixin):
     ) -> None:
         self._store = store
         # Injectable for tests — default to the real planner / sandcastle runner.
-        self._planner: PlannerFn = planner or (lambda g, w: plan_goal(g, w))
+        self._planner: PlannerFn = planner or (lambda g, w: plan_program(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
         # A short engine-kind label for trace events ("stub" / "sandcastle" /
         # "host" / "claude_sdk") — derived from the runner's qualified name so
@@ -943,7 +943,7 @@ class TaskQueue(_NotifyMixin):
             dep_uuids: list[str] = []
             for k in p.depends_on_keys:
                 u = key_to_uuid.get(k)
-                if not u:  # should never happen — validate_plan rejects dangling refs
+                if not u:  # should never happen — order_tasks rejects dangling refs
                     raise RuntimeError(f"planner produced dangling ref '{k}'")
                 dep_uuids.append(u)
             is_review = p.kind == "review_repository"
@@ -959,6 +959,10 @@ class TaskQueue(_NotifyMixin):
                 milestone=p.milestone,
                 verify_cmd=None if is_review else program_verify_cmd,
                 deliver=False if is_review else program_open_pr,
+                # Threaded from ChecklistItem.scaffold via the decomposer
+                # adapter — skips ONLY the adversarial review gate; the verify
+                # gate + test-integrity scan still run (see _run_and_settle).
+                scaffold=p.scaffold,
             )
 
     def start_planned_program(
@@ -969,10 +973,10 @@ class TaskQueue(_NotifyMixin):
         planned: list[PlannedTask],
         notify_url: Optional[str] = None,
     ) -> str:
-        """Submit an ALREADY-PLANNED program (caller did the planning, e.g.
-        plan_spec for an approved project). Persists the DAG and starts it
-        synchronously — never observed in 'planning', so no plan-time recovery
-        edge case. Returns the program_id."""
+        """Submit an ALREADY-PLANNED program (the caller supplies the
+        ``PlannedTask`` DAG). Persists the DAG and starts it synchronously —
+        never observed in 'planning', so no plan-time recovery edge case.
+        Returns the program_id."""
         program_id = str(uuid.uuid4())
         self._store.create_program(
             id=program_id, goal=goal, workspace_dir=workspace_dir, notify_url=notify_url
