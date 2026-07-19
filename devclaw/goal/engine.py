@@ -232,6 +232,7 @@ class InProcessEngine:
             detail=_task_detail(t.kind, t.result_json, t.error, t.pr_url) if terminal else "",
             pr_url=t.pr_url,
             gate_passed=_gate_passed(t.result_json),
+            diff_stats=_diff_stats(t.result_json),
         )
 
     def _poll_program(self, program_id: str) -> PollResult:
@@ -272,6 +273,19 @@ def _gate_passed(result_json: Optional[str]) -> Optional[bool]:
     verify = data.get("verify") if isinstance(data, dict) else None
     if isinstance(verify, dict) and verify.get("ran") and "passed" in verify:
         return bool(verify["passed"])
+    return None
+
+
+def _diff_stats(result_json: Optional[str]) -> Optional[dict]:
+    """The gate-time diff stats the queue stamped onto the result, if present
+    (``{"files": n, "insertions": i, "deletions": d}``). Defensive: anything
+    not shaped like the stats dict → None."""
+    data = _parse_result(result_json)
+    stats = data.get("diff_stats") if isinstance(data, dict) else None
+    if isinstance(stats, dict) and all(
+        isinstance(stats.get(k), int) for k in ("files", "insertions", "deletions")
+    ):
+        return stats
     return None
 
 

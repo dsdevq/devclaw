@@ -136,6 +136,11 @@ class DeliveryEvent:
     action_label: str = ""
     gate_passed: Optional[bool] = None
     pr_url: str = ""
+    #: gate-time diff span (the exact change delivery ships) — None when the
+    #: capture was absent; feeds the per-goal run summary
+    diff_files: Optional[int] = None
+    diff_insertions: Optional[int] = None
+    diff_deletions: Optional[int] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -462,13 +467,24 @@ def record_subprocess(
     ))
 
 
-def record_delivery(*, goal_id: str, action_label: str, gate_passed: Optional[bool], pr_url: str = "") -> None:
+def record_delivery(
+    *,
+    goal_id: str,
+    action_label: str,
+    gate_passed: Optional[bool],
+    pr_url: str = "",
+    diff_stats: Optional[dict] = None,
+) -> None:
     t = _current.get()
     if t is None:
         return
+    stats = diff_stats if isinstance(diff_stats, dict) else {}
     t.append(DeliveryEvent(
         goal_id=goal_id, action_label=action_label,
         gate_passed=gate_passed, pr_url=pr_url or "",
+        diff_files=stats.get("files"),
+        diff_insertions=stats.get("insertions"),
+        diff_deletions=stats.get("deletions"),
     ))
 
 
