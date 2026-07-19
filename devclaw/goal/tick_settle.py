@@ -46,6 +46,20 @@ from ..loom import trace as _trace
 ITEM_MAX_ATTEMPTS = int(os.environ.get("DEVCLAW_ITEM_MAX_ATTEMPTS", "3"))
 
 
+def _failure_note(poll: PollResult) -> str:
+    """A compact one-liner of what went wrong, for the item's failure_log.
+    Prefers the END of poll.detail — the error / gate tail carries the signal;
+    the front is the agent's own summary. Whitespace-flattened and bounded so
+    N notes stay brief-sized."""
+    parts: list[str] = [f"settled {poll.status}"]
+    if poll.gate_passed is False:
+        parts.append("sandbox gate=FAILED")
+    tail = " ".join((poll.detail or "").split())
+    if tail:
+        parts.append("…" + tail[-260:] if len(tail) > 260 else tail)
+    return " · ".join(parts)
+
+
 def _settle_addressed_items(
     checklist: "Checklist", addresses: list[str], poll: PollResult,
 ) -> "Checklist":
@@ -91,6 +105,7 @@ def _settle_addressed_items(
                 # fresh rather than pre-tripping the breaker.
                 updated = _checklist.update_item(
                     updated, item_id, status="done", evidence=evidence, attempts=0,
+                    clear_failure_log=True,
                 )
             except KeyError:
                 continue
@@ -107,9 +122,11 @@ def _settle_addressed_items(
         if item is None:
             continue
         n = item.attempts + 1
+        note = f"attempt {n}: {_failure_note(poll)}"
         if ITEM_MAX_ATTEMPTS > 0 and n >= ITEM_MAX_ATTEMPTS:
             updated = _checklist.update_item(
                 updated, item_id, status="blocked", attempts=n,
+                failure_note=note,
                 evidence=(
                     f"circuit breaker: {n} straight failed attempts — parked "
                     f"for a human decision (steer with a different approach, "
@@ -117,8 +134,13 @@ def _settle_addressed_items(
                 ),
             )
         else:
+            # Back to the pick-pool WITH the failure recorded: the dispatch
+            # path renders failure_log into the next worker's brief so a
+            # re-dispatched item doesn't re-discover a failed approach one
+            # attempt at a time (cross-dispatch continuity).
             updated = _checklist.update_item(
                 updated, item_id, status="not_started", attempts=n,
+                failure_note=note,
             )
     return updated
 

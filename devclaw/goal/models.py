@@ -322,6 +322,16 @@ class ChecklistItem:
     #: and unreliable — thing stopping a 4th identical attempt). Reset to 0 on a
     #: successful settle of the item. Persisted in checklist.yaml only when > 0.
     attempts: int = 0
+    #: compact per-failure notes ("what went wrong"), appended at settle by
+    #: :func:`devclaw.goal.tick_settle._settle_addressed_items` alongside the
+    #: ``attempts`` bump. The dispatch path renders these into the NEXT
+    #: worker's brief so a re-dispatched item doesn't re-discover a failed
+    #: approach one attempt at a time (the cross-dispatch half of the
+    #: continuity gap; the intra-dispatch half is task_queue's accumulated
+    #: retry history). Bounded (newest kept); cleared on a successful settle
+    #: with the attempts reset. Persisted in checklist.yaml only when
+    #: non-empty.
+    failure_log: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
