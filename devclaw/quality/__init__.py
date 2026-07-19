@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional
 
-from ..planner import PlannerError, claude_with_model, extract_json
+from ..llm_call import PlannerError, claude_with_model, extract_json
 
 #: Adversarial code review is judgment-heavy — Sonnet is the right tier (matches
 #: the scope grill; heavier than the Haiku classification judge, lighter than the

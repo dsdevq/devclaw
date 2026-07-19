@@ -17,7 +17,7 @@ import os
 from collections import Counter
 from typing import Awaitable, Callable, Optional
 
-from ..planner import PlannerError, claude_with_model, extract_json
+from ..llm_call import PlannerError, claude_with_model, extract_json
 
 #: the judge buckets a run into a fixed vocabulary + a suggestion — bounded
 #: classification, so Haiku is the right tier. Empty → account default.
