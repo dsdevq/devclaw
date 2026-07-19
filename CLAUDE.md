@@ -103,9 +103,9 @@ devclaw/
 ├── goal/            durable goal layer — service, tick, planner, evaluator, store, engine, merge, notify
 ├── engine/          execution — sandcastle.py (docker run --rm, prod), claude_sdk.py, host.py, stub.py
 ├── delivery/        commit → branch → push → PR; deploy.py (Tailscale); repo.py (gh repo create)
-├── quality/         gates past green tests — pre-PR adversarial review, eval_judge, evals
+├── quality/         gates past green tests — the self-contained fail-closed gate (own prompts/ + README), pre-PR adversarial review, eval_judge, evals
 ├── loom/            engine-agnostic substrate — limits, test_integrity, trace
-├── prompts/         every system prompt as a .md file (load_prompt(slug))
+├── prompts/         system prompts as .md files (load_prompt(slug)); the 3 gate prompts live in quality/prompts/
 ├── planner.py · cognition.py · state_store/ · task_queue.py · project_registry.py · cli.py · …
 openhands-runner/runner.py   OpenHands SDK inside the sandbox — line-delimited JSON on stdout
 .sandcastle/Dockerfile       per-task sandbox image

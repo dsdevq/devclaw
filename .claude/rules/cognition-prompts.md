@@ -1,10 +1,10 @@
 # Cognition callers & prompt files — conventions
 
-Applies to `devclaw/prompts/*.md` and the layer-3 caller modules
+Applies to `devclaw/prompts/*.md` + the gate's own `devclaw/quality/prompts/*.md` and the layer-3 caller modules
 (`goal/{planner,evaluator,decomposer,research,world_research}.py`,
 `goal/phases/firming.py`, `devclaw/planner.py`, `devclaw/quality/`).
 
-## Prompt templates (`devclaw/prompts/*.md`)
+## Prompt templates (`devclaw/prompts/*.md`, `devclaw/quality/prompts/*.md`)
 
 - Templates render through `load_prompt(slug, **kwargs)` with `str.format` —
   literal braces must be escaped `{{ }}`. A new `{placeholder}` needs the

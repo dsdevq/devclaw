@@ -76,7 +76,7 @@ def build_judge_prompt(
     acceptance: Optional[bool],
     accept_output: str = "",
 ) -> str:
-    from ..prompts import load_prompt
+    from .prompts import load_prompt
 
     acc = {True: "PASSED", False: "FAILED", None: "NOT RUN (build did not complete)"}[acceptance]
     return "\n\n".join(

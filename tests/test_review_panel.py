@@ -70,7 +70,7 @@ def test_lens_prompt_carries_its_own_lens_and_not_the_others():
     """A per-lens prompt names ITS lens focus and no other lens's — the diverse
     lenses are what make the panelists uncorrelated. Presence AND absence, proven
     against the raw template (which carries no PANEL LENS marker at all)."""
-    raw = Path(review_gate.__file__).parent.parent / "prompts" / "review-gate.md"
+    raw = Path(review_gate.__file__).parent / "prompts" / "review-gate.md"
     template = raw.read_text(encoding="utf-8")
     assert "PANEL LENS" not in template  # the marker is added by the lens, not canned
 
