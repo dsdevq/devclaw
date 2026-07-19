@@ -1,23 +1,31 @@
-"""Planner — turns a single high-level goal into a DAG of OpenHands tasks.
+"""Program planner — turns a program goal into a task DAG via the GOAL DECOMPOSER.
 
-Cognition runs in Claude (we shell out to ``claude --print``); this layer only
-validates the JSON the model produces. Same split as the runner: mechanism
-here, decisions in Claude. Auth comes from the bind-mounted ~/.claude session —
-no API key, ever.
+ONE planning spine (ADR 0003, stage 1): the queue's program path used to run
+its own coarse JSON planner (``plan_goal``, "aim for 1-6 tasks"); it now routes
+through the same decomposer that plans durable goals
+(:mod:`devclaw.goal.decomposer`), and this module is the thin adapter around
+it: checklist items map ~1:1 onto :class:`PlannedTask` (id→key,
+requirement+evidence_target→goal, depends_on→depends_on_keys, milestone,
+scaffold). Cognition runs in Claude (we shell out to ``claude --print``); this
+layer only maps + orders the validated structured output. Same split as the
+runner: mechanism here, decisions in Claude. Auth comes from the bind-mounted
+~/.claude session — no API key, ever.
 
-Single goals (the "small bounded" case) still go through here: the planner
-returns a one-element list with no deps. One code path; less special-casing.
+Single goals (the "small bounded" case) still go through here: the decomposer
+returns a one-item checklist with no deps. One code path; less special-casing.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 from .state_store import TaskKind
+
+if TYPE_CHECKING:
+    from .goal.models import Checklist
 
 # The low-level LLM-call primitive lives in llm_call.py — a LEAF module
 # (extracted 2026-07-19) so the quality gate imports the call primitive
@@ -43,22 +51,6 @@ from .llm_call import (  # noqa: F401
 # on THIS namespace — same convention as task_queue's git wrappers.
 from .task_git import _review_repo_context_sync  # noqa: F401
 
-MAX_TASKS_PER_PLAN = 20
-
-# Per-role model tiering. Running every cognition call on the account default
-# (Opus) burns the Pro/Max quota fast and is slow; tier each role to the lightest
-# model that does its job. These are `claude --model` values (an alias like
-# 'sonnet'/'opus', or a full id). Planning is rare + high-leverage → Opus; the
-# scope grill is conversational → Sonnet (set in elicitation.py); the eval judge
-# is bounded classification → Haiku (set in eval_judge.py). The heavy coding path
-# (OpenHands) is tiered separately via DEVCLAW_EXEC_MODEL. An empty value →
-# the CLI's account default (no --model flag passed).
-from .model_tiers import model_for as _model_for
-PLANNER_MODEL = _model_for("planner")
-
-VALID_KINDS: tuple[TaskKind, ...] = ("implement_feature", "fix_bug", "review_repository")
-
-
 @dataclass
 class PlannedTask:
     #: stable model-assigned id used to express deps within this plan only
@@ -67,8 +59,16 @@ class PlannedTask:
     kind: TaskKind
     #: keys (not UUIDs) of other tasks in this plan that must finish first
     depends_on_keys: list[str] = field(default_factory=list)
-    #: the spec milestone this task serves (plan-from-spec only; else None)
+    #: the milestone this task serves (decomposer-tagged; None when omitted)
     milestone: str | None = None
+    #: True when the task is *generated scaffolding* (``ng new`` / ``dotnet
+    #: new`` boilerplate), threaded verbatim from
+    #: :attr:`devclaw.goal.models.ChecklistItem.scaffold` so the queue skips
+    #: ONLY the adversarial review gate for it — the verify/build gate and the
+    #: test-integrity scan still run (enforced in task_queue._run_and_settle).
+    #: Without this thread a program-path scaffold diff would hit the review
+    #: gate and fail closed on generator output.
+    scaffold: bool = False
 
 
 async def _plan_repo_context(workspace_dir: str) -> str:
@@ -79,86 +79,23 @@ async def _plan_repo_context(workspace_dir: str) -> str:
     return await asyncio.to_thread(_review_repo_context_sync, workspace_dir)
 
 
-def build_planner_prompt(
-    goal: str, workspace_dir: str, repo_context: str | None = None
-) -> str:
-    from .prompts import load_prompt
-
-    parts = [load_prompt("plan-goal")]
-    if repo_context and repo_context.strip():
-        parts.append(
-            "REPOSITORY CONTEXT (facts from the task workspace — the source of "
-            "truth for repo identity and which files/dirs exist):\n"
-            + repo_context.strip()
-        )
-    parts.append(
-        f"Workspace: {workspace_dir}\n"
-        f"Goal: {goal}\n\n"
-        "Return the JSON now."
-    )
-    return "\n\n".join(parts)
-
-
-def validate_plan(parsed: object) -> list[PlannedTask]:
-    """Validate the parsed plan and return tasks in topological order. Raises
-    PlannerError on cycles, dangling refs, missing fields, etc."""
-    if not isinstance(parsed, dict):
-        raise PlannerError("Plan must be a JSON object")
-    raw = parsed.get("tasks")
-    if not isinstance(raw, list):
-        raise PlannerError("Plan.tasks must be an array")
-    if len(raw) == 0:
-        raise PlannerError("Plan must contain at least one task")
-    if len(raw) > MAX_TASKS_PER_PLAN:
-        raise PlannerError(
-            f"Plan has {len(raw)} tasks; max is {MAX_TASKS_PER_PLAN}. Refine the goal."
-        )
-
+def order_tasks(tasks: list[PlannedTask]) -> list[PlannedTask]:
+    """Validate the DAG shape and return tasks in topological order. Raises
+    :class:`PlannerError` on duplicate keys, self-deps, dangling refs, or
+    cycles. Kept separate from any parsing so every producer of
+    ``list[PlannedTask]`` (today: the checklist adapter below; tests) goes
+    through the SAME cycle check — ``validate_checklist`` prunes dangling and
+    self deps but deliberately does not reject a multi-node cycle, and a cycle
+    that reaches the queue deadlocks the DAG (no task ever becomes ready)."""
     seen: set[str] = set()
-    tasks: list[PlannedTask] = []
-    for t in raw:
-        if not isinstance(t, dict):
-            raise PlannerError("Each task must be an object")
-        key = t.get("key").strip() if isinstance(t.get("key"), str) else ""
-        goal = t.get("goal").strip() if isinstance(t.get("goal"), str) else ""
-        kind_raw = t.get("kind") if isinstance(t.get("kind"), str) else "implement_feature"
-        deps_raw = t.get("depends_on")
-        milestone = t.get("milestone").strip() if isinstance(t.get("milestone"), str) else None
-        if not key:
-            raise PlannerError("Task missing 'key'")
-        if not goal:
-            raise PlannerError(f"Task '{key}' missing 'goal'")
-        if key in seen:
-            raise PlannerError(f"Duplicate task key '{key}'")
-        if kind_raw not in VALID_KINDS:
-            raise PlannerError(
-                f"Task '{key}' has invalid kind '{kind_raw}'; "
-                f"expected one of {', '.join(VALID_KINDS)}"
-            )
-        depends_on_keys: list[str] = []
-        if deps_raw is not None:
-            if not isinstance(deps_raw, list):
-                raise PlannerError(f"Task '{key}' depends_on must be an array")
-            for d in deps_raw:
-                if not isinstance(d, str) or not d.strip():
-                    raise PlannerError(f"Task '{key}' has non-string dep")
-                if d == key:
-                    raise PlannerError(f"Task '{key}' depends on itself")
-                depends_on_keys.append(d.strip())
-        seen.add(key)
-        tasks.append(
-            PlannedTask(
-                key=key,
-                goal=goal,
-                kind=kind_raw,
-                depends_on_keys=depends_on_keys,
-                milestone=milestone or None,
-            )
-        )
-
-    # Validate all dep refs resolve.
+    for t in tasks:
+        if t.key in seen:
+            raise PlannerError(f"Duplicate task key '{t.key}'")
+        seen.add(t.key)
     for t in tasks:
         for d in t.depends_on_keys:
+            if d == t.key:
+                raise PlannerError(f"Task '{t.key}' depends on itself")
             if d not in seen:
                 raise PlannerError(f"Task '{t.key}' depends on unknown key '{d}'")
 
@@ -186,26 +123,69 @@ def validate_plan(parsed: object) -> list[PlannedTask]:
     return ordered
 
 
-#: planning (plan_goal + plan_spec) runs at the planner tier
-_planner_caller = claude_with_model(PLANNER_MODEL, role="planner")
+#: Hard BRAKE on one program's task count — a cost backstop, NOT sizing
+#: guidance (ADR 0003 §4 forbids numeric caps in planner prompts; §7 demands
+#: mechanical spend brakes — this is the latter). The old plan_goal capped at
+#: 20 against a prompt that aimed for 1-6; the decomposer is deliberately
+#: finer-grained (real checklists run ~30 items), so the ceiling is generous —
+#: it exists to stop a runaway decomposition (a whole-app goal exploding into
+#: per-file micro-items) from enqueueing an unbounded fleet of sandboxed agent
+#: runs, never to squeeze a legitimate plan.
+MAX_PROGRAM_TASKS = 50
 
 
-def _parse_plan(raw: str) -> list[PlannedTask]:
-    """Extract → parse → validate a planner response into an ordered DAG."""
-    json_text = extract_json(raw)
-    try:
-        parsed = json.loads(json_text)
-    except json.JSONDecodeError as err:
-        raise PlannerError(f"Planner JSON parse failed: {err}", raw) from err
-    return validate_plan(parsed)
+def planned_from_checklist(checklist: "Checklist") -> list[PlannedTask]:
+    """Map a decomposer :class:`~devclaw.goal.models.Checklist` onto the
+    queue's DAG shape — the near-1:1 adapter the unification rides on
+    (ADR 0003 stage 1): id→key, requirement+evidence_target→goal,
+    depends_on→depends_on_keys, milestone→milestone, scaffold→scaffold.
+
+    The evidence target rides INSIDE the goal string (same carrier as the
+    #252 acceptance-criteria brief) so both the worker and the pre-PR gate
+    see the verifiable outcome the item was decomposed to produce. ``kind``
+    is always ``implement_feature``: the decomposer emits work items, and
+    the requirement text — not the kind enum — is what directs the agent."""
+    if not checklist.items:
+        # validate_checklist raises before this can happen today; belt+suspenders
+        # so a future permissive parser can't hand the queue an empty DAG.
+        raise PlannerError("decomposer produced no plannable items")
+    if len(checklist.items) > MAX_PROGRAM_TASKS:
+        raise PlannerError(
+            f"decomposer produced {len(checklist.items)} tasks; the program "
+            f"brake is {MAX_PROGRAM_TASKS}. Split the goal into smaller "
+            "programs (or a durable goal, which executes its checklist "
+            "incrementally) instead."
+        )
+    tasks: list[PlannedTask] = []
+    for item in checklist.items:
+        goal_text = item.requirement
+        if item.evidence_target:
+            goal_text += (
+                "\n\nEvidence target (the verifiable outcome this task must "
+                f"produce): {item.evidence_target}"
+            )
+        if item.note:
+            goal_text += f"\nPlanner note: {item.note}"
+        tasks.append(
+            PlannedTask(
+                key=item.id,
+                goal=goal_text,
+                kind="implement_feature",
+                depends_on_keys=list(item.depends_on),
+                milestone=item.milestone,
+                scaffold=item.scaffold,
+            )
+        )
+    return order_tasks(tasks)
 
 
-async def plan_goal(
+async def plan_program(
     goal: str,
     workspace_dir: str,
-    claude_caller: Callable[[str], Awaitable[str]] = _planner_caller,
+    claude_caller: Optional[Callable[[str], Awaitable[str]]] = None,
 ) -> list[PlannedTask]:
-    """Plan a bare goal string (the small-bounded `start_program` case).
+    """Plan a program goal through the goal decomposer (the queue's
+    ``_planner`` slot — ONE planning spine for programs and durable goals).
 
     The prompt is grounded in a snapshot of the ACTUAL workspace (remote,
     key-file presence, tracked layout — :func:`~devclaw.task_git._review_repo_context_sync`,
@@ -213,7 +193,16 @@ async def plan_goal(
     populated repo and an empty scaffold target, and host-side ``claude``
     inherits devclaw's own checkout as cwd — the wrong-codebase contamination
     channel #227 closed for the review gate. Strictly best-effort: a snapshot
-    hiccup degrades to an ungrounded prompt, it never fails planning."""
+    hiccup degrades to an ungrounded prompt, it never fails planning.
+
+    Decomposer failures surface as :class:`PlannerError` so the queue's
+    existing mark-program-failed + notify path handles them unchanged."""
+    # Lazy imports: the decomposer's factory shells out to `claude` only when
+    # called, and importing here (not at module top) keeps this module a leaf
+    # for the many callers that only want PlannedTask/order_tasks.
+    from .goal.decomposer import GoalDecomposerError, decompose, default_caller
+    from .goal.models import Goal
+
     try:
         repo_context: str | None = await _plan_repo_context(workspace_dir)
     except Exception as exc:  # noqa: BLE001 — best-effort, never fail planning
@@ -221,33 +210,21 @@ async def plan_goal(
             f"devclaw: planner repo snapshot failed (planning ungrounded): {exc}\n"
         )
         repo_context = None
-    raw = await claude_caller(build_planner_prompt(goal, workspace_dir, repo_context))
-    return _parse_plan(raw)
-
-
-# ===== plan-from-spec ========================================================
-# The build-a-project-from-scratch path: decompose an *approved spec* (the
-# shared scope contract handed in by the OpenClaw waiter after scope_grill) into
-# a milestone-ordered DAG. Richer than plan_goal — the model is grounded in the
-# spec's milestones, acceptance criteria, scope, and constraints.
-
-def build_spec_planner_prompt(spec: str, workspace_dir: str) -> str:
-    from .prompts import load_prompt
-
-    return (
-        f"{load_prompt('plan-spec')}\n\n"
-        f"Workspace: {workspace_dir}\n\n"
-        f"APPROVED SPEC:\n{spec}\n\n"
-        "Return the JSON now."
+    # A throwaway in-memory Goal — the decomposer only reads its facts; nothing
+    # is persisted (no GoalStore on this path; same shape as the CLI dry-run).
+    goal_obj = Goal(
+        id="program",
+        objective=goal,
+        cadence="",
+        engine="devclaw",
+        workspace_dir=workspace_dir,
     )
-
-
-async def plan_spec(
-    spec: str,
-    workspace_dir: str,
-    claude_caller: Callable[[str], Awaitable[str]] = _planner_caller,
-) -> list[PlannedTask]:
-    """Decompose an approved spec into a milestone-ordered DAG. Same validated
-    DAG shape as plan_goal, with per-task milestones populated."""
-    raw = await claude_caller(build_spec_planner_prompt(spec, workspace_dir))
-    return _parse_plan(raw)
+    try:
+        checklist = await decompose(
+            goal_obj,
+            claude_caller=claude_caller or default_caller(),
+            repo_context=repo_context,
+        )
+    except GoalDecomposerError as err:
+        raise PlannerError(str(err), getattr(err, "raw", None)) from err
+    return planned_from_checklist(checklist)

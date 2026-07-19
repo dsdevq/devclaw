@@ -238,14 +238,15 @@ and `tests/test_self_triage.py`.
 - **Tested by:** `tests/test_cognition.py`, `tests/test_goal_decomposer.py`,
   `tests/test_goal_evaluator.py` — prompt rendering + response parsing in
   isolation, LLM call stubbed.
-- **Operator inspection:** `devclaw cognition plan "<goal>" [--repo D]` and
-  `devclaw cognition decompose "<obj>" --done-when "<text>" [--repo D]` dry-run
-  the DAG planner / decomposer — ONE real cognition call, rendered as a task
-  DAG / milestone checklist, with **no docker, no queue, no state mutation**
-  (it constructs neither the registry nor a `GoalStore`). Reuses this layer's
-  own `build_prompt`/`validate_plan`/`parse_checklist`; `--json` scripts the
-  parsed output, `-v` prints the exact prompt. Tested by
-  `tests/test_cli_cognition.py`.
+- **Operator inspection:** `devclaw cognition decompose "<obj>" --done-when
+  "<text>" [--repo D]` dry-runs the decomposer — ONE real cognition call,
+  rendered as a milestone checklist, with **no docker, no queue, no state
+  mutation** (it constructs neither the registry nor a `GoalStore`). This is
+  the ONE planning spine both durable goals and programs ride (ADR 0003 stage
+  1 routed `start_program` through it; the coarse `plan_goal` + `cognition
+  plan` retired with it). Reuses this layer's own
+  `build_prompt`/`parse_checklist`; `--json` scripts the parsed output, `-v`
+  prints the exact prompt. Tested by `tests/test_cli_cognition.py`.
 
 ### Layer 4 — TaskQueue + Engine
 
@@ -310,7 +311,7 @@ and `tests/test_self_triage.py`.
 ### Grounded cognition
 
 Every host-side cognition caller that reasons about the target repository —
-planner (per-tick and `plan_goal`), evaluator, decomposer, firming, discovery
+planner (per-tick and the program adapter `plan_program`), evaluator, decomposer, firming, discovery
 research, and the pre-PR review gate — is fed a **read-only git snapshot of the
 goal's actual workspace** (`task_git._review_repo_context_sync`: remote, branch,
 HEAD, key-file probes, tracked layout), and its prompt forbids inferring repo

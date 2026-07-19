@@ -7,16 +7,16 @@ the registry's SQLite table (``DEVCLAW_DB``) and the durable goals
 server running and never needs the queue/engine spun up.
 
 One family of subcommands is an EXCEPTION to "read-mostly against the stores":
-``cognition plan|decompose`` is a **no-side-effects planner dry-run**. It makes
-exactly ONE real cognition call (the same OAuth ``claude --print`` path the
-heartbeat uses, via :func:`devclaw.planner.call_claude`) to show how a big goal
-splits into a task DAG (or a decomposition checklist) WITHOUT dispatching
-anything: zero docker, zero task-queue, zero state mutation. It never touches
-the registry or GoalStore — an operator uses it to inspect planning in
-isolation from execution, at the cost of one model call.
+``cognition decompose|breakdown`` is a **no-side-effects planning dry-run**. It
+makes real cognition calls (the same OAuth ``claude --print`` path the
+heartbeat uses, via :func:`devclaw.planner.call_claude`) to show how a goal
+decomposes into a milestone checklist — the ONE planning spine both durable
+goals and programs ride (ADR 0003) — WITHOUT dispatching anything: zero
+docker, zero task-queue, zero state mutation. It never touches the registry or
+GoalStore — an operator uses it to inspect planning in isolation from
+execution, at the cost of the model call(s).
 
 Usage:
-  python -m devclaw.cli cognition plan "<goal>" [--repo DIR] [-v] [--json]
   python -m devclaw.cli cognition decompose "<objective>" --done-when "<text>"
                                             [--repo DIR] [-v] [--json]
   python -m devclaw.cli trace list [--goal G] [--kind K] [--role R] [--since 24h|<iso>]
@@ -448,16 +448,8 @@ def _cmd_schedule_clear(args) -> int:
 #
 # Inspection-only: ONE real cognition call, NO docker / queue / state / heartbeat.
 # The caller factories below are module globals so tests inject a fake claude
-# caller by monkeypatching them — the same seam plan_goal/decompose already
+# caller by monkeypatching them — the same seam decompose already
 # expose via their `claude_caller=` parameters, surfaced at the CLI edge.
-
-
-def _default_planner_caller() -> Callable[[str], Awaitable[str]]:
-    """Production planner-tier caller (opus, role='planner'). Lazy import so a
-    test that patches this never drags the cognition subprocess in."""
-    from .planner import PLANNER_MODEL, claude_with_model
-
-    return claude_with_model(PLANNER_MODEL, role="planner")
 
 
 def _default_decomposer_caller() -> Callable[[str], Awaitable[str]]:
@@ -544,99 +536,6 @@ def _fmt_usage(latency_ms: int, usage: dict) -> str:
     if cost is not None:
         parts.append(f"${cost:.4f}")
     return "   ".join(parts)
-
-
-def _dependency_levels(tasks: list) -> list[list]:
-    """Bucket topo-ordered PlannedTasks by dependency depth so the render shows
-    which tasks run in parallel (same level) vs sequentially (later level).
-    depth(t) = 0 if no deps, else 1 + max(depth(dep))."""
-    by_key = {t.key: t for t in tasks}
-    depth: dict[str, int] = {}
-
-    def _depth(k: str) -> int:
-        if k in depth:
-            return depth[k]
-        t = by_key[k]
-        depth[k] = 0 if not t.depends_on_keys else 1 + max(_depth(d) for d in t.depends_on_keys)
-        return depth[k]
-
-    for t in tasks:
-        _depth(t.key)
-    if not tasks:
-        return []
-    groups: list[list] = [[] for _ in range(max(depth.values()) + 1)]
-    for t in tasks:  # tasks arrive topo-ordered → each group stays deterministic
-        groups[depth[t.key]].append(t)
-    return groups
-
-
-def _render_plan_dag(tasks: list) -> list[str]:
-    lines: list[str] = []
-    groups = _dependency_levels(tasks)
-    for i, group in enumerate(groups):
-        if not group:
-            continue
-        parallel = " (parallel)" if len(group) > 1 else ""
-        if i == 0:
-            lines.append(f"level {i} — no dependencies{parallel}:")
-        else:
-            lines.append(f"level {i} — after level {i - 1}{parallel}:")
-        for t in group:
-            dep = f"  ← depends_on: {', '.join(t.depends_on_keys)}" if t.depends_on_keys else ""
-            ms = f"  · milestone: {t.milestone}" if t.milestone else ""
-            lines.append(f"  ● {t.key}  [{t.kind}]{dep}{ms}")
-            # The task's goal brief already carries `Acceptance criteria:` /
-            # `Constraints:` blocks (planner prompt, #252) — render it verbatim.
-            for gl in t.goal.splitlines():
-                lines.append(f"      {gl}".rstrip() if gl.strip() else "")
-            lines.append("")
-    return lines
-
-
-def _cmd_cognition_plan(args) -> int:
-    """Dry-run the DAG planner: ONE real cognition call → a rendered task DAG.
-    No docker, no queue, no state — planning in isolation from execution."""
-    from .planner import PlannerError, build_planner_prompt, extract_json, validate_plan
-
-    caller = _default_planner_caller()
-    workspace_dir = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else os.getcwd()
-
-    async def _run() -> tuple[str, list, int, dict, int]:
-        repo_context = await _grounded_context(args.repo)
-        prompt = build_planner_prompt(args.goal, workspace_dir, repo_context)
-        raw, latency_ms, usage, ncalls = await _traced(caller(prompt))
-        tasks = validate_plan(json.loads(extract_json(raw)))
-        return prompt, tasks, latency_ms, usage, ncalls
-
-    try:
-        prompt, tasks, latency_ms, usage, ncalls = asyncio.run(_run())
-    except PlannerError as exc:
-        print(f"planner failed: {exc}", file=sys.stderr)
-        return 1
-
-    if args.json:
-        print(json.dumps(
-            [
-                {"key": t.key, "goal": t.goal, "kind": t.kind,
-                 "depends_on": list(t.depends_on_keys), "milestone": t.milestone}
-                for t in tasks
-            ],
-            indent=2,
-        ))
-        return 0
-
-    if args.show_prompt:
-        print("=== PROMPT ===")
-        print(prompt)
-        print("=== END PROMPT ===\n")
-    print(f"Goal: {args.goal}")
-    print(f"Repo: {args.repo or '(none — ungrounded plan)'}")
-    print(f"Plan: {len(tasks)} task(s)   {_fmt_usage(latency_ms, usage)}   "
-          f"cognition_calls={ncalls}")
-    print()
-    for line in _render_plan_dag(tasks):
-        print(line)
-    return 0
 
 
 def _render_checklist(checklist) -> list[str]:
@@ -888,21 +787,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_cog = sub.add_parser(
         "cognition",
-        help="dry-run the planner/decomposer — ONE cognition call, no docker/queue/state",
+        help="dry-run the decomposer/spine — cognition only, no docker/queue/state",
     )
     cog_sub = p_cog.add_subparsers(dest="cmd", required=True)
-
-    c_plan = cog_sub.add_parser(
-        "plan",
-        help="split a goal into a task DAG (one planner call) and print it — no execution",
-    )
-    c_plan.add_argument("goal", help="the goal to plan")
-    c_plan.add_argument("--repo", help="workspace dir to ground the plan (REPOSITORY CONTEXT)")
-    c_plan.add_argument("-v", "--show-prompt", action="store_true",
-                        help="also print the exact prompt sent to the model")
-    c_plan.add_argument("--json", action="store_true",
-                        help="print the parsed plan (list of tasks) for scripting")
-    c_plan.set_defaults(func=lambda reg, get, a: _cmd_cognition_plan(a))
 
     c_dec = cog_sub.add_parser(
         "decompose",

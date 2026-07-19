@@ -68,7 +68,7 @@ session quota, not a bill.**
 
 | Var | Default | Runs |
 |---|---|---|
-| `DEVCLAW_MODEL_DEEP` | `opus` | Rare, high-leverage calls: plan_goal, firming, decomposer, world-research. |
+| `DEVCLAW_MODEL_DEEP` | `opus` | Rare, high-leverage calls: firming, decomposer (the one planning spine — goals AND programs), world-research. |
 | `DEVCLAW_MODEL_STANDARD` | `sonnet` | Judgment at volume: goal planner, direction evaluator, scope grill, review gate, trend classification. |
 | `DEVCLAW_MODEL_LIGHT` | `haiku` | Mechanical prose: per-delivery summaries, failure-analysis judge. |
 | `DEVCLAW_EXEC_MODEL` | `claude-sonnet-4-6` | **The in-sandbox coding agent — the token/quota bulk.** Full id, not alias. Set `claude-opus-4-8` to opt a run up to Opus. Empty → ACP server's default. |
