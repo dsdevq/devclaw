@@ -11,6 +11,8 @@ from tick.py.
 
 from __future__ import annotations
 
+import sys
+
 from dataclasses import replace
 from pathlib import Path
 
@@ -327,6 +329,29 @@ async def _resolve_done_gate(
             goal_id, Event.ACHIEVE, replace(base, phase="done", next=ev.rationale[:200]),
             expect=status, consume_steering=consume_steering,
         )
+        # Close-out artifact: RUN_SUMMARY.md, a projection of the goal's own
+        # rows (delivery traces + cognition totals + phase history + checklist)
+        # rendered once, AFTER the ACHIEVE transition committed — a rolled-back
+        # close can't leave a summary behind. Best-effort end to end: a summary
+        # hiccup logs and the verified close proceeds untouched (same
+        # never-undo-a-close stance as the deploy below). Zero LLM calls.
+        summary_line = ""
+        try:
+            from . import run_summary as _run_summary
+
+            md, summary_line = _run_summary.build_run_summary(
+                goal_id,
+                base,
+                store.read_goal_traces(goal_id, kind="delivery"),
+                totals=store.goal_trace_totals(goal_id),
+                checklist=store.read_checklist(goal_id),
+                objective=goal.objective,
+            )
+            store.write_run_summary_view(goal_id, md)
+            store.append_log(goal_id, "run summary written → RUN_SUMMARY.md")
+        except Exception as exc:  # noqa: BLE001 — observability, not correctness
+            summary_line = ""
+            sys.stderr.write(f"goal-tick: run-summary render failed [{goal_id}]: {exc}\n")
         # Handoff: a completed goal should be a thing the owner can OPEN, not just a
         # closed ticket. Best-effort deploy the built app to a durable Tailscale URL.
         # NEVER let a deploy hiccup undo a verified-complete goal — the goal IS done.
@@ -340,7 +365,8 @@ async def _resolve_done_gate(
             else "goal complete (artifact-only close — no repo review ran; "
                  "verify_done is off for this project)"
         )
-        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] {label} — {ev.rationale[:200]}{live}", summarize=summarize)
+        summary_suffix = f"\n{summary_line}" if summary_line else ""
+        await _notify(notifier, NotifyLevel.OWNER, f"✅ [{goal_id}] {label} — {ev.rationale[:200]}{live}{summary_suffix}", summarize=summarize)
         return Outcome.DONE
     if ev.verdict in ("stalled", "needs_human"):
         q = ev.question or ev.rationale or "done-gate flagged a problem"
