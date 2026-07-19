@@ -7,17 +7,20 @@ into delivered work). devclaw remains the concrete product (the MCP server, the
 OpenHands engine, the GitHub delivery); loom is the part with no opinion about
 *which* engine or product uses it.
 
-What lives here today (physically): the pure, self-contained utilities —
-:mod:`~devclaw.loom.limits` (the usage-limit/rate-limit failure classifier) and
-:mod:`~devclaw.loom.test_integrity` (the gate's deleted/weakened-test guard).
-What is re-exported here (the curated public surface, pending a physical move as
-the coupled cores are proven through a second consumer): the goal domain types
-and the durable on-disk store. Old import paths (``devclaw.limits`` etc.) keep
-working via thin shims, so this extraction is reversible and non-breaking.
+What lives here (physically, all of it pure stdlib): :mod:`~devclaw.loom.limits`
+(the usage-limit/rate-limit failure classifier), :mod:`~devclaw.loom.test_integrity`
+(the gate's deleted/weakened-test guard), and :mod:`~devclaw.loom.trace` (the
+run-trace capture). Old import paths (``devclaw.limits`` etc.) keep working via
+thin shims, so this extraction is reversible and non-breaking.
 
-Import the core from one place::
+loom is a LEAF by contract (pinned by ``tests/test_llm_call_leaf.py``): it
+imports nothing from the rest of devclaw. The goal domain types + store used to
+be re-exported here as a "curated surface", which made importing ``loom.trace``
+execute this facade and drag ``goal`` + ``state_store`` behind every consumer —
+the exact cycle the extraction seam exists to prevent. Import those from
+``devclaw.goal`` directly; import the core from one place::
 
-    from devclaw.loom import classify_failure, scan_diff, Goal, GoalStore
+    from devclaw.loom import classify_failure, scan_diff
 """
 
 from __future__ import annotations
@@ -32,18 +35,6 @@ from .limits import (
 )
 from .test_integrity import IntegrityReport, scan_diff
 
-# --- re-exported into loom's surface (still physically in devclaw for now) -----
-from ..goal.models import (
-    Action,
-    EvalResult,
-    Goal,
-    GoalStatus,
-    InFlight,
-    PlanResult,
-    PollResult,
-)
-from ..goal.store import GoalStore, parse_duration
-
 __all__ = [
     # failure classification
     "classify_failure",
@@ -54,15 +45,4 @@ __all__ = [
     # test-integrity guard
     "scan_diff",
     "IntegrityReport",
-    # goal domain
-    "Goal",
-    "GoalStatus",
-    "Action",
-    "PlanResult",
-    "EvalResult",
-    "InFlight",
-    "PollResult",
-    # durable store
-    "GoalStore",
-    "parse_duration",
 ]

@@ -34,8 +34,8 @@ spawn containers itself — it goes through the engine).
 ## Load-bearing invariants — DO NOT VIOLATE
 
 - **OAuth only.** `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are **actively stripped**
-  at the planner (`devclaw/planner.py`), host engine (`devclaw/engine/host.py`), and
-  sandbox (`devclaw/engine/sandcastle.py`, `openhands-runner/runner.py`) — a stray key
+  at the LLM-call primitive (`devclaw/llm_call.py`), host engine (`devclaw/engine/host.py`),
+  and sandbox (`devclaw/engine/sandcastle.py`, `openhands-runner/runner.py`) — a stray key
   must never silently switch autonomous runs onto metered billing.
 - **Model-agnostic worker layer.** Skills are **plain markdown** (no model-specific
   frontmatter, no native `Skill(...)` calls); hooks are **bash `.sh` files** invoked
