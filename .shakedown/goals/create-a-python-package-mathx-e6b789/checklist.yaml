@@ -1,0 +1,122 @@
+checklist:
+- id: pyproject-toml
+  requirement: Add a minimal pyproject.toml declaring the mathx package (name, version,
+    build backend) so it is installable/importable in the standard way.
+  evidence_target: pyproject.toml — [project] name = "mathx", [build-system] requires/build-backend
+  addresses_files:
+  - pyproject.toml
+  depends_on: []
+  status: done
+  evidence: settled (no PR or gate)
+  effort_minutes: 10
+  model_tier: haiku
+  note: Use setuptools or hatchling as build backend with a simple package-dir mapping
+    to mathx/; no dependencies needed.
+- id: add-module
+  requirement: Create mathx/add.py containing an add(a, b) function that returns the
+    sum of its two arguments.
+  evidence_target: mathx/add.py — def add(a, b)
+  addresses_files:
+  - mathx/add.py
+  depends_on: []
+  status: blocked
+  evidence: 'circuit breaker: 3 straight failed attempts — parked for a human decision
+    (steer with a different approach, fix by hand, or re-scope the item)'
+  effort_minutes: 10
+  model_tier: haiku
+  attempts: 3
+  failure_log:
+  - 'attempt 1: settled failed · …ates were rejected because the tip of your current
+    branch is behind hint: its remote counterpart. If you want to integrate the remote
+    changes, hint: use ''git pull'' before pushing again. hint: See the ''Note about
+    fast-forwards'' in ''git push --help'' for details.'
+  - 'attempt 2: settled failed · …nclude that too. The diff under review must contain
+    the code that makes the AGENTS.md verify command pass, not just the doc update
+    referencing it. Address every blocker/major issue above (do not weaken tests to
+    do it), then re-verify. (failed after 2 attempts)'
+  - 'attempt 3: settled failed · …b): return a + b` in the diff under review, and
+    verify the git commit''s full diff (not just the AGENTS.md hunk) is what gets
+    submitted for review. Address every blocker/major issue above (do not weaken tests
+    to do it), then re-verify. (failed after 2 attempts)'
+- id: mul-module
+  requirement: Create mathx/mul.py containing a mul(a, b) function that returns the
+    product of its two arguments.
+  evidence_target: mathx/mul.py — def mul(a, b)
+  addresses_files:
+  - mathx/mul.py
+  depends_on: []
+  status: done
+  evidence: settled (no PR or gate)
+  effort_minutes: 10
+  model_tier: haiku
+- id: package-init
+  requirement: Create mathx/__init__.py that imports and re-exports add from mathx.add
+    and mul from mathx.mul so the package has a clear public surface.
+  evidence_target: mathx/__init__.py — from mathx.add import add; from mathx.mul import
+    mul
+  addresses_files:
+  - mathx/__init__.py
+  depends_on:
+  - add-module
+  - mul-module
+  status: blocked
+  evidence: 'circuit breaker: 3 straight failed attempts — parked for a human decision
+    (steer with a different approach, fix by hand, or re-scope the item)'
+  effort_minutes: 10
+  model_tier: haiku
+  attempts: 3
+  failure_log:
+  - 'attempt 1: settled pending'
+  - 'attempt 2: settled pending'
+  - 'attempt 3: settled pending'
+- id: tests-mathx
+  requirement: Create tests/test_mathx.py that imports both add and mul and asserts
+    correct behavior on representative inputs (including at least one negative-number
+    case).
+  evidence_target: tests/test_mathx.py — test_add, test_mul functions/asserts importing
+    mathx.add.add and mathx.mul.mul
+  addresses_files:
+  - tests/test_mathx.py
+  depends_on:
+  - add-module
+  - mul-module
+  - package-init
+  status: blocked
+  evidence: 'circuit breaker: 3 straight failed attempts — parked for a human decision
+    (steer with a different approach, fix by hand, or re-scope the item)'
+  effort_minutes: 15
+  model_tier: haiku
+  attempts: 3
+  failure_log:
+  - 'attempt 1: settled pending'
+  - 'attempt 2: settled pending'
+  - 'attempt 3: settled pending'
+- id: agents-md
+  requirement: Create AGENTS.md documenting the mathx package layout (mathx/add.py,
+    mathx/mul.py, mathx/__init__.py, tests/test_mathx.py) and the command to run the
+    tests.
+  evidence_target: AGENTS.md — package layout section + test-run instructions (e.g.
+    pytest)
+  addresses_files:
+  - AGENTS.md
+  depends_on:
+  - add-module
+  - mul-module
+  - package-init
+  - tests-mathx
+  - pyproject-toml
+  status: blocked
+  evidence: 'circuit breaker: 3 straight failed attempts — parked for a human decision
+    (steer with a different approach, fix by hand, or re-scope the item)'
+  effort_minutes: 10
+  model_tier: haiku
+  attempts: 3
+  failure_log:
+  - 'attempt 1: settled pending'
+  - 'attempt 2: settled pending'
+  - 'attempt 3: settled pending'
+open_questions: []
+notes:
+- done_when was unspecified; decomposed directly from the objective's four clauses
+  (add() module, mul() module, package structure, tests/ importing both), matching
+  the discovery brief's 'what good looks like' section 1:1.
