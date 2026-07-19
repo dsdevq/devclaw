@@ -299,7 +299,9 @@ async def test_rerun_after_pause_gets_interruption_brief(store, monkeypatch):
     assert store.get_task(tid).status == "done"
     assert goals[0] == "build the thing"                  # pause_count 0 → pristine goal
     assert "[Resuming after a usage-limit interruption (pause 1)]" in goals[1]
-    assert "CONTINUE from where it left off" in goals[1]
+    # The brief must NOT promise the partial progress is there — a failed retry's
+    # rewind to the persisted base may have wiped it; the agent is told to check.
+    assert "CONTINUE from whatever state is actually there" in goals[1]
     assert "build the thing" in goals[1]                  # the original goal still follows
 
 
@@ -339,3 +341,85 @@ async def test_snapshot_crash_never_blocks_the_pause(store, tmp_path, monkeypatc
     t = store.get_task(tid)
     assert t.status == "pending" and t.pause_count == 1   # pause path completed
     assert store.global_pause()[0] > _now_ms()            # pause still set
+
+
+# ---- gate baseline survives the pause-requeue -------------------------------
+# The pause path lands a wip snapshot COMMIT on the branch, so by the resumed
+# run HEAD is the half-done work itself. The baseline the gates diff against is
+# captured once per TASK and persisted on the row — re-capturing it at resume
+# made the wip commit the base, and review rejected fully-present work as "no
+# deliverable in the diff" (closeloop-bench b6d53bbd, 2026-07-19).
+
+
+async def test_resumed_task_gate_baseline_is_original_base_not_wip_snapshot(
+    store, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    repo = _git_repo(tmp_path)
+    base_sha = _git_out(repo, "rev-parse", "HEAD").strip()
+
+    diff_bases: list = []
+
+    async def recording_diff(host_dir, base=""):
+        diff_bases.append(base)
+        return ""
+
+    monkeypatch.setattr(task_queue, "_git_diff", recording_diff)
+
+    runs: list = []
+
+    async def rl_then_ok(req: EngineRequest):
+        runs.append(req.goal)
+        if len(runs) == 1:
+            # half-way through when the limit hits — dirty tree at requeue time
+            with open(os.path.join(req.workspace_dir, "half_done.py"), "w") as fh:
+                fh.write("partial = True\n")
+            return {"status": "error", "error": "API Error: 429 Too Many Requests"}
+        return {"status": "ok", "workspaceDir": req.workspace_dir,
+                "verify": {"ran": True, "cmd": "true", "passed": True,
+                           "exit_code": 0, "timed_out": False, "output": ""}}
+
+    q = TaskQueue(store, runner=rl_then_ok)
+    tid = q.submit(kind="implement_feature", workspace_dir=str(repo), goal="g",
+                   verify_cmd="true")
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "pending"                       # requeued by the pause
+    assert t.pre_run_sha == base_sha                   # baseline persisted at first run
+    wip_head = _git_out(repo, "rev-parse", "HEAD").strip()
+    assert wip_head != base_sha                        # wip snapshot moved HEAD
+
+    store.set_global_pause(_now_ms() - 1000, "expired")  # window elapses → re-run
+    q._pump()
+    await q.drain()
+
+    assert store.get_task(tid).status == "done"
+    # the gates judged the resumed run against the ORIGINAL base, not the wip tip
+    assert diff_bases and all(b == base_sha for b in diff_bases)
+
+
+async def test_stale_persisted_baseline_degrades_to_fresh_capture(
+    store, tmp_path, monkeypatch
+):
+    # Best-effort contract: a persisted sha that no longer resolves (workspace
+    # re-cloned meanwhile) must not wedge the run — fall back to a fresh
+    # capture and overwrite the stale row value.
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 0)
+    repo = _git_repo(tmp_path)
+    head_sha = _git_out(repo, "rev-parse", "HEAD").strip()
+
+    async def ok(req: EngineRequest):
+        return {"status": "ok", "workspaceDir": req.workspace_dir,
+                "verify": {"ran": True, "cmd": "true", "passed": True,
+                           "exit_code": 0, "timed_out": False, "output": ""}}
+
+    q = TaskQueue(store, runner=ok)
+    tid = q.submit(kind="implement_feature", workspace_dir=str(repo), goal="g",
+                   verify_cmd="true")
+    store.set_task_pre_run_sha(tid, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "done"                          # never wedged
+    assert t.pre_run_sha == head_sha                   # stale value overwritten

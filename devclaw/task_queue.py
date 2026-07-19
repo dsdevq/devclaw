@@ -54,6 +54,7 @@ from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 # here because tests import them from ``task_queue`` and patch ``_wip_snapshot_sync``
 # on this namespace; the async wrappers below look them up as module globals.
 from .task_git import (  # noqa: F401
+    _git_commit_exists_sync,
     _git_diff_sync,
     _git_head_sync,
     _git_reset_clean_sync,
@@ -213,6 +214,11 @@ def _attach_diff_stats(result: dict, diff: str) -> None:
 async def _git_head(host_dir: str) -> str:
     """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
     return await asyncio.to_thread(_git_head_sync, host_dir)
+
+
+async def _git_commit_exists(host_dir: str, sha: str) -> bool:
+    """Async wrapper — same thread-offload rationale as :func:`_git_diff`."""
+    return await asyncio.to_thread(_git_commit_exists_sync, host_dir, sha)
 
 
 async def _git_reset_clean(host_dir: str, sha: str) -> bool:
@@ -1056,11 +1062,12 @@ class TaskQueue(_NotifyMixin):
         pause_count = row.pause_count if row else 0
         resume_brief = "" if pause_count <= 0 else (
             f"[Resuming after a usage-limit interruption (pause {pause_count})] "
-            "A previous attempt was cut off mid-work. The workspace already "
-            "contains its partial progress — possibly including a "
-            "'wip(devclaw): interrupted…' commit. Inspect `git status` and "
-            "`git log` first and CONTINUE from where it left off; do not "
-            "restart or redo completed work.\n\n"
+            "A previous attempt was cut off mid-work. The workspace may still "
+            "contain its partial progress — possibly as a "
+            "'wip(devclaw): interrupted…' commit — but a failed retry may have "
+            "reset the workspace to the clean base since, wiping it. Inspect "
+            "`git status` and `git log` first and CONTINUE from whatever state "
+            "is actually there; do not redo work that is already present.\n\n"
         )
 
         def on_event(event: EngineEvent) -> None:
@@ -1082,7 +1089,25 @@ class TaskQueue(_NotifyMixin):
         # to see the change at all. Captured ONCE before the attempt loop, not
         # per attempt: delivery ships everything ahead of this ref, so a retry's
         # gates must judge the same cumulative span it will ship.
-        pre_run_sha = await _git_head(workspace_dir)
+        #
+        # And once per TASK, not per run: a usage-limit pause commits the dirty
+        # tree as a wip snapshot and requeues, so by the resumed run HEAD *is*
+        # the half-done work. Re-capturing here made the wip commit the
+        # baseline — the gates then judged only the post-resume leftovers and
+        # rejected fully-present work as "no deliverable in the diff"
+        # (closeloop-bench b6d53bbd, 2026-07-19). The first run persists the
+        # captured base on the task row; every later re-run of the same task
+        # (pause-resume, crash-recovery requeue) re-uses it, degrading to a
+        # fresh capture when the persisted sha no longer resolves (e.g. the
+        # workspace was re-cloned meanwhile).
+        pre_run_sha = ""
+        stored_base = row.pre_run_sha if row else None
+        if stored_base and await _git_commit_exists(workspace_dir, stored_base):
+            pre_run_sha = stored_base
+        if not pre_run_sha:
+            pre_run_sha = await _git_head(workspace_dir)
+            if pre_run_sha and row:
+                self._store.set_task_pre_run_sha(task_id, pre_run_sha)
 
         # Retry-on-fail completes the reliability triad (verify + RETRY + human): a
         # gate-fail or a transient agent error is re-run, each time with the failure
