@@ -64,7 +64,7 @@ def build_reachability_prompt(*, diff: str, repo_context: Optional[str] = None) 
     """Assemble the reachability prompt: the base contract + a grounded
     REPOSITORY CONTEXT block (the #227 shape — repo facts are the ONLY basis, and
     the contract already says 'absent ⇒ unknown') + the diff. Pure."""
-    from ..prompts import load_prompt
+    from .prompts import load_prompt
 
     parts = [load_prompt("browser-reachability")]
     if repo_context and repo_context.strip():

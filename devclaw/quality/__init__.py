@@ -225,7 +225,7 @@ def build_review_prompt(
     repo_context: Optional[str] = None,
     lens: Optional[str] = None,
 ) -> str:
-    from ..prompts import load_prompt
+    from .prompts import load_prompt
 
     parts = [load_prompt("review-gate")]
     # A lens only ADDS a focus block after the base contract — the grounding

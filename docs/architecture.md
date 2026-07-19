@@ -440,7 +440,7 @@ devclaw/
 ├── loom/            engine-agnostic substrate — limits, test_integrity, trace
 ├── state_store/     StateStore package (rows · control · core) — the append-only log
 ├── task_queue.py + task_{git,notify}.py    layer 4 — dispatch, concurrency, settle
-└── prompts/         every system prompt as a .md file (load_prompt(slug))
+└── prompts/         system prompts as .md files (load_prompt(slug)); gate prompts live in quality/prompts/
 openhands-runner/runner.py    layer 5 — the in-sandbox harness
 ```
 
