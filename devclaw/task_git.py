@@ -145,6 +145,32 @@ def _git_head_sync(host_dir: str) -> str:
     return p.stdout.strip() if p.returncode == 0 else ""
 
 
+def _git_reset_clean_sync(host_dir: str, sha: str) -> bool:
+    """Hard-reset the worktree to ``sha`` and drop every untracked file — the
+    clean per-item base a retry attempt re-runs from (#1 retry isolation).
+    Best-effort like the other helpers here: returns True only when BOTH the
+    reset and the clean succeed, False on any hiccup (empty ``sha``, an
+    OSError, a non-zero git) so the caller can proceed on the drifted tree
+    with a logged miss rather than wedging the retry. Local-only by
+    construction — the queue pushes a goal branch only AFTER the attempt loop
+    and only on a gate pass, so rewinding local commits here never touches
+    origin."""
+    if not sha:
+        return False
+    try:
+        reset = subprocess.run(
+            ["git", "-C", host_dir, "reset", "--hard", sha],
+            capture_output=True, text=True, timeout=30,
+        )
+        clean = subprocess.run(
+            ["git", "-C", host_dir, "clean", "-fdx"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return reset.returncode == 0 and clean.returncode == 0
+
+
 def _ls_remote_ok_sync(repo_url: str) -> bool:
     """Is ``repo_url`` reachable right now? One blocking ``git ls-remote``
     (refs listing only — no clone, no checkout), the cheapest end-to-end
