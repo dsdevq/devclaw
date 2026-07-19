@@ -214,10 +214,25 @@ and `tests/test_self_triage.py`.
   `TaskQueue` + `Engine`); calling `claude` directly (must go through a
   cognition caller); mutating `goal_status`'s phase/lifecycle/in_flight outside
   `GoalStore.transition()` (the CAS'd choke point).
+- **The execution dial (ADR 0003 stage 2):** a goal carries `mode:
+  long_lived | one_shot` in `goal.yaml`. `long_lived` (default) is the
+  per-tick loop described throughout this doc — the planner picks one ready
+  checklist item per heartbeat. `one_shot` runs ZERO per-tick planner
+  cognition: the decomposer's checklist IS the plan, the executing phase
+  dispatches every pending item as ONE already-planned program
+  (`Action.planned` → `start_planned_program`, no re-plan in the queue),
+  per-item verdicts settle back via each child task row's `plan_key`, failed
+  items re-dispatch as a smaller remainder program (bounded by the per-item
+  circuit breaker + dispatch cap), and a drained checklist proposes done
+  MECHANICALLY — the close is still gated on the grounded done-gate review +
+  evaluator, and a not-achieved verdict parks the goal for the owner
+  (`needs_answer`) instead of looping reviews. Same intake (grill → firm →
+  decompose), same gates, one dial.
 - **Tested by:** `tests/test_goal_*.py` (e.g. `test_goal_tick.py`,
   `test_goal_engine.py`, `test_goal_reconcile.py`), `tests/test_firming_handler.py`,
   `tests/test_goal_tick_firming.py` — single ticks with stubbed cognition +
-  stubbed engine. The SQLite substrate: `tests/test_goal_state.py`,
+  stubbed engine; `tests/test_goal_one_shot.py` (the one-shot dial's
+  zero-planner-calls contract). The SQLite substrate: `tests/test_goal_state.py`,
   `tests/test_goal_store.py`, `tests/test_goal_store_checklist.py`,
   `tests/test_goal_transitions.py` (the `LEGAL` table + CAS in isolation).
 

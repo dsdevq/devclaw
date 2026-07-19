@@ -66,6 +66,23 @@ class InProcessEngine:
         queue via ``kick()`` AFTER its transaction commits."""
         ws = goal.workspace_dir
         nu = notify_url or None
+        if action.tool == "start_program" and action.planned:
+            # ALREADY-PLANNED program (one-shot mode, ADR 0003 stage 2): the
+            # goal layer decomposed once and its checklist IS the plan — submit
+            # it verbatim instead of letting the queue re-run the decomposer on
+            # the goal string (a second cognition call planning the same work,
+            # with no guarantee of the same items). Same inheritance contract
+            # as the plan-in-queue branch below (open_pr / verify_cmd /
+            # parent_goal_id); pump=False for the same atomic-dispatch reason.
+            program_id = self._queue.start_planned_program(
+                goal=action.goal, workspace_dir=ws,
+                planned=list(action.planned), notify_url=nu,
+                open_pr=action.open_pr,
+                verify_cmd=action.verify_cmd or goal.verify_cmd,
+                parent_goal_id=goal.id,
+                pump=False,
+            )
+            return InFlight("devclaw", "start_program", program_id, "program", action.goal)
         if action.tool == "start_program":
             # Program-child tasks inherit ``open_pr`` and ``verify_cmd`` — the
             # standing-goal / reviewable-slice contract. Under a mission goal
@@ -243,17 +260,32 @@ class InProcessEngine:
         tasks = self._store.list_program_tasks(program_id)
         pr_urls = [t.pr_url for t in tasks if t.pr_url]
         detail = ""
+        tasks_out: "list[dict] | None" = None
         if terminal:
             parts = [f"program {p.status}" + (f" — {p.error}" if p.error else "")]
             for t in tasks:
                 parts.append(f"- [{t.status}] {t.goal[:120]}" + (f"  PR {t.pr_url}" if t.pr_url else ""))
             detail = "\n".join(parts)[:4000]
+            # Per-child breakdown (one-shot mode, ADR 0003 stage 2): the goal
+            # settle path grades each checklist item by ITS OWN child task —
+            # plan_key is the join (it IS the item id on the one-shot path).
+            tasks_out = [
+                {
+                    "plan_key": t.plan_key,
+                    "status": t.status,
+                    "gate_passed": _gate_passed(t.result_json),
+                    "pr_url": t.pr_url,
+                    "error": t.error,
+                }
+                for t in tasks
+            ]
         return PollResult(
             terminal=terminal,
             status=p.status,
             detail=detail,
             pr_url=("; ".join(pr_urls) if pr_urls else None),
             gate_passed=None,  # a program aggregates many gates — no single verdict
+            tasks=tasks_out,
         )
 
 

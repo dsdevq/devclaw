@@ -25,6 +25,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Callable
 
+from . import checklist as _checklist
 from . import evaluator as _evaluator
 from . import merge as _merge
 from . import planner as _planner
@@ -36,14 +37,14 @@ from . import triage as _triage
 # what makes the deploy stub visible to the moved _auto_deploy.
 from ..delivery import deploy as _deploy  # noqa: F401 (re-export/monkeypatch anchor)
 from .engine import GoalEngine
-from .models import Goal, GoalStatus
+from .models import Action, Checklist as _ChecklistModel, Goal, GoalStatus
 from .notify import Notifier
 from .planner import ClaudeCaller
 from .store import GoalDocCorrupt, GoalStore
 from .transitions import Event, IllegalTransition, TransitionConflict
 from ..loom import trace as _trace
 from ..loom.limits import classify_failure, pause_seconds
-from ..planner import PlannerError
+from ..planner import PlannerError, planned_from_checklist as _planned_from_checklist
 from ..state_store import _now_ms
 from ..engine.workspace import prepare_workspace
 
@@ -447,6 +448,155 @@ async def _run_mid_flight_eval(
 # so the EXECUTING handler can chain on the same tick.
 
 
+async def _handle_one_shot_executing(
+    goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
+) -> Outcome:
+    """The one-shot executing path (ADR 0003 stage 2) — ZERO per-tick planner
+    cognition, ever. The checklist the decomposer emitted IS the plan:
+
+      pending items → dispatch them ALL as ONE planned program (the queue runs
+      the DAG in parallel; per-item verdicts come back via plan_key);
+      checklist drained → propose done MECHANICALLY (the proposal is free; the
+      close is still gated on the grounded done-gate review + evaluator);
+      blocked items / blocked goal → idle at zero cost (the per-item circuit
+      breaker already parked the goal with an owner ping).
+
+    A failed child returns its items to the pick-pool with the failure logged,
+    so the NEXT tick re-dispatches just the remainder as a smaller program —
+    bounded by the per-item circuit breaker (ITEM_MAX_ATTEMPTS) and the
+    dispatch cap, same brakes as the per-tick loop. Steering is deliberately
+    NOT consumed here: there is no planner to apply it to — it stays unread in
+    the inbox for the owner-visible record (stage 3 gives it a checkpoint)."""
+    store = ctx.store
+    if status.phase == "blocked":
+        # Only resume_goal/steer_goal (or a mechanical heal upstream) unblocks
+        # a one-shot goal — never the timer. Zero cost, same as the long-lived
+        # blocked steady-state.
+        store.update_status_fields(goal_id, last_tick_at=store.now_iso())
+        return Outcome.IDLE
+    checklist = store.read_checklist(goal_id)
+    if checklist is None or not checklist.items:
+        # A one-shot goal with no plan can never progress — the per-tick loop's
+        # backlog fallback doesn't exist here. Fail loud, not idle-forever.
+        reason = (
+            "one-shot goal has no checklist — decomposition failed or never "
+            "ran; cancel and re-file (or steer with a concrete plan)"
+        )
+        store.append_log(goal_id, f"one-shot: {reason}")
+        store.transition(
+            goal_id, Event.BLOCK,
+            replace(status, phase="blocked", blocked_on=reason, blocked_kind="bug", next=""),
+            expect=status,
+        )
+        await _notify(
+            ctx.notifier, NotifyLevel.OWNER, f"🟥 [{goal_id}] {reason}",
+            summarize=ctx.summary_caller,
+        )
+        return Outcome.BLOCKED
+    # Crash artifact: items flagged in_flight while the goal holds no ref (the
+    # ref settled or was lost; EXECUTING classification proves in_flight is
+    # None). Return them to the pick-pool — mechanical, zero LLM.
+    stale = [i.id for i in checklist.items if i.status == "in_flight"]
+    if stale:
+        for iid in stale:
+            checklist = _checklist.update_item(checklist, iid, status="not_started")
+        store.write_checklist(goal_id, checklist)
+        store.append_log(
+            goal_id,
+            f"one-shot: reset stale in-flight item(s) {', '.join(stale)} — no live dispatch holds them",
+        )
+    pending = [i for i in checklist.items if i.status == "not_started"]
+    # NEVER dispatch work whose prerequisite is known-failed (same contract as
+    # checklist.ready_items): exclude items depending — transitively — on a
+    # breaker-BLOCKED item. Reachable through the normal recovery flow: the
+    # breaker parks the goal, resume_goal re-attempts WITHOUT resetting the
+    # tripped item, and without this the remainder program would burn attempts
+    # on dependents of a prerequisite that never shipped.
+    blocked_ids = {i.id for i in checklist.items if i.status == "blocked"}
+    if blocked_ids:
+        excluded = set(blocked_ids)
+        changed = True
+        while changed:
+            changed = False
+            for i in pending:
+                if i.id not in excluded and any(d in excluded for d in i.depends_on):
+                    excluded.add(i.id)
+                    changed = True
+        skipped = [i.id for i in pending if i.id in excluded]
+        if skipped:
+            store.append_log(
+                goal_id,
+                "one-shot: holding item(s) "
+                f"{', '.join(skipped)} — their dependency chain includes a "
+                f"circuit-breaker-blocked item ({', '.join(sorted(blocked_ids))})",
+            )
+        pending = [i for i in pending if i.id not in excluded]
+    if pending:
+        ids = {i.id for i in pending}
+        # Deps on already-done items are satisfied; drop them so order_tasks
+        # doesn't see dangling refs (blocked-dep items were excluded above).
+        filtered = [
+            replace(i, depends_on=[d for d in i.depends_on if d in ids])
+            for i in pending
+        ]
+        try:
+            planned = _planned_from_checklist(_ChecklistModel(items=filtered))
+        except PlannerError as exc:
+            # The MAX_PROGRAM_TASKS brake (or a cycle) — mechanical, so it
+            # would reproduce identically every heartbeat: an unhandled raise
+            # here error-loops the tick forever with one log line and no
+            # owner ping. Block loudly instead; the owner re-scopes.
+            reason = f"one-shot plan rejected: {exc}"
+            store.append_log(goal_id, reason)
+            store.transition(
+                goal_id, Event.BLOCK,
+                replace(status, phase="blocked", blocked_on=reason,
+                        blocked_kind="needs_answer", next=""),
+                expect=status,
+            )
+            await _notify(
+                ctx.notifier, NotifyLevel.OWNER, f"🛑 [{goal_id}] {reason}",
+                summarize=ctx.summary_caller,
+            )
+            return Outcome.BLOCKED
+        action = Action(
+            engine="devclaw",
+            tool="start_program",
+            goal=(
+                f"one-shot batch: {len(pending)} checklist item(s) toward: "
+                f"{goal.objective[:200]}"
+            ),
+            verify_cmd=goal.verify_cmd,
+            open_pr=goal.open_pr,
+            addresses=[i.id for i in pending],
+            planned=planned,
+        )
+        return await _dispatch_action(
+            goal_id, goal, status, action,
+            store=store, engine=ctx.engine, notifier=ctx.notifier,
+            notify_url=ctx.notify_url, prepare_ws=ctx.prepare_ws,
+            summarize=ctx.summary_caller,
+        )
+    if any(i.status == "blocked" for i in checklist.items):
+        # The breaker's own settle path already parked the goal + pinged the
+        # owner; reaching here means a racing unblock — idle, don't re-dispatch.
+        store.update_status_fields(goal_id, last_tick_at=store.now_iso())
+        return Outcome.IDLE
+    # Checklist drained → mechanical done proposal. "Done" stays a PROPOSAL:
+    # the grounded done-gate review + evaluator decide, same as when the
+    # per-tick planner proposes it.
+    store.append_log(goal_id, "one-shot: checklist drained — proposing done")
+    return await _open_done_gate(
+        goal_id, goal, status,
+        store=store, engine=ctx.engine, evaluator_caller=ctx.evaluator_caller,
+        notifier=ctx.notifier, notify_url=ctx.notify_url,
+        prepare_ws=ctx.prepare_ws, verify_done=ctx.verify_done,
+        note="one-shot: checklist drained",
+        summarize=ctx.summary_caller, remote_checker=ctx.remote_checker,
+        autodeploy=ctx.autodeploy,
+    )
+
+
 async def _handle_executing(
     goal_id: str, goal: Goal, status: GoalStatus, finished_detail: str, ctx: TickContext,
 ) -> Outcome:
@@ -463,6 +613,10 @@ async def _handle_executing(
     NULL and is seen next tick, whether or not this tick's own write
     survives its CAS. On the plan-error path below, no transition fires at
     all, so ``rows`` simply stays unconsumed — same net effect."""
+    if goal.mode == "one_shot":
+        # ADR 0003 stage 2: the one-shot dial replaces the per-tick planner
+        # entirely — mechanical dispatch/done-proposal, zero LLM on this path.
+        return await _handle_one_shot_executing(goal_id, goal, status, ctx)
     rows = ctx.store.unread_steering_rows(goal_id)
     steering = "\n".join(line for _, line in rows)
     # unread_steering_rows() may have lazily ingested new inbox.md lines,

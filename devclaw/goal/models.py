@@ -36,6 +36,14 @@ Phase = Literal["idle", "in_flight", "verifying", "blocked", "done", "cancelled"
 Lifecycle = Literal["investigating", "firming", "executing"]
 Decision = Literal["act", "sleep", "blocked", "done"]
 EvalVerdict = Literal["on_track", "off_track", "achieved", "stalled", "needs_human"]
+#: The execution dial (ADR 0003): ``long_lived`` is the per-tick loop (the
+#: planner picks one ready item per heartbeat, steerable mid-flight, and — once
+#: stage 3 lands — re-scopes per iteration). ``one_shot`` plans ONCE and runs
+#: the whole checklist as a single parallel program with ZERO per-tick planner
+#: cognition, then proposes done mechanically when the checklist drains — the
+#: dial is re-evaluation cadence, never a different execution stack ("done" is
+#: still a proposal gated on the grounded done-gate review in both modes).
+GoalMode = Literal["long_lived", "one_shot"]
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,9 @@ class Goal:
     #: unless one of these names appears in the clause/evidence text. Empty
     #: list (the default) means "no stubs allowed — plan real work."
     stub_acceptable: list[str] = field(default_factory=list)
+    #: the execution dial (see :data:`GoalMode`). Defaulted so every existing
+    #: goal.yaml (which predates the field) loads as today's per-tick loop.
+    mode: GoalMode = "long_lived"
 
 
 #: case-insensitive markers by which a ``done_when`` disclaims boundedness —
@@ -237,6 +248,15 @@ class Action:
     #: gate for it. Default False. SAFETY: skips review ONLY — the verify gate +
     #: test-integrity still run (enforced in task_queue._run_and_settle).
     scaffold: bool = False
+    #: ALREADY-PLANNED task DAG (a ``list[devclaw.planner.PlannedTask]``,
+    #: untyped here to keep this module a leaf) for a ``start_program`` action
+    #: whose plan the goal layer computed itself — the one-shot mode dispatch
+    #: (ADR 0003 stage 2): the checklist IS the plan, so the engine submits it
+    #: via ``start_planned_program`` instead of re-running the decomposer
+    #: inside the queue (a second cognition call planning the same work).
+    #: ``None`` (the default, and the only value the per-tick planner LLM can
+    #: produce) keeps the existing plan-in-queue path byte-identical.
+    planned: Optional[list] = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +434,13 @@ class PollResult:
     #: gate-time diff stats the queue captured (files/insertions/deletions),
     #: None when absent — a stats hiccup never blocks a settle
     diff_stats: Optional[dict] = None
+    #: PER-CHILD breakdown for a terminal PROGRAM ref (one-shot mode): each
+    #: entry is ``{"plan_key", "status", "gate_passed", "pr_url", "error"}`` so
+    #: the settle path can grade each checklist item by ITS OWN child task's
+    #: verdict instead of painting every item with the aggregate program
+    #: status (a one-child failure must not mark the succeeded items failed).
+    #: None for task refs, non-terminal polls, and engines that predate it.
+    tasks: Optional[list] = None
 
     @property
     def running(self) -> bool:

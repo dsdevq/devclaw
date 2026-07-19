@@ -141,6 +141,7 @@ def seed_goal(
     repo_url: str | None = "https://example.com/demo.git",
     workspace_dir: str = "/repos/demo",
     done_when: str = "all backlog items merged",
+    mode: str | None = None,
 ) -> None:
     """Write a minimal goal.yaml under goals_dir/<goal_id>/.
 
@@ -160,18 +161,17 @@ def seed_goal(
 
     d = goals_dir / goal_id
     d.mkdir(parents=True, exist_ok=True)
-    (d / "goal.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "objective": "Drive the demo repo to done.",
-                "cadence": cadence,
-                "engine": "devclaw",
-                "workspace_dir": workspace_dir,
-                "repo_url": repo_url,
-                "verify_cmd": "pytest -q",
-                "open_pr": True,
-                "done_when": done_when,
-                "backlog": backlog or ["add a /health endpoint", "add request logging"],
-            }
-        )
-    )
+    doc = {
+        "objective": "Drive the demo repo to done.",
+        "cadence": cadence,
+        "engine": "devclaw",
+        "workspace_dir": workspace_dir,
+        "repo_url": repo_url,
+        "verify_cmd": "pytest -q",
+        "open_pr": True,
+        "done_when": done_when,
+        "backlog": backlog or ["add a /health endpoint", "add request logging"],
+    }
+    if mode is not None:
+        doc["mode"] = mode
+    (d / "goal.yaml").write_text(yaml.safe_dump(doc))

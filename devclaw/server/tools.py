@@ -581,13 +581,19 @@ async def create_goal(
     verify_cmd: Optional[str] = None,
     open_pr: bool = True,
     spec: str = "",
+    mode: str = "long_lived",
 ) -> str:
-    """Register a DURABLE goal that DevClaw drives over time. Unlike start_program
-    (a one-shot DAG that runs to completion), a goal persists: on each heartbeat
-    DevClaw plans the single next action, dispatches it to the engine, records what
-    shipped, and periodically EVALUATES whether the work is actually achieving the
-    objective — only closing the goal when a grounded review confirms done_when is
-    met. Steer it any time with steer_goal; inspect it with get_goal.
+    """Register a goal that DevClaw drives: on each heartbeat it plans, dispatches
+    to the engine, records what shipped, and only closes when a grounded review
+    confirms done_when is met. Steer it any time with steer_goal; inspect it with
+    get_goal.
+
+    mode selects the execution dial (ADR 0003): 'long_lived' (default) is the
+    per-tick loop — plan the single next action each heartbeat, steerable
+    mid-flight. 'one_shot' plans ONCE (grill → firm → decompose) and runs the
+    whole checklist as a single parallel program, then proposes done when it
+    drains — same gates, no per-tick planning. Use one_shot for a
+    fully-specified batch of work; long_lived for a direction driven over time.
 
     goal_id: a short stable slug (the on-disk folder name). objective: the durable
     aim. done_when: the prose completion test the evaluator judges against. backlog:
@@ -598,6 +604,8 @@ async def create_goal(
     finalized spec.md here and the evaluator judges done against it."""
     if not goal_id:
         raise ToolError("create_goal requires goal_id")
+    if mode not in ("long_lived", "one_shot"):
+        raise ToolError("create_goal mode must be 'long_lived' or 'one_shot'")
     # objective + workspace_dir are checked inside admission and surfaced as
     # structured conditions — don't duplicate them here.
     from ..goal.admission import GoalAdmissionRejected
@@ -608,7 +616,7 @@ async def create_goal(
                 goal_id, objective=objective, workspace_dir=workspace_dir,
                 done_when=done_when, backlog=backlog, cadence=cadence,
                 repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
-                spec=spec,
+                spec=spec, mode=mode,
             ),
             indent=2,
         )

@@ -97,3 +97,16 @@ def test_spec_param_is_persisted(svc):
 def test_no_spec_param_writes_nothing(svc):
     _ok(svc, "g-nospec")
     assert svc._goal_store.read_spec("g-nospec") == ""
+
+
+def test_create_goal_rejects_unknown_mode(svc):
+    """ADR 0003 stage 2: the execution dial accepts exactly long_lived |
+    one_shot — a typo'd mode must fail creation loudly, never write a
+    goal.yaml that silently runs the wrong loop."""
+    with pytest.raises(ValueError, match="unknown goal mode"):
+        _ok(svc, "g-mode", mode="oneshot")
+
+
+def test_create_goal_persists_one_shot_mode(svc):
+    _ok(svc, "g-os", mode="one_shot")
+    assert svc._goal_store.load_goal("g-os").mode == "one_shot"

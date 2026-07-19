@@ -287,6 +287,7 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
         done_when: str = "",
         backlog: list[str] | None = None,
         stub_acceptable: list[str] | None = None,
+        mode: str = "long_lived",
     ) -> Goal:
         """Write a new goal.yaml. Raises FileExistsError if the id is taken."""
         if self.exists(goal_id):
@@ -306,6 +307,7 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
                     "done_when": done_when.strip(),
                     "backlog": list(backlog or []),
                     "stub_acceptable": list(stub_acceptable or []),
+                    "mode": mode,
                 },
                 sort_keys=False,
             )
@@ -329,6 +331,9 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
             done_when=str(raw.get("done_when", "")).strip(),
             backlog=[str(x).strip() for x in (raw.get("backlog") or [])],
             stub_acceptable=[str(x).strip() for x in (raw.get("stub_acceptable") or []) if str(x).strip()],
+            # Anything unrecognized (or a legacy file with no field) reads as
+            # long_lived — the conservative default: the per-tick loop.
+            mode=("one_shot" if raw.get("mode") == "one_shot" else "long_lived"),
         )
 
     # ---- helpers -----------------------------------------------------------

@@ -963,6 +963,9 @@ class TaskQueue(_NotifyMixin):
                 # adapter — skips ONLY the adversarial review gate; the verify
                 # gate + test-integrity scan still run (see _run_and_settle).
                 scaffold=p.scaffold,
+                # For a one-shot goal's program the key IS the checklist item
+                # id — the goal settle path's child→item join (ADR 0003 st. 2).
+                plan_key=p.key,
             )
 
     def start_planned_program(
@@ -972,18 +975,34 @@ class TaskQueue(_NotifyMixin):
         workspace_dir: str,
         planned: list[PlannedTask],
         notify_url: Optional[str] = None,
+        open_pr: bool = False,
+        verify_cmd: Optional[str] = None,
+        parent_goal_id: Optional[str] = None,
+        pump: bool = True,
     ) -> str:
         """Submit an ALREADY-PLANNED program (the caller supplies the
         ``PlannedTask`` DAG). Persists the DAG and starts it synchronously —
         never observed in 'planning', so no plan-time recovery edge case.
-        Returns the program_id."""
+        Returns the program_id.
+
+        ``open_pr`` / ``verify_cmd`` / ``parent_goal_id`` mirror
+        :meth:`submit_program` — child tasks inherit the PR + gate contract
+        via ``_persist_plan``. The one-shot goal dispatch (ADR 0003 stage 2)
+        is the caller that needs them: its plan is the goal's own checklist,
+        so the queue must NOT re-plan, but the reviewable-slice contract and
+        the goal-owner pointer still apply. ``pump=False`` (see
+        :meth:`submit`): rows only — the goal tick's atomic dispatch
+        transaction commits first, then kicks the queue."""
         program_id = str(uuid.uuid4())
         self._store.create_program(
-            id=program_id, goal=goal, workspace_dir=workspace_dir, notify_url=notify_url
+            id=program_id, goal=goal, workspace_dir=workspace_dir,
+            notify_url=notify_url, open_pr=open_pr, verify_cmd=verify_cmd,
+            parent_goal_id=parent_goal_id,
         )
         self._persist_plan(program_id, workspace_dir, planned)
         self._store.mark_program_running(program_id)
-        self._pump()
+        if pump:
+            self._pump()
         return program_id
 
     async def _plan_and_start(self, program_id: str, workspace_dir: str, goal: str) -> None:
