@@ -41,6 +41,7 @@ default; copy it to `.env` and uncomment what you want to change.
 | `DEVCLAW_MAX_CONCURRENT` | `4` | Global cap on concurrently-running tasks — size to the host. |
 | `DEVCLAW_MAX_CONCURRENT_PER_PROGRAM` | `2` | Per-program concurrency cap. |
 | `DEVCLAW_MAX_RETRIES` | `1` | Re-runs of a gate-failing task before escalation. Each retry feeds the failure back as steering. Timeouts are never retried. `0` disables. |
+| `DEVCLAW_ITEM_MAX_ATTEMPTS` | `3` | Structural per-checklist-item circuit breaker: after this many straight FAILED settles of the same item, it flips to `blocked` and the goal is parked for a human (`needs_human`) instead of the planner re-picking the same failing ticket. `<=0` disables. |
 | `DEVCLAW_TASK_TIMEOUT_S` | `1800` | Per-task wall-clock cap. Exceeded → cancelled, sandbox torn down, task `failed`. `<=0` disables. |
 | `DEVCLAW_VERIFY_TIMEOUT_S` | `900` | Wall-clock cap for the `verify_cmd` step (the gate that runs after the agent finishes). |
 | `DEVCLAW_TRACE_RETENTION_DAYS` | `30` | Days of `traces`-table telemetry to keep. The goal heartbeat prunes older rows once a day on its cheap path (batched DELETEs, pure SQLite, zero LLM). `0`, a negative value, or an unparseable value disables pruning gracefully. |

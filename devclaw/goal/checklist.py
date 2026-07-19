@@ -116,6 +116,15 @@ def _parse_item(raw: object) -> ChecklistItem | None:
     if isinstance(milestone_raw, str) and milestone_raw.strip():
         milestone = milestone_raw.strip()
 
+    attempts_raw = raw.get("attempts")
+    attempts = 0
+    if isinstance(attempts_raw, bool):
+        attempts = 0  # a stray YAML bool is not a count
+    elif isinstance(attempts_raw, int) and attempts_raw > 0:
+        attempts = attempts_raw
+    elif isinstance(attempts_raw, str) and attempts_raw.strip().isdigit():
+        attempts = int(attempts_raw.strip())
+
     return ChecklistItem(
         id=id_,
         requirement=requirement,
@@ -129,6 +138,7 @@ def _parse_item(raw: object) -> ChecklistItem | None:
         note=str(raw.get("note", "")).strip(),
         milestone=milestone,
         scaffold=_parse_bool(raw.get("scaffold")),
+        attempts=attempts,
     )
 
 
@@ -204,6 +214,7 @@ def validate_checklist(parsed: object) -> Checklist:
                 note=item.note,
                 milestone=item.milestone,
                 scaffold=item.scaffold,
+                attempts=item.attempts,
             )
         )
 
@@ -250,6 +261,8 @@ def dump_checklist(checklist: Checklist) -> str:
             d["milestone"] = item.milestone
         if item.scaffold:
             d["scaffold"] = True
+        if item.attempts:
+            d["attempts"] = item.attempts
         return d
 
     payload: dict[str, object] = {
@@ -280,10 +293,12 @@ def update_item(
     *,
     status: ItemStatus | None = None,
     evidence: str | None = None,
+    attempts: int | None = None,
 ) -> Checklist:
     """Return a new Checklist with the named item updated. Pure — does not
     mutate the input. Used by the runner's settle hook (status=done +
-    evidence) and the scheduler (status=in_flight at dispatch)."""
+    evidence), the scheduler (status=in_flight at dispatch), and the settle
+    hook's per-item circuit breaker (``attempts`` bump on a failed settle)."""
     updated: list[ChecklistItem] = []
     found = False
     for item in checklist.items:
@@ -305,6 +320,7 @@ def update_item(
                 note=item.note,
                 milestone=item.milestone,
                 scaffold=item.scaffold,
+                attempts=attempts if attempts is not None else item.attempts,
             )
         )
     if not found:
