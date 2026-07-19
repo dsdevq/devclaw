@@ -55,6 +55,7 @@ docs/
 |---|---|---|
 | [`decisions/0001-openhands-engine.md`](./decisions/0001-openhands-engine.md) | The founding decision: adopt OpenHands as the execution engine; devclaw is thin orchestration. Includes the OpenHands-vs-isolation orthogonality rationale and why devclaw calls `docker run` itself. | **DECISION RECORD** — accepted 2026-06, frozen 2026-07-13 (was `architecture-v2.md`). The decision stands; system snapshots inside reflect their writing date. Current system: [`architecture.md`](./architecture.md). |
 | [`decisions/0002-engine-mode.md`](./decisions/0002-engine-mode.md) | The OpenHands-vs-`claude_sdk` engine choice: current default, the switch procedure, and the data a switch requires. | **DECISION RECORD** — frozen 2026-07-13 (was `engine-decision.md`). Default (`run_sandcastle`) and `DEVCLAW_ENGINE` values re-verified at freeze time. |
+| [`decisions/0003-goal-program-unification.md`](./decisions/0003-goal-program-unification.md) | Goal ↔ program unification: ONE `create_goal`, one dial (re-evaluation cadence — one-shot vs long-lived), one planning spine (grill→firm→decompose), shippable-release iterations, two-level sizing rule, fog-of-war scope map, checkpoint grill + auto-continue, hard cost backstops. Staged migration plan (PR-B → surface collapse → iterative loop). | **DECISION RECORD** — accepted 2026-07-19. Design locked; implementation staged — the "today" descriptions inside describe the pre-migration system and will drift as stages land. |
 
 ## Where the docs are NOT
 
