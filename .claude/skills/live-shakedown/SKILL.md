@@ -84,7 +84,17 @@ else can work — go to Troubleshooting.
 ### L2 — program (planner → DAG)
 
 ```bash
-mkdir -p /tmp/sc-l2 && (cd /tmp/sc-l2 && git init -q)
+# The goal layer's workspace prep FETCHES origin — a bare `git init` blocks on
+# prep (live-found 2026-07-19). Give the workspace a host-visible origin with an
+# initial commit BEFORE filing. Caveat: a /tmp file remote is enough for the
+# MECHANICS (prep, decompose, program, per-item settle, done-gate) but NOT for a
+# green close — the sandbox can't push to host file paths, and un-pushed work is
+# reset away by the next dispatch's prep. A full green L2 needs a real pushable
+# remote (run it on the VPS against a scratch GitHub repo).
+git init -q --bare /tmp/sc-l2-remote.git
+mkdir -p /tmp/sc-l2 && (cd /tmp/sc-l2 && git init -q -b main \
+  && git commit -q --allow-empty -m init \
+  && git remote add origin /tmp/sc-l2-remote.git && git push -q -u origin main)
 python $DRIVE start_program \
   '{"workspace_dir":"/tmp/sc-l2","goal":"create a Python package mathx with an add() and a mul() function, each in its own module, plus a tests/ file that imports both"}'
 # → {"goal_id":…, "mode":"one_shot"} — ADR 0003: this now files a ONE-SHOT GOAL.
