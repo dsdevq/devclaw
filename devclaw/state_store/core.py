@@ -365,6 +365,13 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 # its own child task instead of the aggregate program verdict.
                 # Null for standalone tasks and pre-existing rows.
                 "ALTER TABLE tasks ADD COLUMN plan_key TEXT",
+                # Durable gate-baseline (2026-07-19) — the pre-run HEAD captured
+                # at the task's FIRST attempt. A pause→requeue re-run must diff
+                # against THIS, not re-capture HEAD: by resume time HEAD is the
+                # wip snapshot commit — the half-done work itself, not the base
+                # (closeloop-bench b6d53bbd). Null for rows that predate the
+                # column or never ran.
+                "ALTER TABLE tasks ADD COLUMN pre_run_sha TEXT",
             ):
                 try:
                     self._db.execute(sql)
@@ -1197,6 +1204,17 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
             )
             self._commit()
             return cur.rowcount > 0
+
+    def set_task_pre_run_sha(self, task_id: str, sha: str) -> None:
+        """Persist the gate-baseline sha captured at the task's first run.
+        Written once by the queue (single-writer) before the attempt loop; a
+        pause→requeue re-run reads it back instead of re-capturing HEAD (which
+        by then is the wip snapshot commit — the work itself, not the base)."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE tasks SET pre_run_sha = ? WHERE id = ?", (sha, task_id)
+            )
+            self._commit()
 
     def close(self) -> None:
         with self._lock:

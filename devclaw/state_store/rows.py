@@ -86,6 +86,14 @@ class Task:
     #: id — the settle path's child→item join. None for standalone tasks and
     #: rows that predate the column.
     plan_key: Optional[str] = None
+    #: The gate-baseline sha captured at this task's FIRST run (the pre-run
+    #: HEAD the post-run gates diff against). Persisted so a pause→requeue
+    #: re-run re-uses the ORIGINAL base: the pause path lands a wip snapshot
+    #: commit on the branch, so re-capturing HEAD on resume made the half-done
+    #: work itself the baseline and the gates judged only the post-resume
+    #: leftovers (closeloop-bench b6d53bbd, 2026-07-19). None for rows that
+    #: predate the column or tasks that haven't run.
+    pre_run_sha: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -111,6 +119,7 @@ class Task:
             "parentGoalId": self.parent_goal_id,
             "pauseCount": self.pause_count,
             "scaffold": self.scaffold,
+            "preRunSha": self.pre_run_sha,
         }
 
 
@@ -217,6 +226,7 @@ def _row_to_task(r: sqlite3.Row) -> Task:
             bool(r["scaffold"]) if "scaffold" in r.keys() and r["scaffold"] is not None else False
         ),
         plan_key=r["plan_key"] if "plan_key" in r.keys() else None,
+        pre_run_sha=r["pre_run_sha"] if "pre_run_sha" in r.keys() else None,
     )
 
 

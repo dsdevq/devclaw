@@ -131,6 +131,24 @@ def _git_diff_sync(host_dir: str, base: str = "") -> str:
     return out
 
 
+def _git_commit_exists_sync(host_dir: str, sha: str) -> bool:
+    """True when ``sha`` resolves to a commit in ``host_dir`` — the guard for
+    re-using a persisted gate baseline on a pause-resume re-run. Best-effort
+    like the rest of this module: any hiccup reads as "does not resolve" so
+    the caller degrades to a fresh capture instead of raising."""
+    if not sha:
+        return False
+    try:
+        p = subprocess.run(
+            ["git", "-C", host_dir, "rev-parse", "--verify", "--quiet",
+             f"{sha}^{{commit}}"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
 def _git_head_sync(host_dir: str) -> str:
     """Current HEAD sha, or '' when unavailable — the pre-run baseline for
     :func:`_git_diff_sync`. Best-effort for the same reason: a baseline hiccup
