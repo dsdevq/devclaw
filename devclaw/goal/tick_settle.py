@@ -145,6 +145,40 @@ def _settle_addressed_items(
     return updated
 
 
+def _settle_program_items(
+    checklist: "Checklist", addresses: list[str], poll: PollResult,
+) -> "Checklist":
+    """Per-item settle for a PLANNED-PROGRAM ref (one-shot mode, ADR 0003
+    stage 2): each addressed checklist item is graded by ITS OWN child task's
+    verdict — joined on the task row's ``plan_key``, which the dispatch path
+    set to the item id — instead of painting every item with the aggregate
+    program status (a one-child failure must not mark the succeeded items
+    failed, and vice versa a mostly-failed program must not bury one item
+    that shipped). An item whose child is missing from the breakdown (or a
+    poll with no breakdown at all — an engine that predates it) falls back to
+    the aggregate verdict, exactly the pre-existing behavior. Pure, like
+    :func:`_settle_addressed_items`, which it delegates each item to."""
+    by_key: dict[str, dict] = {}
+    for t in poll.tasks or []:
+        if isinstance(t, dict) and t.get("plan_key"):
+            by_key[str(t["plan_key"])] = t
+    updated = checklist
+    for item_id in addresses:
+        child = by_key.get(item_id)
+        if child is None:
+            child_poll = poll  # no per-child verdict — aggregate fallback
+        else:
+            child_poll = PollResult(
+                terminal=True,
+                status=str(child.get("status") or ""),
+                detail=str(child.get("error") or ""),
+                pr_url=child.get("pr_url"),
+                gate_passed=child.get("gate_passed"),
+            )
+        updated = _settle_addressed_items(updated, [item_id], child_poll)
+    return updated
+
+
 async def _resolve_polling_discovery(
     goal_id: str, goal: Goal, status: GoalStatus, ctx: TickContext,
 ) -> Outcome:
@@ -397,7 +431,18 @@ async def _resolve_polling_action(
     if addresses:
         current_checklist = ctx.store.read_checklist(goal_id)
         if current_checklist is not None:
-            updated_checklist = _settle_addressed_items(current_checklist, addresses, poll)
+            if ref.ref_kind == "program" and poll.tasks and goal.mode == "one_shot":
+                # One-shot planned program: grade each item by its own child —
+                # the dispatch path guaranteed plan_key == item id. Scoped to
+                # one_shot ON PURPOSE: a long-lived goal's program children are
+                # planned by the queue's decomposer, whose slug-style keys can
+                # accidentally collide with checklist item ids — an accidental
+                # join must not flip a milestone item to done off a partial
+                # program (the pre-existing aggregate verdict stays authoritative
+                # there).
+                updated_checklist = _settle_program_items(current_checklist, addresses, poll)
+            else:
+                updated_checklist = _settle_addressed_items(current_checklist, addresses, poll)
 
     delivered = 1 if poll.status == "done" else 0
     # Any SUCCESSFUL settle hands back its dispatch-cap budget: the cap exists

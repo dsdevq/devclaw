@@ -81,6 +81,11 @@ class Task:
     #: or that guts tests still fails. Defaulted so existing rows/tests are
     #: unaffected.
     scaffold: bool = False
+    #: The PlannedTask key this program-child row was persisted from (ADR 0003
+    #: stage 2). For a one-shot goal's program the key IS the checklist item
+    #: id — the settle path's child→item join. None for standalone tasks and
+    #: rows that predate the column.
+    plan_key: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -211,6 +216,7 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         scaffold=(
             bool(r["scaffold"]) if "scaffold" in r.keys() and r["scaffold"] is not None else False
         ),
+        plan_key=r["plan_key"] if "plan_key" in r.keys() else None,
     )
 
 

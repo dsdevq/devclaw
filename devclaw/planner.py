@@ -166,6 +166,13 @@ def planned_from_checklist(checklist: "Checklist") -> list[PlannedTask]:
             )
         if item.note:
             goal_text += f"\nPlanner note: {item.note}"
+        if item.failure_log:
+            # Cross-dispatch continuity (the #288 discipline on this path): a
+            # re-dispatched one-shot item must not re-discover a failed
+            # approach one attempt at a time.
+            goal_text += "\n\nPrior attempts at this item FAILED — do not repeat them:\n" + "\n".join(
+                f"- {note}" for note in item.failure_log
+            )
         tasks.append(
             PlannedTask(
                 key=item.id,

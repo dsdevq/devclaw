@@ -377,6 +377,27 @@ async def _resolve_done_gate(
         )
         await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] not done — {q}", summarize=summarize)
         return Outcome.BLOCKED
+    if goal.mode == "one_shot":
+        # One-shot (ADR 0003 stage 2): the single pass is spent — its checklist
+        # drained, yet the grounded review says done_when isn't met (scope the
+        # decomposition missed, or work that didn't land). "Keep going" has no
+        # meaning here: there is no planner to consume corrections, so
+        # RESUME_IDLE would re-drain → re-review every tick, burning a sandbox
+        # review per heartbeat forever. Park it for the owner instead — resume
+        # re-judges the same contract; steer/cancel changes it. Fail loud over
+        # silent review-looping.
+        q = (
+            f"one-shot run finished but done_when is not confirmed: "
+            f"{ev.rationale[:250]}"
+        )
+        store.transition(
+            goal_id, Event.BLOCK,
+            replace(base, phase="blocked", blocked_on=q, blocked_kind="needs_answer", next=""),
+            expect=status, consume_steering=consume_steering,
+        )
+        _apply_corrections(store, goal_id, ev)  # visible in inbox for the owner's decision
+        await _notify(notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] {q}", summarize=summarize)
+        return Outcome.BLOCKED
     # on_track / off_track → not done yet. Steer corrections back in and continue.
     store.transition(
         goal_id, Event.RESUME_IDLE,

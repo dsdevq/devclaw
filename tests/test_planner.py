@@ -270,3 +270,14 @@ def test_runaway_decomposition_trips_the_program_task_brake():
     runaway = Checklist(items=[_item(f"t{i}") for i in range(MAX_PROGRAM_TASKS + 1)])
     with pytest.raises(PlannerError, match="brake"):
         planned_from_checklist(runaway)
+
+
+def test_failure_log_rides_in_the_redispatch_brief():
+    """Cross-dispatch continuity (#288 on the one-shot path): a re-dispatched
+    item's brief must carry its prior failures so the next worker doesn't
+    re-discover a failed approach one attempt at a time."""
+    out = planned_from_checklist(Checklist(items=[
+        _item("a", failure_log=["attempt 1: settled failed · build broke"]),
+    ]))
+    assert "Prior attempts at this item FAILED" in out[0].goal
+    assert "build broke" in out[0].goal

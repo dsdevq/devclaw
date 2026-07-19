@@ -421,12 +421,16 @@ class GoalService:
         verify_cmd: Optional[str] = None, open_pr: bool = True,
         done_when: str = "", backlog: Optional[list[str]] = None,
         spec: str = "",
+        mode: str = "long_lived",
     ) -> dict:
         # Chef admission ("verified on all sides"). Goals that fail structural
         # checks are REJECTED with a structured condition list — the caller
         # (waiter or upstream chain) must fix and re-file. Warnings still flow
         # through to the result dict as before. See devclaw/goal/admission.py.
         from .admission import GoalAdmissionRejected, verify_goal as _verify
+
+        if mode not in ("long_lived", "one_shot"):
+            raise ValueError(f"unknown goal mode {mode!r} — expected 'long_lived' or 'one_shot'")
 
         admission = _verify(
             objective=objective, workspace_dir=workspace_dir, done_when=done_when,
@@ -438,7 +442,7 @@ class GoalService:
         goal = self._goal_store.create_goal(
             goal_id, objective=objective, workspace_dir=workspace_dir, cadence=cadence,
             repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
-            done_when=done_when, backlog=backlog,
+            done_when=done_when, backlog=backlog, mode=mode,
         )
         # The waiter may have grilled scope before filing the order — persist the
         # spec it landed on so the evaluator judges done against the shared contract.
