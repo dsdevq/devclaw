@@ -69,7 +69,7 @@ The skill/hook system is deliberately neutral about which agent runs inside the 
 - **Use MCP, not vendor-specific tool wiring.** MCP is the one cross-tool standard (Cline, Cursor, Zed, Claude Code all support it). Tools we want every agent to have go through MCP, not through Claude-Code plugins or commands.
 - **Per-repo discovery is `ls .agent/skills/` + `cat`, not an agent-specific catalog API.** Any agent with file-read can find them.
 
-The day we swap claude-code for another harness, the entire skill/hook system survives — only the `ACPAgent` call in `runner.py` changes.
+The day we swap claude-code for another harness, the entire skill/hook system survives — and the agent command is already a config seam, not a code change: set `DEVCLAW_ACP_COMMAND` (default `claude-agent-acp`; the runner shlex-splits it) to point at any ACP-speaking agent. The residual claude-coupling is the plumbing around the call — the `acp_env` vars, the `~/.claude` auth mounts, `DEVCLAW_EXEC_MODEL`'s claude model ids, the auth/rate-limit classifiers — plus baking the alternate binary into the sandbox image (see `docs/reference/env-vars.md`).
 
 ## The split
 

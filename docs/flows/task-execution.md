@@ -92,7 +92,7 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │     • from openhands.sdk import Conversation,    │                                 │
      │  │           ACPAgent                               │                                 │
      │  │     • agent = ACPAgent(                          │                                 │
-     │  │           acp_command=["claude-agent-acp"],      │                                 │
+     │  │           acp_command=cfg, # DEVCLAW_ACP_COMMAND │                                 │
      │  │           acp_model="claude-sonnet-4-6")         │                                 │
      │  │     • conv = Conversation(agent, workspace=      │                                 │
      │  │           "/workspace", callbacks=[on_event])    │                                 │

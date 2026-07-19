@@ -276,8 +276,9 @@ and `tests/test_self_triage.py`.
   guide a task needs (progressive disclosure). Drops `/workspace/.mcp.json` for
   Playwright MCP, fires pre/post hooks (universal + per-repo), runs the agent
   loop, runs `verify_cmd`, emits `result:`.
-- **Allowed to depend on:** `claude-agent-acp`, `claude-code`, MCP servers, the
-  per-task `/workspace` git checkout.
+- **Allowed to depend on:** the configured ACP agent (`DEVCLAW_ACP_COMMAND`,
+  default `claude-agent-acp` + `claude-code`), MCP servers, the per-task
+  `/workspace` git checkout.
 - **Forbidden:** importing anything from the devclaw Python package (different
   container; cross-process boundary). Writing files outside `/workspace`. Using
   claude-code-specific harness features (skills/hooks `settings.json`) — see
@@ -406,7 +407,7 @@ pipeline.
 | Engine (layer 4) | 4 (sandcastle, claude_sdk, host, stub) | ✅ strong |
 | Notifier | 2 (`HttpNotifier`, `NullNotifier`) | ✅ ok |
 | Cognition | 2 (Claude subprocess, Stub) | ⚠ weak — only stub-vs-real |
-| Worker harness (layer 5) | 1 (claude-agent-acp + claude-code) | ❌ no proof — invariants exist but unenforced |
+| Worker harness (layer 5) | 1 shipped (claude-agent-acp + claude-code); command is a config seam (`DEVCLAW_ACP_COMMAND`, payload-threaded, shlex-split, tested) | ⚠ seam proven, no second implementation exercised — `acp_env`/auth mounts/model ids/limit classifiers still claude-shaped |
 | Phase handler | 1 (FirmingHandler) | n/a — registry exists, one handler |
 
 Closing the worker-harness replaceability gap is the highest-value next muscle.
