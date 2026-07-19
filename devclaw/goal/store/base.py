@@ -213,6 +213,40 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
                 _, status = item
                 self._write_status_view(goal_id, status)
 
+    # ---- run-summary projection (goal close) ------------------------------
+
+    def read_goal_traces(self, goal_id: str, *, kind: "str | None" = None,
+                         limit: int = 1000) -> "list[dict]":
+        """Read-only projection of the shared traces table for THIS goal —
+        the run-summary's input (delivery events: gate/PR/diff stats). Pure
+        SELECT through the same shared StateStore the transaction()
+        passthrough uses; nothing here writes traces (PersistentTracer owns
+        that), and the summary it feeds is a generated view, never read back
+        for decisions."""
+        return self._state.read_traces(goal_id=goal_id, kind=kind, limit=limit)
+
+    def goal_trace_totals(self, goal_id: str) -> dict:
+        """Aggregate cognition token/cost totals for the run summary —
+        :meth:`StateStore.trace_totals` passthrough (cheap SQL, no LLM)."""
+        return self._state.trace_totals(goal_id=goal_id)
+
+    def write_run_summary_view(self, goal_id: str, text: str) -> None:
+        """RUN_SUMMARY.md — the at-a-glance close-out artifact, written once
+        at the ACHIEVE close. A generated VIEW like STATUS.md/log.md/
+        deliveries.md: a projection of rows (traces + phase_history +
+        checklist), human- and rollback-readable, never read back for
+        decisions. Atomic write (same torn-file treatment as the other
+        views). Called AFTER the ACHIEVE transition commits — never inside a
+        transaction() — so a rolled-back close can't leave a summary for a
+        goal that didn't actually close. The assert makes that contract
+        mechanical: a future in-transaction caller fails loudly here instead
+        of silently violating the mirror discipline."""
+        assert self._state._txn_depth == 0, (
+            "write_run_summary_view must not run inside a transaction() — "
+            "a rollback could leave a summary for a close that never happened"
+        )
+        self._write_atomic(goal_id, "RUN_SUMMARY.md", text)
+
     def discard_pending_mirrors(self, goal_id: str) -> None:
         """Drop any mirror writes deferred for ``goal_id`` WITHOUT rendering
         them — the exception-path counterpart of render_mirrors(), called
