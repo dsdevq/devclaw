@@ -1038,6 +1038,14 @@ class TaskQueue(_NotifyMixin):
         # NOT retried — a stuck run would likely just hang again — they escalate now.
         attempts = 1 + max(0, TASK_MAX_RETRIES)
         last_failure = "unknown error"
+        # Every prior failed attempt this run, in order. The retry prompt used
+        # to carry only the single most-recent failure (an overwritten string),
+        # so attempt 3 never learned what attempt 1 tried — and could burn its
+        # budget repeating a mistake already fed back once (the gnhf-style
+        # notes.md continuity gap, intra-dispatch half). An on-disk notes file
+        # can't carry this instead: the retry-isolation reset above wipes
+        # uncommitted files by design.
+        attempt_failures: list[str] = []
         for attempt in range(attempts):
             if attempt > 0 and pre_run_sha:
                 # Retry isolation (#1): rewind the workspace to the clean
@@ -1058,11 +1066,22 @@ class TaskQueue(_NotifyMixin):
                         f"task-queue: retry reset to {pre_run_sha[:8]} failed "
                         f"task={task_id}; proceeding on drifted tree\n"
                     )
-            attempt_goal = f"{resume_brief}{goal}" if attempt == 0 else (
-                f"{resume_brief}{goal}\n\n[Automatic retry {attempt}/{attempts - 1}] Your previous "
-                f"attempt did not pass verification. What went wrong:\n{last_failure}\n\n"
-                f"Diagnose the cause and fix it; do not repeat the same mistake."
-            )
+            if attempt == 0:
+                attempt_goal = f"{resume_brief}{goal}"
+            else:
+                # Numbered history of EVERY failed attempt this run (not just
+                # the latest) so the agent can rule out whole approaches, not
+                # re-discover them one retry at a time.
+                history = "\n".join(
+                    f"  Attempt {i}: {f}"
+                    for i, f in enumerate(attempt_failures, 1)
+                )
+                attempt_goal = (
+                    f"{resume_brief}{goal}\n\n[Automatic retry {attempt}/{attempts - 1}] Your previous "
+                    f"attempt did not pass verification. What went wrong in each "
+                    f"prior attempt this run:\n{history}\n\n"
+                    f"Diagnose the cause and fix it; do not repeat any of these mistakes."
+                )
             request = EngineRequest(
                 kind=kind,
                 workspace_dir=workspace_dir,
@@ -1262,9 +1281,10 @@ class TaskQueue(_NotifyMixin):
                 self._check_and_trip_breaker(workspace_dir, task_id)
                 return None
             if attempt < attempts - 1:
+                attempt_failures.append(last_failure)
                 sys.stderr.write(
                     f"task-queue: task {task_id} attempt {attempt + 1}/{attempts} failed; "
-                    f"retrying with the failure fed back\n"
+                    f"retrying with all {len(attempt_failures)} prior failure(s) fed back\n"
                 )
         # every attempt failed — escalate.
         suffix = f" (failed after {attempts} attempts)" if attempts > 1 else ""
