@@ -11,7 +11,9 @@ tick.py (tick._tick_goal_impl chains through _resolve_polling_action).
 
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 from dataclasses import replace
 from typing import Tuple, Union
 
@@ -30,7 +32,7 @@ from .tick_donegate import _resolve_done_gate
 from . import checklist as _checklist
 from . import reconcile as _reconcile
 from .engine import GoalEngine, GoalEngineError
-from .models import Checklist, Goal, GoalStatus, InFlight, PollResult
+from .models import Checklist, ChecklistItem, Goal, GoalStatus, InFlight, ItemAssert, PollResult
 from .store import GoalStore
 from .transitions import Event
 from ..loom import trace as _trace
@@ -44,6 +46,20 @@ from ..loom import trace as _trace
 #: identical attempt). Mirrors the per-workspace breaker's 3-failure instinct
 #: (task_queue._check_and_trip_breaker). Env-overridable; ``<= 0`` disables it.
 ITEM_MAX_ATTEMPTS = int(os.environ.get("DEVCLAW_ITEM_MAX_ATTEMPTS", "3"))
+
+#: reality-anchored acceptance asserts (#2/#4, ADR 0003) — the mechanical
+#: cross-check under the LLM review gate. On by default; set
+#: ``DEVCLAW_ITEM_ASSERTS=0`` to disable enforcement entirely (the operator
+#: kill-switch, if a mis-authored assert wedges a live goal — the item then
+#: falls back to gate-only verification, today's pre-#2/#4 behavior). Off means
+#: asserts are still parsed/persisted, just not checked.
+ITEM_ASSERTS_ENABLED = os.environ.get("DEVCLAW_ITEM_ASSERTS", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+#: cap on bytes read per grep assert — a runaway generated file (a lockfile,
+#: a bundle) shouldn't stall the settle tick reading megabytes. A real
+#: acceptance marker lives near the top; 2 MB is generous.
+_ASSERT_GREP_MAX_BYTES = 2_000_000
 
 
 def _failure_note(poll: PollResult) -> str:
@@ -60,8 +76,116 @@ def _failure_note(poll: PollResult) -> str:
     return " · ".join(parts)
 
 
+def _check_one_assert_sync(workspace_dir: str, a: ItemAssert) -> str | None:
+    """Evaluate ONE assert against the delivered tree. Returns a failure
+    reason string, or ``None`` when it holds. FAILS CLOSED: an assert we
+    cannot evaluate (path escapes the workspace, a read error) returns a
+    failure — never a silent pass — mirroring the gate's #186 "unverifiable ⇒
+    not approved" rule. Pure + read-only; the only host access is
+    ``os.path.exists`` and reading a bounded prefix of one file."""
+    root = os.path.realpath(workspace_dir)
+    full = os.path.realpath(os.path.join(root, a.path))
+    # Re-guard the parse-time boundary (defense in depth + symlink escape): the
+    # resolved path must stay inside the workspace root.
+    if full != root and not full.startswith(root + os.sep):
+        return f"{a.describe()} → path escapes the workspace (rejected)"
+
+    exists = os.path.exists(full)
+    if a.kind == "file_exists":
+        ok = (not exists) if a.absent else exists
+        return None if ok else f"{a.describe()} → {'present' if exists else 'missing'}"
+
+    # grep: read a bounded prefix and search for the pattern.
+    if not exists or not os.path.isfile(full):
+        # A "must NOT match" grep on a file that isn't there is satisfied
+        # (the thing it forbids cannot be present). A "must match" grep needs
+        # the file → fail closed.
+        if a.absent:
+            return None
+        return f"{a.describe()} → file missing"
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read(_ASSERT_GREP_MAX_BYTES)
+    except OSError as exc:
+        return f"{a.describe()} → unreadable ({exc})"
+    hit = bool(re.search(a.pattern, text))
+    ok = (not hit) if a.absent else hit
+    return None if ok else f"{a.describe()} → {'matched' if hit else 'no match'}"
+
+
+def _check_item_asserts_sync(
+    workspace_dir: str, items: "list[ChecklistItem]",
+) -> dict[str, str]:
+    """Check every addressed item's asserts against ``workspace_dir``. Returns
+    ``{item_id: first_failure_reason}`` for items whose asserts DON'T hold —
+    the caller routes exactly those into the failure/retry path. An item with
+    no asserts never appears (gate-only, today's behavior). Best-effort at the
+    item boundary: an unexpected error checking one item fails THAT item closed
+    (a reason is recorded) but never raises, so a single bad assert can't wedge
+    the settle tick."""
+    failures: dict[str, str] = {}
+    for item in items:
+        if not item.asserts:
+            continue
+        try:
+            for a in item.asserts:
+                reason = _check_one_assert_sync(workspace_dir, a)
+                if reason is not None:
+                    failures[item.id] = reason
+                    break  # first failing assert is enough to fail the item
+        except Exception as exc:  # pragma: no cover - defensive fail-closed
+            failures[item.id] = f"acceptance assert check errored: {exc}"
+    return failures
+
+
+async def _check_addressed_asserts(
+    workspace_dir: str, checklist: "Checklist", addresses: list[str],
+) -> dict[str, str]:
+    """Async wrapper: run the (blocking, file-IO) assert check off-thread for
+    the addressed items only. Returns ``{}`` when the feature is disabled, the
+    workspace path is empty, or no addressed item carries an assert — so the
+    common case pays nothing and the settle path is byte-unaffected."""
+    if not ITEM_ASSERTS_ENABLED or not workspace_dir:
+        return {}
+    by_id = {i.id: i for i in checklist.items}
+    addressed = [by_id[a] for a in addresses if a in by_id and by_id[a].asserts]
+    if not addressed:
+        return {}
+    return await asyncio.to_thread(_check_item_asserts_sync, workspace_dir, addressed)
+
+
+def _apply_item_failure(
+    checklist: "Checklist", item_id: str, note_body: str,
+) -> "Checklist":
+    """Route ONE addressed item into the failure path: bump ``attempts``,
+    append ``note_body`` to its failure_log, and either send it back to
+    ``not_started`` (below the cap — the planner re-picks it) or trip the
+    structural circuit breaker to ``blocked`` AT the cap. Shared by a
+    gate/task failure (note = the poll tail) and an acceptance-assert failure
+    (note = the failing assert) so both funnel through the SAME breaker."""
+    by_id = {i.id: i for i in checklist.items}
+    item = by_id.get(item_id)
+    if item is None:
+        return checklist
+    n = item.attempts + 1
+    note = f"attempt {n}: {note_body}"
+    if ITEM_MAX_ATTEMPTS > 0 and n >= ITEM_MAX_ATTEMPTS:
+        return _checklist.update_item(
+            checklist, item_id, status="blocked", attempts=n, failure_note=note,
+            evidence=(
+                f"circuit breaker: {n} straight failed attempts — parked "
+                f"for a human decision (steer with a different approach, "
+                f"fix by hand, or re-scope the item)"
+            ),
+        )
+    return _checklist.update_item(
+        checklist, item_id, status="not_started", attempts=n, failure_note=note,
+    )
+
+
 def _settle_addressed_items(
     checklist: "Checklist", addresses: list[str], poll: PollResult,
+    assert_failures: "dict[str, str] | None" = None,
 ) -> "Checklist":
     """Compute the checklist with the addressed items settled. Successful
     task (poll.status == 'done' AND gate_passed in {None, True}) flips items
@@ -72,7 +196,14 @@ def _settle_addressed_items(
     straight times, at which point the structural per-item circuit breaker
     (#6) flips it to ``blocked`` instead (the caller then parks the goal for a
     human). The per-item gate (review_gate) verifies the diff against
-    ``evidence_target`` separately — session 4.
+    ``evidence_target`` separately — session 4. ``assert_failures`` (``{item_id:
+    reason}``, computed by the caller against the delivered workspace) is the
+    reality anchor under that gate (#2/#4): on an OTHERWISE-successful settle,
+    an addressed item whose mechanical asserts didn't hold is NOT flipped to
+    ``done`` — it is routed into the SAME failure/retry/circuit-breaker path as
+    a gate failure, carrying the failing assert as its failure note. So a
+    fabricated "done" (a worker that reports success the gate believed but the
+    tree contradicts) never counts as done.
 
     PR7: pure — returns the updated :class:`Checklist` instead of writing it.
     The caller (``_resolve_polling_action``) reads the current checklist,
@@ -82,6 +213,7 @@ def _settle_addressed_items(
     item settled for a delivery that was never actually recorded. The "no
     checklist" / "addresses is empty" guards moved to the caller, which now
     decides whether to call this at all."""
+    assert_failures = assert_failures or {}
     success = poll.status == "done" and (poll.gate_passed is None or poll.gate_passed)
     if success:
         ev_parts: list[str] = []
@@ -99,6 +231,16 @@ def _settle_addressed_items(
         evidence = " · ".join(ev_parts) or "settled (no PR or gate)"
         updated = checklist
         for item_id in addresses:
+            reason = assert_failures.get(item_id)
+            if reason is not None:
+                # The task passed the gate but the delivered tree contradicts
+                # the item's acceptance assert — treat exactly like a gate
+                # failure so it retries (with the failing assert fed back) or
+                # trips the breaker. Fail CLOSED: never flip to done.
+                updated = _apply_item_failure(
+                    updated, item_id, f"acceptance assert failed — {reason}",
+                )
+                continue
             try:
                 # attempts reset to 0: a proven item carries no stale failure
                 # count, so a later steer that re-opens it for rework starts
@@ -115,38 +257,15 @@ def _settle_addressed_items(
     # back to ``not_started`` (the pick-pool, evidence left as-is — not yet
     # proven); AT the cap the circuit breaker trips it to ``blocked`` so the
     # planner stops re-picking it and the caller parks the goal for a human.
-    by_id = {i.id: i for i in checklist.items}
     updated = checklist
     for item_id in addresses:
-        item = by_id.get(item_id)
-        if item is None:
-            continue
-        n = item.attempts + 1
-        note = f"attempt {n}: {_failure_note(poll)}"
-        if ITEM_MAX_ATTEMPTS > 0 and n >= ITEM_MAX_ATTEMPTS:
-            updated = _checklist.update_item(
-                updated, item_id, status="blocked", attempts=n,
-                failure_note=note,
-                evidence=(
-                    f"circuit breaker: {n} straight failed attempts — parked "
-                    f"for a human decision (steer with a different approach, "
-                    f"fix by hand, or re-scope the item)"
-                ),
-            )
-        else:
-            # Back to the pick-pool WITH the failure recorded: the dispatch
-            # path renders failure_log into the next worker's brief so a
-            # re-dispatched item doesn't re-discover a failed approach one
-            # attempt at a time (cross-dispatch continuity).
-            updated = _checklist.update_item(
-                updated, item_id, status="not_started", attempts=n,
-                failure_note=note,
-            )
+        updated = _apply_item_failure(updated, item_id, _failure_note(poll))
     return updated
 
 
 def _settle_program_items(
     checklist: "Checklist", addresses: list[str], poll: PollResult,
+    assert_failures: "dict[str, str] | None" = None,
 ) -> "Checklist":
     """Per-item settle for a PLANNED-PROGRAM ref (one-shot mode, ADR 0003
     stage 2): each addressed checklist item is graded by ITS OWN child task's
@@ -157,7 +276,10 @@ def _settle_program_items(
     that shipped). An item whose child is missing from the breakdown (or a
     poll with no breakdown at all — an engine that predates it) falls back to
     the aggregate verdict, exactly the pre-existing behavior. Pure, like
-    :func:`_settle_addressed_items`, which it delegates each item to."""
+    :func:`_settle_addressed_items`, which it delegates each item to —
+    threading each item's own ``assert_failures`` entry so acceptance asserts
+    anchor one-shot items exactly as they do long-lived ones."""
+    assert_failures = assert_failures or {}
     by_key: dict[str, dict] = {}
     for t in poll.tasks or []:
         if isinstance(t, dict) and t.get("plan_key"):
@@ -175,7 +297,10 @@ def _settle_program_items(
                 pr_url=child.get("pr_url"),
                 gate_passed=child.get("gate_passed"),
             )
-        updated = _settle_addressed_items(updated, [item_id], child_poll)
+        item_af = (
+            {item_id: assert_failures[item_id]} if item_id in assert_failures else None
+        )
+        updated = _settle_addressed_items(updated, [item_id], child_poll, item_af)
     return updated
 
 
@@ -408,6 +533,40 @@ async def _resolve_polling_action(
         ctx.store.update_status_fields(goal_id, last_tick_at=ctx.store.now_iso())
         return Outcome.IN_FLIGHT
 
+    # ---- reality-anchored acceptance (#2/#4) -------------------------------
+    # The ONE piece of I/O in the settle path, run BEFORE the pure-compute
+    # block below: cross-check the addressed items' mechanical asserts
+    # (file_exists / grep) against the delivered workspace tree. The LLM review
+    # gate read a diff and can be fooled by a plausible-looking one; a probe of
+    # the tree cannot. Result feeds the pure settle compute as ``{item_id:
+    # reason}`` — an item that passed the gate but whose asserts don't hold is
+    # NOT flipped to done. Runs whenever this settle COULD flip an item to done
+    # (else ``{}`` — the common path is byte-unaffected). Two such shapes:
+    #   - an AGGREGATE success (single-task / long-lived): poll.status == done;
+    #   - a one-shot PLANNED PROGRAM: ``_settle_program_items`` grades each child
+    #     INDIVIDUALLY, so a ``done`` child flips its item even when the program
+    #     terminalized ``failed`` because a SIBLING failed — the mixed-result
+    #     path a fabricated item lives on. Gating the check on the aggregate
+    #     ``poll.status == done`` there would let a done child skip its asserts
+    #     the moment any sibling failed (invariant-guard finding, #2/#4). So the
+    #     one-shot-program branch anchors regardless of aggregate status; the
+    #     per-child grader still decides which items actually flip.
+    # At this point the dispatch has finished and the host workspace still holds
+    # its tree (re-prepped only at the NEXT dispatch). File I/O only.
+    addresses = list(getattr(ref, "addresses", None) or [])
+    current_checklist = ctx.store.read_checklist(goal_id) if addresses else None
+    is_one_shot_program = bool(
+        ref.ref_kind == "program" and poll.tasks and goal.mode == "one_shot"
+    )
+    aggregate_success = poll.status == "done" and (
+        poll.gate_passed is None or poll.gate_passed
+    )
+    assert_failures: dict[str, str] = {}
+    if current_checklist is not None and (aggregate_success or is_one_shot_program):
+        assert_failures = await _check_addressed_asserts(
+            goal.workspace_dir, current_checklist, addresses,
+        )
+
     # ---- compute everything the settle transaction will write, BEFORE ------
     # ---- opening it (no cognition, no I/O below — pure computation) --------
     evidence = []
@@ -421,28 +580,33 @@ async def _resolve_polling_action(
         evidence.append("sandbox gate=passed" if poll.gate_passed else "sandbox gate=FAILED")
     ev_str = (" — " + ", ".join(evidence)) if evidence else ""
     settle_line = f"{ref.tool} {ref.id} → {poll.status}{ev_str}"
+    if assert_failures:
+        # Loud, not silent: the goal log records that the gate passed but the
+        # tree contradicted an acceptance assert, and which items it sank.
+        settle_line += f" · acceptance asserts FAILED: {', '.join(sorted(assert_failures))}"
 
     # Checklist mode: settle the items this action was addressing — success
     # flips them to done with grounded evidence (PR + gate), failure flips
     # them back to not_started so the planner can re-pick them. Pure compute
     # here (PR7); the caller persists the result row-only, inside the txn.
-    addresses = list(getattr(ref, "addresses", None) or [])
     updated_checklist = None
-    if addresses:
-        current_checklist = ctx.store.read_checklist(goal_id)
-        if current_checklist is not None:
-            if ref.ref_kind == "program" and poll.tasks and goal.mode == "one_shot":
-                # One-shot planned program: grade each item by its own child —
-                # the dispatch path guaranteed plan_key == item id. Scoped to
-                # one_shot ON PURPOSE: a long-lived goal's program children are
-                # planned by the queue's decomposer, whose slug-style keys can
-                # accidentally collide with checklist item ids — an accidental
-                # join must not flip a milestone item to done off a partial
-                # program (the pre-existing aggregate verdict stays authoritative
-                # there).
-                updated_checklist = _settle_program_items(current_checklist, addresses, poll)
-            else:
-                updated_checklist = _settle_addressed_items(current_checklist, addresses, poll)
+    if addresses and current_checklist is not None:
+        if is_one_shot_program:
+            # One-shot planned program: grade each item by its own child —
+            # the dispatch path guaranteed plan_key == item id. Scoped to
+            # one_shot ON PURPOSE: a long-lived goal's program children are
+            # planned by the queue's decomposer, whose slug-style keys can
+            # accidentally collide with checklist item ids — an accidental
+            # join must not flip a milestone item to done off a partial
+            # program (the pre-existing aggregate verdict stays authoritative
+            # there).
+            updated_checklist = _settle_program_items(
+                current_checklist, addresses, poll, assert_failures,
+            )
+        else:
+            updated_checklist = _settle_addressed_items(
+                current_checklist, addresses, poll, assert_failures,
+            )
 
     delivered = 1 if poll.status == "done" else 0
     # Any SUCCESSFUL settle hands back its dispatch-cap budget: the cap exists

@@ -280,6 +280,59 @@ class PlanResult:
 ItemStatus = Literal["not_started", "in_flight", "done", "blocked", "mis_specified"]
 #: model-tier hint per item (defaults to the global executor tier when absent)
 ItemModelTier = Literal["haiku", "sonnet", "opus"]
+#: the two mechanically-checkable acceptance-assert kinds. Deliberately NOT an
+#: arbitrary shell command: both are pure, read-only host-side checks (a path
+#: probe and a regex over a file), so enforcing them at settle can never run
+#: attacker-influenced code on the host. Closing the fabrication class does not
+#: require arbitrary execution — a lockfile grep catches the ng-zorro fake
+#: install; an ``absent`` grep catches a ``not_yet_available`` stub masquerading
+#: as real work.
+AssertKind = Literal["file_exists", "grep"]
+
+
+@dataclass(frozen=True)
+class ItemAssert:
+    """A mechanically-checkable acceptance predicate the decomposer attaches to
+    a :class:`ChecklistItem` — the reality anchor under the LLM review gate
+    (#2/#4, ADR 0003). The review gate reads a *diff* and can be fooled by a
+    plausible-looking one (the finance-sentry-ui-library ng-zorro exhibit: the
+    worker bumped ``package.json`` and wrote AGENTS.md prose claiming the
+    dependency was installed, with no real lockfile entry — and the gate passed
+    it). A ``file_exists`` / ``grep`` probe against the delivered tree cannot be
+    talked into a false pass, so it is a mechanical CROSS-CHECK on the gate's
+    verdict: an item cannot flip to ``done`` unless its asserts hold, and a
+    failing assert routes the item into the same failure/retry/circuit-breaker
+    path as a gate-failed settle. Enforced at :func:`tick_settle` against the
+    host ``workspace_dir``. Optional and grounded — the decomposer emits an
+    assert ONLY when the repo digest lets it name a concrete, checkable path.
+
+    - ``kind='file_exists'`` — ``path`` must exist in the workspace (or, with
+      ``absent=True``, must NOT exist).
+    - ``kind='grep'`` — ``pattern`` (a regex) must match somewhere in ``path``
+      (or, with ``absent=True``, must NOT match).
+
+    ``path`` is ALWAYS workspace-relative and validated to stay inside the tree
+    (no absolute paths, no ``..`` traversal) — an assert can never read outside
+    the checkout."""
+
+    kind: AssertKind
+    #: workspace-relative file path the assert probes. Never absolute, never
+    #: escapes the workspace root (enforced at parse + re-guarded at check).
+    path: str
+    #: regex searched in ``path`` for ``kind='grep'``; ignored for
+    #: ``file_exists``. Empty for a grep assert is invalid (dropped at parse).
+    pattern: str = ""
+    #: invert the sense: ``file_exists`` → must be ABSENT; ``grep`` → pattern
+    #: must NOT match. The stub-detection lever (``absent`` grep for
+    #: ``not_yet_available``).
+    absent: bool = False
+
+    def describe(self) -> str:
+        """One-line human/log description of what this assert requires."""
+        if self.kind == "file_exists":
+            return f"file {'absent' if self.absent else 'exists'}: {self.path}"
+        sense = "must NOT match" if self.absent else "must match"
+        return f"grep {self.path} {sense} /{self.pattern}/"
 
 
 @dataclass(frozen=True)
@@ -352,6 +405,15 @@ class ChecklistItem:
     #: with the attempts reset. Persisted in checklist.yaml only when
     #: non-empty.
     failure_log: list[str] = field(default_factory=list)
+    #: mechanically-checkable acceptance predicates (:class:`ItemAssert`) — the
+    #: reality anchor under the LLM review gate (#2/#4). The decomposer emits
+    #: these; :func:`tick_settle` enforces them against the delivered workspace
+    #: before an addressed item may flip to ``done``. Empty (the default and the
+    #: common case) means "no mechanical anchor — trust the gate alone", exactly
+    #: today's behavior; a non-empty list adds a fail-closed cross-check the
+    #: worker cannot fabricate past. Persisted in checklist.yaml only when
+    #: non-empty.
+    asserts: list["ItemAssert"] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

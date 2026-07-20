@@ -15,7 +15,7 @@ import re
 
 import yaml
 
-from .models import Checklist, ChecklistItem, ItemModelTier, ItemStatus
+from .models import Checklist, ChecklistItem, ItemAssert, ItemModelTier, ItemStatus
 
 _VALID_STATUSES: tuple[ItemStatus, ...] = (
     "not_started",
@@ -25,6 +25,62 @@ _VALID_STATUSES: tuple[ItemStatus, ...] = (
     "mis_specified",
 )
 _VALID_TIERS: tuple[ItemModelTier, ...] = ("haiku", "sonnet", "opus")
+_VALID_ASSERT_KINDS = ("file_exists", "grep")
+
+
+def _safe_rel_path(raw: object) -> str | None:
+    """A workspace-relative path that provably stays inside the checkout, or
+    ``None`` (caller drops the assert). Rejects absolute paths and any ``..``
+    segment so a decomposer-authored assert can never be pointed at host files
+    outside the workspace — the check runs host-side, so this is the security
+    boundary, enforced HERE at parse (and re-guarded at check time)."""
+    if not isinstance(raw, str):
+        return None
+    p = raw.strip().replace("\\", "/")
+    if not p or p.startswith("/") or p.startswith("~"):
+        return None
+    # normalize and reject any traversal that climbs out of the tree
+    parts = [seg for seg in p.split("/") if seg not in ("", ".")]
+    if any(seg == ".." for seg in parts):
+        return None
+    return "/".join(parts) or None
+
+
+def _parse_asserts(raw: object) -> list[ItemAssert]:
+    """Validate the optional ``asserts`` list on one item. Each entry must name
+    a valid ``kind`` and a safe workspace-relative ``path``; a ``grep`` assert
+    additionally needs a non-empty ``pattern``. Malformed entries are dropped
+    (never raise) so one bad assert can't sink an otherwise-good item — the
+    surviving asserts still anchor it, and an item that ends up with zero
+    asserts simply falls back to gate-only verification (today's behavior)."""
+    if not isinstance(raw, list):
+        return []
+    out: list[ItemAssert] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind", "")).strip()
+        if kind not in _VALID_ASSERT_KINDS:
+            continue
+        path = _safe_rel_path(entry.get("path"))
+        if path is None:
+            continue
+        pattern = str(entry.get("pattern", "")).strip()
+        if kind == "grep" and not pattern:
+            continue  # a grep with no pattern verifies nothing
+        try:
+            re.compile(pattern or "")
+        except re.error:
+            continue  # an uncompilable regex would fail-closed forever — drop it
+        out.append(
+            ItemAssert(
+                kind=kind,  # type: ignore[arg-type]
+                path=path,
+                pattern=pattern,
+                absent=_parse_bool(entry.get("absent")),
+            )
+        )
+    return out
 
 # Decomposer prompt asks for raw YAML beginning with ``checklist:`` — but
 # models still occasionally wrap in a markdown ```yaml``` fence or precede
@@ -148,6 +204,7 @@ def _parse_item(raw: object) -> ChecklistItem | None:
         scaffold=_parse_bool(raw.get("scaffold")),
         attempts=attempts,
         failure_log=failure_log,
+        asserts=_parse_asserts(raw.get("asserts")),
     )
 
 
@@ -225,6 +282,7 @@ def validate_checklist(parsed: object) -> Checklist:
                 scaffold=item.scaffold,
                 attempts=item.attempts,
                 failure_log=list(item.failure_log),
+                asserts=list(item.asserts),
             )
         )
 
@@ -275,6 +333,16 @@ def dump_checklist(checklist: Checklist) -> str:
             d["attempts"] = item.attempts
         if item.failure_log:
             d["failure_log"] = list(item.failure_log)
+        if item.asserts:
+            d["asserts"] = [_assert_dict(a) for a in item.asserts]
+        return d
+
+    def _assert_dict(a: ItemAssert) -> dict[str, object]:
+        d: dict[str, object] = {"kind": a.kind, "path": a.path}
+        if a.pattern:
+            d["pattern"] = a.pattern
+        if a.absent:
+            d["absent"] = True
         return d
 
     payload: dict[str, object] = {
@@ -346,6 +414,7 @@ def update_item(
                 scaffold=item.scaffold,
                 attempts=attempts if attempts is not None else item.attempts,
                 failure_log=new_log,
+                asserts=list(item.asserts),
             )
         )
     if not found:

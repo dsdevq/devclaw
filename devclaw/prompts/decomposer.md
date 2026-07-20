@@ -96,6 +96,10 @@ agent ran out of attention. Each item declares:
     scaffolding* — a boilerplate-setup step whose entire diff is tool
     output, not hand-authored logic (see the dedicated rule below). Omit
     the key (defaults false) on every normal implementation item.
+  - optionally `asserts`: a short list of MECHANICAL acceptance checks the
+    settle gate runs against the delivered tree — the reality anchor under
+    the code-review gate (see the dedicated rule below). Emit them when the
+    repo context lets you name a concrete, checkable path; omit otherwise.
 
 **4. Mark dependencies HONESTLY.** Only declare `depends_on` when the
 later item genuinely cannot start until the earlier finishes (it imports
@@ -185,6 +189,45 @@ real logic ships unreviewed. So:
     a generated test project — the `dotnet new xunit` skeleton is scaffold;
     the `ContactServiceTests` you write against it is a normal item.
 
+**10. Anchor items with MECHANICAL `asserts` where you can.** `evidence_target`
+tells the code-review gate *where to look*; the gate reads a diff and grades it
+with judgement — and judgement can be talked into a false pass by a
+plausible-looking diff (finance-sentry-ui-library, 2026-07-18: a worker bumped
+`package.json` and wrote AGENTS.md prose claiming a dependency was installed,
+with no real lockfile entry — and the gate believed it). An `assert` is a check
+that CANNOT be talked into passing: after the item ships, the settle gate runs
+it against the actual delivered files, and the item flips to `done` ONLY if it
+holds. Attach one or two when the repo context gives you a concrete, checkable
+path. Two kinds only:
+
+  - `{{kind: file_exists, path: <workspace-relative path>}}` — the path must
+    exist after the item ships (add `absent: true` to require it must NOT
+    exist). Use for "a real artifact landed": `node_modules/ng-zorro-antd`,
+    `package-lock.json`, a generated migration file.
+  - `{{kind: grep, path: <path>, pattern: <regex>}}` — `pattern` must match
+    somewhere in the file (add `absent: true` to require it must NOT match).
+    Use for "the real thing is wired, not stubbed": `grep` the lockfile for the
+    package name; `grep` a source file for the symbol the item was supposed to
+    add; an `absent` grep for `not_yet_available` / `NotImplementedException` to
+    forbid a stub masquerading as real work.
+
+Rules that keep asserts honest and safe:
+
+  - **Ground every path** in REPOSITORY CONTEXT / the digest, or in a file this
+    very item creates — the same grounding rule as `evidence_target`. Do NOT
+    invent a path. An assert on a path that will never exist fails the item
+    forever.
+  - **`path` is workspace-relative** — never absolute, never `..`. An assert
+    with an unsafe path is silently dropped (it can't point outside the repo).
+  - **There is NO shell/command assert.** Asserts are read-only probes, not
+    `npm test` — the goal's `verify_cmd` and the build gate already run
+    commands. An assert proves an artifact EXISTS or a symbol IS WIRED; it does
+    not run the tests.
+  - **Asserts are optional and additive.** An item with none is verified by the
+    gate exactly as today. Only add an assert you are confident holds when the
+    item is genuinely done — a wrong assert blocks a correct item. When in
+    doubt, omit it and rely on `evidence_target`.
+
 ## Anti-patterns — reject these in your own output
 
 - **Vague items.** *"Implement the MCP server"* is not an item — it's a
@@ -211,6 +254,11 @@ real logic ships unreviewed. So:
   logic out of code review. A generated skeleton is scaffold; the first
   route, service, or test body you author on top of it is not. When unsure,
   omit the flag — the item just gets reviewed like everything else.
+- **Speculative `asserts`.** An assert on a guessed path or an over-strict
+  pattern blocks a CORRECT item forever (it fails-closed). Assert only what
+  you are certain holds when the item is truly done, grounded in a real path;
+  otherwise omit it and lean on `evidence_target`. A wrong assert is worse
+  than no assert.
 
 ## Output
 
@@ -233,6 +281,10 @@ checklist:
     milestone: <one of the spec's milestone headings, e.g. "M1 — Skeleton">
     scaffold: <true ONLY for a pure generator-output item, e.g. `ng new` /
       `dotnet new`; omit otherwise — see procedure step 9>
+    asserts:            # optional, see procedure step 10; omit if none
+      - {{kind: file_exists, path: <workspace-relative path>}}
+      - {{kind: grep, path: <path>, pattern: <regex>}}
+      - {{kind: grep, path: <path>, pattern: <regex>, absent: true}}
   - ...
 open_questions:
   - <question for the owner, only if needed; empty list ok>
