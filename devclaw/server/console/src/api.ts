@@ -140,6 +140,20 @@ export interface Unknown {
   defaultIfNoAnswer: string | null;
 }
 
+/** Usage rollup for one goal — cognition (host-side one-shot calls) plus
+ *  worker (per-task sandbox runs). Null when the rollup couldn't be read. */
+export interface GoalUsage {
+  cognitionTokensIn: number;
+  cognitionTokensOut: number;
+  cognitionCostUsd: number;
+  workerInputTokens: number;
+  workerOutputTokens: number;
+  workerCostUsd: number;
+  tasksWithUsage: number;
+  totalTokens: number;
+  totalCostUsd: number;
+}
+
 export interface GoalDetail {
   id: string;
   objective: string;
@@ -155,6 +169,7 @@ export interface GoalDetail {
   blockedKind: string;
   /** Firming questions to answer when blocked awaiting owner input; else []. */
   unknowns: Unknown[];
+  usage: GoalUsage | null;
   projectId?: string;
   /** Every task the goal heartbeat dispatched (parent_goal_id = this goal). */
   tasks: TaskRow[];

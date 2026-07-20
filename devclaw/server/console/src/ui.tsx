@@ -15,13 +15,15 @@ export function Badge({
   k,
   children,
   dot,
+  title,
 }: {
   k?: string;
   children: ReactNode;
   dot?: string;
+  title?: string;
 }) {
   return (
-    <span className="badge">
+    <span className="badge" title={title}>
       {dot && <StatusDot color={dot} />}
       {k && <span className="k">{k}</span>}
       <span>{children}</span>
