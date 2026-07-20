@@ -423,3 +423,73 @@ async def test_stale_persisted_baseline_degrades_to_fresh_capture(
     t = store.get_task(tid)
     assert t.status == "done"                          # never wedged
     assert t.pre_run_sha == head_sha                   # stale value overwritten
+
+
+# ---- hold legibility at the pump gate (2026-07-20 silent window-hold) ------
+
+def _closed_window_now() -> tuple[str, str]:
+    """An enabled window guaranteed CLOSED at the current wall-clock (opens 3h
+    from now, 1h wide) — keeps these tests green at any time of day."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(tz=timezone.utc)
+    return (now + timedelta(hours=3)).strftime("%H:%M"), (now + timedelta(hours=4)).strftime("%H:%M")
+
+
+async def test_pause_expiring_into_closed_window_logs_held_not_resuming(store, capsys):
+    """Named regression (2026-07-20): a quota pause whose reset lands OUTSIDE
+    the run window must not announce "resuming" — the old gate order printed it,
+    then operator_block silently held dispatch for hours, which read as a missed
+    auto-resume. The expired pause still clears; the hold is named instead."""
+    async def ok(req: EngineRequest):
+        return {"status": "ok", "workspaceDir": req.workspace_dir}
+
+    q = TaskQueue(store, runner=ok)
+    start, end = _closed_window_now()
+    store.set_run_schedule(True, start, end, "UTC")
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g")
+    store.set_global_pause(_now_ms() - 1000, "quota: out of extra usage - resets 6am (UTC)")
+    q._pump()
+    await q.drain()
+
+    err = capsys.readouterr().err
+    assert "resuming" not in err                       # the lie is gone
+    assert "quota pause expired" in err and "dispatch held" in err
+    assert store.global_pause()[0] == 0                # expired pause still cleared
+    assert store.get_task(tid).status == "pending"     # held by the window, legibly
+
+
+async def test_window_hold_logs_once_not_every_tick(store, capsys):
+    """A persistent hold names itself ONCE, not once per 10s tick."""
+    async def ok(req: EngineRequest):
+        return {"status": "ok", "workspaceDir": req.workspace_dir}
+
+    q = TaskQueue(store, runner=ok)
+    start, end = _closed_window_now()
+    store.set_run_schedule(True, start, end, "UTC")
+    q.submit(kind="implement_feature", workspace_dir="/ws", goal="g")
+    q._pump()
+    q._pump()
+    q._pump()
+    await q.drain()
+
+    assert capsys.readouterr().err.count("dispatch held") == 1
+
+
+async def test_window_reopen_logs_hold_lifted_and_dispatches(store, capsys):
+    """When the window opens again the queue says so and dispatch flows."""
+    async def ok(req: EngineRequest):
+        return {"status": "ok", "workspaceDir": req.workspace_dir}
+
+    q = TaskQueue(store, runner=ok)
+    start, end = _closed_window_now()
+    store.set_run_schedule(True, start, end, "UTC")
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g")
+    await q.drain()
+    assert store.get_task(tid).status == "pending"     # window held it
+
+    store.clear_run_schedule()
+    q._pump()
+    await q.drain()
+
+    assert "dispatch hold lifted" in capsys.readouterr().err
+    assert store.get_task(tid).status == "done"
