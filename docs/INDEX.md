@@ -20,7 +20,8 @@ docs/
 ├── flows/             temporal traces (one task; dispatch → PR)
 ├── reference/         look-up tables (env vars)
 ├── runbooks/          operational procedures (shakedown, VPS deploy)
-└── decisions/         frozen ADRs — rationale, not current state
+├── decisions/         frozen ADRs — rationale, not current state
+└── proposals/         pre-ADR staging — direction drafts (DRAFT → LOCKED → ADR)
 ```
 
 ## System
@@ -56,6 +57,18 @@ docs/
 | [`decisions/0001-openhands-engine.md`](./decisions/0001-openhands-engine.md) | The founding decision: adopt OpenHands as the execution engine; devclaw is thin orchestration. Includes the OpenHands-vs-isolation orthogonality rationale and why devclaw calls `docker run` itself. | **DECISION RECORD** — accepted 2026-06, frozen 2026-07-13 (was `architecture-v2.md`). The decision stands; system snapshots inside reflect their writing date. Current system: [`architecture.md`](./architecture.md). |
 | [`decisions/0002-engine-mode.md`](./decisions/0002-engine-mode.md) | The OpenHands-vs-`claude_sdk` engine choice: current default, the switch procedure, and the data a switch requires. | **DECISION RECORD** — frozen 2026-07-13 (was `engine-decision.md`). Default (`run_sandcastle`) and `DEVCLAW_ENGINE` values re-verified at freeze time. |
 | [`decisions/0003-goal-program-unification.md`](./decisions/0003-goal-program-unification.md) | Goal ↔ program unification: ONE `create_goal`, one dial (re-evaluation cadence — one-shot vs long-lived), one planning spine (grill→firm→decompose), shippable-release iterations, two-level sizing rule, fog-of-war scope map, checkpoint grill + auto-continue, hard cost backstops. Staged migration plan (PR-B → surface collapse → iterative loop). | **DECISION RECORD** — accepted 2026-07-19. Design locked; implementation staged — the "today" descriptions inside describe the pre-migration system and will drift as stages land. |
+
+## Proposals (pre-ADR staging — the status line inside the doc is authoritative)
+
+The spec lifecycle ([`.claude/rules/spec-lifecycle.md`](../.claude/rules/spec-lifecycle.md)):
+a direction is drafted here, every `[OPEN]` item is answered (the clarify
+step), the status flips to LOCKED, and when a tranche is scheduled the
+proposal graduates to a frozen ADR in `decisions/`. No code before lock.
+The tag below mirrors the doc's own status line.
+
+| Doc | Purpose | Status |
+|---|---|---|
+| [`proposals/eval-workbench.md`](./proposals/eval-workbench.md) | Eval-driven guardrail proportioning + the living eval workbench: measure the loop with the existing scored instrument (`evals/measure_passrate.py` + the judge), rebalance Python guardrails vs context/prompt engineering against the *weakest target model* (small local — the 2×2 classification), and make the system's evolution visible as a console "Evals" surface backed by an `eval_runs` table. Phased: Claude baseline → workbench MVP → judge-as-scorer → shed-candidate ID → local-model calibration + authorized shedding LAST. | **LOCKED (direction)** — 2026-07-20; execution not scheduled, sequenced AFTER the mission-control packaging borrow. Graduates to an ADR when a tranche is scheduled. |
 
 ## Where the docs are NOT
 

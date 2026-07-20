@@ -160,8 +160,10 @@ use). For the real pipeline (a logged-in `claude` + docker), follow
 
 This repo carries a Claude-Code project harness for developing devclaw itself
 (distinct from layer 5's model-agnostic `.agent/skills/`, which is product):
-`rules/` (testing · git-workflow · cognition-prompts — auto-loaded, the
-operational detail this file deliberately doesn't carry), `agents/invariant-guard`
+`rules/` (testing · git-workflow · cognition-prompts · spec-lifecycle —
+auto-loaded, the operational detail this file deliberately doesn't carry;
+spec-lifecycle is the anti-drift pipeline: a behavior-changing tranche starts
+from a LOCKED `docs/proposals/` entry or an ADR, no code before lock), `agents/invariant-guard`
 (run it on any diff before a PR), `commands/ship` (the pre-PR ritual as `/ship`),
 `hooks/` (docs-reminder + a main-branch guard that blocks commit/push on main —
 escape hatch: prefix `DEVCLAW_ALLOW_MAIN=1`), and `skills/` (docs-audit,
