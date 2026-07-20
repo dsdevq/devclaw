@@ -249,12 +249,32 @@ export function GoalDetail() {
               <div key={u.id}>
                 <div style={{ fontSize: 13, fontWeight: 550, marginBottom: 2 }}>{u.question}</div>
                 {u.why && <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>{u.why}</div>}
+                {(u.options ?? []).length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+                    {(u.options ?? []).map((opt) => (
+                      <button
+                        key={opt}
+                        type="button"
+                        className={`btn${(answers[u.id] ?? "") === opt ? " primary" : ""}`}
+                        style={{ fontSize: 12 }}
+                        onClick={() => setAnswers((a) => ({ ...a, [u.id]: opt }))}
+                      >
+                        {opt}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <textarea
                   className="field"
                   rows={2}
                   value={answers[u.id] ?? ""}
                   onChange={(e) => setAnswers((a) => ({ ...a, [u.id]: e.target.value }))}
                 />
+                {u.defaultIfNoAnswer && (
+                  <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>
+                    Suggested default: {u.defaultIfNoAnswer}
+                  </div>
+                )}
               </div>
             ))}
           </div>

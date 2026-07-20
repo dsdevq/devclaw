@@ -546,6 +546,7 @@ class GoalService:
             "lifecycle": s.lifecycle or "executing",
             "next": s.next,
             "blocked_on": s.blocked_on,
+            "blocked_kind": s.blocked_kind,
             "in_flight": (
                 {"tool": s.in_flight.tool, "id": s.in_flight.id,
                  "is_done_check": s.in_flight.is_done_check}

@@ -867,7 +867,16 @@ async def goal_json(request: Request) -> Response:
             draft = goals._goal_store.read_firmed_draft(goal_id)
             if draft is not None:
                 unknowns = [
-                    {"id": u.id, "question": u.question, "why": getattr(u, "why", "")}
+                    {
+                        "id": u.id,
+                        "question": u.question,
+                        "why": getattr(u, "why", ""),
+                        # The firming model already emits structured options per
+                        # unknown; carrying them through lets the console render
+                        # one-tap choices instead of a bare textarea.
+                        "options": list(getattr(u, "options", []) or []),
+                        "defaultIfNoAnswer": getattr(u, "default_if_no_answer", None),
+                    }
                     for u in draft.unknowns
                 ]
         except Exception:
