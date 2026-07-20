@@ -250,6 +250,7 @@ class InProcessEngine:
             pr_url=t.pr_url,
             gate_passed=_gate_passed(t.result_json),
             diff_stats=_diff_stats(t.result_json),
+            repo_notes=_repo_notes(t.result_json) if terminal else None,
         )
 
     def _poll_program(self, program_id: str) -> PollResult:
@@ -279,6 +280,12 @@ class InProcessEngine:
                 }
                 for t in tasks
             ]
+        # A program's repo notes are its children's, joined — the merge layer
+        # dedupes line-by-line, so a simple concatenation is safe.
+        notes_parts = (
+            [n for n in (_repo_notes(t.result_json) for t in tasks) if n]
+            if terminal else []
+        )
         return PollResult(
             terminal=terminal,
             status=p.status,
@@ -286,6 +293,7 @@ class InProcessEngine:
             pr_url=("; ".join(pr_urls) if pr_urls else None),
             gate_passed=None,  # a program aggregates many gates — no single verdict
             tasks=tasks_out,
+            repo_notes=("\n".join(notes_parts) or None) if terminal else None,
         )
 
 
@@ -305,6 +313,17 @@ def _gate_passed(result_json: Optional[str]) -> Optional[bool]:
     verify = data.get("verify") if isinstance(data, dict) else None
     if isinstance(verify, dict) and verify.get("ran") and "passed" in verify:
         return bool(verify["passed"])
+    return None
+
+
+def _repo_notes(result_json: Optional[str]) -> Optional[str]:
+    """The worker's REPO NOTES hand-back the runner parsed into the result
+    (durable repo facts for future tasks on the same repo — MC borrow item 3).
+    Defensive: anything not a non-empty string → None."""
+    data = _parse_result(result_json)
+    notes = data.get("repo_notes") if isinstance(data, dict) else None
+    if isinstance(notes, str) and notes.strip():
+        return notes.strip()
     return None
 
 

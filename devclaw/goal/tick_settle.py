@@ -31,6 +31,7 @@ from .tick_dispatch import _resolve_discovery
 from .tick_donegate import _resolve_done_gate
 from . import checklist as _checklist
 from . import reconcile as _reconcile
+from . import repo_brief as _repo_brief
 from .engine import GoalEngine, GoalEngineError
 from .models import Checklist, ChecklistItem, Goal, GoalStatus, InFlight, ItemAssert, PollResult
 from .store import GoalStore
@@ -663,6 +664,24 @@ async def _resolve_polling_action(
         ctx.store.discard_pending_mirrors(goal_id)
         raise
     ctx.store.render_mirrors(goal_id)
+
+    # Repo-scoped worker brief writeback (MC borrow item 3): fold the worker's
+    # REPO NOTES hand-back into this repo's accumulated brief so FUTURE goals
+    # on the same workspace start informed. Plain line-dedupe merge, zero LLM.
+    # Deliberately OUTSIDE the settle transaction and best-effort: the brief is
+    # cross-goal telemetry-grade context — a hiccup here must never re-settle
+    # or wedge the goal. Idempotent by construction (duplicate lines drop), so
+    # a settle retry re-applying the same notes is a no-op.
+    if poll.repo_notes:
+        try:
+            scope = _repo_brief.scope_key_for(goal.workspace_dir)
+            if scope:
+                merged = _repo_brief.merge_repo_notes(
+                    ctx.store.read_repo_brief(scope), poll.repo_notes
+                )
+                ctx.store.write_repo_brief(scope, merged)
+        except Exception:  # noqa: BLE001 — notes are hints, never a settle gate
+            pass
 
     _trace.record_delivery(
         goal_id=goal_id, action_label=_action_label(ref),

@@ -192,6 +192,23 @@ class GoalState:
                   PRIMARY KEY(goal_id, kind)
                 );
 
+                -- PROJECT-scoped documents (mission-control borrow item 3):
+                -- goal_docs die with their goal, so every new goal on the same
+                -- repo relearned build quirks from zero. scope_key is the
+                -- NORMALIZED workspace_dir (project_registry._normalize_
+                -- workspace — the same join key the registry uses), NOT a
+                -- goal/project id: the brief must survive goal cancel+refile
+                -- and project re-registration alike. Host-side on purpose —
+                -- the sandbox workspace is `git clean -fdx`-wiped per
+                -- dispatch, so nothing left in-repo survives between tasks.
+                CREATE TABLE IF NOT EXISTS project_docs (
+                  scope_key  TEXT NOT NULL,
+                  kind       TEXT NOT NULL,
+                  content    TEXT,
+                  updated_at INTEGER,
+                  PRIMARY KEY(scope_key, kind)
+                );
+
                 -- goal_id lookups on the append-only / multi-row tables.
                 CREATE INDEX IF NOT EXISTS idx_goal_phase_history_goal
                   ON goal_phase_history(goal_id, id);
@@ -774,6 +791,38 @@ class GoalState:
             row = self._store._db.execute(
                 "SELECT content FROM goal_docs WHERE goal_id = ? AND kind = ?",
                 (goal_id, kind),
+            ).fetchone()
+        return row["content"] if row else None
+
+    # ---- project_docs (repo-scoped, outlives any one goal) ----------------
+    #
+    # Same atomic-upsert shape as goal_docs, keyed by normalized workspace
+    # path instead of goal_id. One kind today: ``repo_brief`` — the durable
+    # repo facts workers hand back (build quirks, test gotchas) that get
+    # prepended to future dispatches on the same repo.
+
+    PROJECT_DOC_KINDS = frozenset({"repo_brief"})
+
+    def write_project_doc(self, scope_key: str, kind: str, content: str, ts_ms: int) -> None:
+        """Upsert the current project-scoped document for ``(scope_key, kind)``."""
+        assert kind in self.PROJECT_DOC_KINDS, f"write_project_doc: unknown kind {kind!r}"
+        with self._store._lock:
+            self._store._db.execute(
+                "INSERT INTO project_docs (scope_key, kind, content, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(scope_key, kind) DO UPDATE SET "
+                "content = excluded.content, updated_at = excluded.updated_at",
+                (scope_key, kind, content, ts_ms),
+            )
+            self._store._commit()
+
+    def read_project_doc(self, scope_key: str, kind: str) -> "str | None":
+        """The current project-scoped document, or None when no worker has
+        handed back notes for this repo yet."""
+        assert kind in self.PROJECT_DOC_KINDS, f"read_project_doc: unknown kind {kind!r}"
+        with self._store._lock:
+            row = self._store._db.execute(
+                "SELECT content FROM project_docs WHERE scope_key = ? AND kind = ?",
+                (scope_key, kind),
             ).fetchone()
         return row["content"] if row else None
 

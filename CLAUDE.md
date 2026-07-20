@@ -53,7 +53,8 @@ spawn containers itself — it goes through the engine).
 - **Single writer to state.** Only the **TaskQueue** mutates task rows; `StateStore` is
   an append-only event log, views are projections. Goal state is owned by `GoalStore`
   and (as of Tranche 1) lives in SQLite in the same `devclaw.db` — `goal_status`,
-  `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs`, `goal_phase_history`.
+  `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs`, `goal_phase_history`,
+  plus goal-transcending `project_docs` (the repo brief, keyed by workspace path).
   `STATUS.md`/`log.md`/`inbox.md`/`deliveries.md`/`checklist.yaml`/`firmed-draft.yaml`/`RUN_SUMMARY.md`
   are generated **views** — human- and rollback-readable, never read back for
   decisions. Mutation is NOT heartbeat-exclusive: `steer_goal`/`resume_goal`/`cancel_goal` write from
