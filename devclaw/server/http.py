@@ -854,10 +854,12 @@ async def goal_json(request: Request) -> Response:
     # Dispatched tasks — every Task the goal heartbeat filed against this goal
     # (parent_goal_id match). Includes both live and terminal tasks; the
     # console renders them as a timeline of what the goal actually dispatched.
-    dispatched_tasks = [
-        _task_row(t)
-        for t in store.list_tasks(parent_goal_id=goal_id, limit=50)
-    ]
+    # One fetch serves both the task timeline (newest 50) and the usage sum
+    # below (all 500 — a goal past the dispatch cap rarely nears that, and a
+    # 50-row sum would quietly understate the "what did this goal cost"
+    # number the block exists to answer).
+    task_rows = store.list_tasks(parent_goal_id=goal_id, limit=500)
+    dispatched_tasks = [_task_row(t) for t in task_rows[:50]]
     # Firming unknowns — only meaningful (and only read) when the goal is blocked
     # awaiting owner answers. Best-effort: a torn/absent draft degrades to [] so
     # the console shows a plain Resume rather than 500-ing the detail view.
@@ -881,6 +883,29 @@ async def goal_json(request: Request) -> Response:
                 ]
         except Exception:
             unknowns = []
+    # Usage rollup — cognition from the goal's trace totals, worker from the
+    # per-task "usage" blocks the runner records into result_json. Pure reads;
+    # best-effort: a torn trace/row degrades to null, never 500s the view.
+    usage: dict | None = None
+    try:
+        totals = store.trace_totals(goal_id=goal_id)
+        worker = _telemetry.sum_task_usage(t.result_json for t in task_rows)
+        usage = {
+            "cognitionTokensIn": totals["cognition_tokens_in"],
+            "cognitionTokensOut": totals["cognition_tokens_out"],
+            "cognitionCostUsd": totals["cognition_cost_usd"],
+            "workerInputTokens": worker["input_tokens"],
+            "workerOutputTokens": worker["output_tokens"],
+            "workerCostUsd": worker["cost_usd"],
+            "tasksWithUsage": worker["tasks_with_usage"],
+            "totalTokens": (
+                totals["cognition_tokens_in"] + totals["cognition_tokens_out"]
+                + worker["input_tokens"] + worker["output_tokens"]
+            ),
+            "totalCostUsd": round(totals["cognition_cost_usd"] + worker["cost_usd"], 6),
+        }
+    except Exception:
+        usage = None
     return JSONResponse(
         {
             "id": g["id"],
@@ -896,6 +921,7 @@ async def goal_json(request: Request) -> Response:
             "blockedOn": g.get("blocked_on"),
             "blockedKind": g.get("blocked_kind", ""),
             "unknowns": unknowns,
+            "usage": usage,
             "tasks": dispatched_tasks,
         }
     )

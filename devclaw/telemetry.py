@@ -87,6 +87,42 @@ def _extract_structural(preview: str) -> Optional[str]:
     return g if g in _STRUCTURAL_GRADES else None
 
 
+def sum_task_usage(result_jsons: Any) -> dict:
+    """Sum the worker ``usage`` blocks out of task ``result_json`` payloads.
+
+    Input is any iterable of raw ``result_json`` strings (None/torn entries
+    are skipped — usage is telemetry, absence is normal for legacy rows and
+    failed runs). Returns the flat totals plus ``tasks_with_usage`` so a
+    reader can tell "0 because free" from "0 because nothing reported".
+    """
+    totals = {
+        "tasks_with_usage": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cost_usd": 0.0,
+    }
+    for raw in result_jsons:
+        if not raw:
+            continue
+        try:
+            usage = json.loads(raw).get("usage")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(usage, dict):
+            continue
+        totals["tasks_with_usage"] += 1
+        for key in ("input_tokens", "output_tokens", "cache_read_tokens"):
+            v = usage.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                totals[key] += int(v)
+        c = usage.get("cost_usd")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            totals["cost_usd"] += float(c)
+    totals["cost_usd"] = round(totals["cost_usd"], 6)
+    return totals
+
+
 def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
     """Roll up L8 scorecard metrics over the last ``window_hours``.
 
@@ -115,6 +151,14 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
         ).fetchone()
         merged_with_pr = int(merged_with_pr_row["n"] if merged_with_pr_row else 0)
 
+        # ---- worker usage (per-task result_json "usage" blocks) ---------
+        usage_rows = store._db.execute(
+            "SELECT result_json FROM tasks "
+            "WHERE completed_at IS NOT NULL AND completed_at >= ? "
+            "AND result_json IS NOT NULL",
+            (since_ms,),
+        ).fetchall()
+
         # ---- workspace breaks tripped in window ------------------------
         breaks_row = store._db.execute(
             "SELECT COUNT(*) AS n FROM events "
@@ -134,15 +178,33 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
             (since_ms,),
         ).fetchall()
 
+    worker_usage = sum_task_usage(r["result_json"] for r in usage_rows)
+
     verdicts: dict[str, int] = {v: 0 for v in _EVAL_VERDICTS}
     structural: dict[str, int] = {g: 0 for g in _STRUCTURAL_GRADES}
     unparseable = 0
     eval_calls = 0
+    cog_tokens_in = 0
+    cog_tokens_out = 0
+    cog_cost_usd = 0.0
     for r in cog_rows:
         try:
             p = json.loads(r["payload_json"])
         except (TypeError, json.JSONDecodeError):
             continue
+        # Cognition usage sums span EVERY in-window cognition call (planner,
+        # firming, evaluator, gates…) — same real-usage-else-estimate
+        # preference as StateStore.trace_totals. The evaluator filter below
+        # applies only to verdict counting.
+        if p.get("tokens_in") is not None or p.get("tokens_out") is not None:
+            cog_tokens_in += int(p.get("tokens_in") or 0)
+            cog_tokens_out += int(p.get("tokens_out") or 0)
+        else:
+            cog_tokens_in += int(p.get("tokens_in_est") or 0)
+            cog_tokens_out += int(p.get("tokens_out_est") or 0)
+        c = p.get("cost_usd")
+        if isinstance(c, (int, float)) and not isinstance(c, bool):
+            cog_cost_usd += float(c)
         if p.get("role") != _EVALUATOR_ROLE:
             continue
         eval_calls += 1
@@ -182,6 +244,24 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
     # trace record — a small state_store change, out of L8-v1 scope.
     first_pass_hit_rate = (verdicts["achieved"] / classified) if classified else 0.0
 
+    # ---- cost per merged PR (the legibility number) ---------------------
+    # Tokens are the honest unit on OAuth (Pro/Max) runs — the CLI reports no
+    # dollar cost there, so cost_usd sums are often 0.0; report the token
+    # ratio always and the dollar ratio only when a real cost was recorded.
+    total_tokens = (
+        cog_tokens_in + cog_tokens_out
+        + worker_usage["input_tokens"] + worker_usage["output_tokens"]
+    )
+    total_cost_usd = round(cog_cost_usd + worker_usage["cost_usd"], 6)
+    tokens_per_merged_pr = (
+        int(total_tokens / merged_with_pr) if merged_with_pr else None
+    )
+    cost_per_merged_pr_usd = (
+        round(total_cost_usd / merged_with_pr, 6)
+        if merged_with_pr and total_cost_usd > 0
+        else None
+    )
+
     return {
         "window_hours": window_hours,
         "since_ms": since_ms,
@@ -195,6 +275,20 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
         },
         "merge_rate": round(merge_rate, 4),
         "workspace_breaks_tripped": workspace_breaks,
+        "usage": {
+            "cognition_tokens_in": cog_tokens_in,
+            "cognition_tokens_out": cog_tokens_out,
+            "cognition_cost_usd": round(cog_cost_usd, 6),
+            "worker_input_tokens": worker_usage["input_tokens"],
+            "worker_output_tokens": worker_usage["output_tokens"],
+            "worker_cache_read_tokens": worker_usage["cache_read_tokens"],
+            "worker_cost_usd": worker_usage["cost_usd"],
+            "tasks_with_usage": worker_usage["tasks_with_usage"],
+            "total_tokens": total_tokens,
+            "total_cost_usd": total_cost_usd,
+            "tokens_per_merged_pr": tokens_per_merged_pr,
+            "cost_per_merged_pr_usd": cost_per_merged_pr_usd,
+        },
         "evaluator": {
             "total_calls": eval_calls,
             "verdicts": verdicts,
@@ -212,6 +306,10 @@ def compute_scorecard(store: Any, *, window_hours: int = 168) -> dict:
             "would tighten this — see plan.md §Measurement direction.",
             "steer_rate uses off_track verdicts as a steering proxy; owner-"
             "written inbox.md steers are not (yet) traced separately.",
+            "usage: cognition rows without real CLI usage contribute their "
+            "len/4 estimate; OAuth (Pro/Max) runs report no dollar cost, so "
+            "tokens_per_merged_pr is the honest cross-billing number and "
+            "cost_per_merged_pr_usd is null unless a real cost was recorded.",
         ],
     }
 
@@ -463,6 +561,19 @@ def format_scorecard(sc: dict) -> str:
         lines.append("structural (done-gate only):")
         for g in _STRUCTURAL_GRADES:
             lines.append(f"  {g:<14} {struct.get(g, 0)}")
+    u = sc.get("usage") or {}
+    if u:
+        lines.append(
+            f"usage:            cognition {u['cognition_tokens_in']}+{u['cognition_tokens_out']} tok, "
+            f"workers {u['worker_input_tokens']}+{u['worker_output_tokens']} tok "
+            f"({u['tasks_with_usage']} tasks reporting)"
+        )
+        per_pr = (
+            f"{u['tokens_per_merged_pr']} tok" if u["tokens_per_merged_pr"] is not None else "n/a"
+        )
+        if u["cost_per_merged_pr_usd"] is not None:
+            per_pr += f" / ${u['cost_per_merged_pr_usd']:.4f}"
+        lines.append(f"per merged PR:    {per_pr}")
     lines.append("")
     lines.append("estimate notes:")
     for n in sc.get("estimate_notes") or []:

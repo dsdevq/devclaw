@@ -11,6 +11,12 @@ import { Badge, ErrorNote, Loading, Modal, StatusDot, Tabs } from "../ui";
 
 type Tab = "timeline" | "tasks" | "prs" | "activity" | "schedule";
 
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
 function shortTime(ms: number | null): string {
   if (ms === null) return "—";
   const d = new Date(ms);
@@ -150,6 +156,12 @@ export function GoalDetail() {
                 )}
                 {data.dispatchCap > 0 && (
                   <Badge k="Dispatched">{data.actionsDispatched} / {data.dispatchCap}</Badge>
+                )}
+                {data.usage && data.usage.totalTokens > 0 && (
+                  <Badge k="Usage" title={`cognition ${fmtTokens(data.usage.cognitionTokensIn + data.usage.cognitionTokensOut)} tok · workers ${fmtTokens(data.usage.workerInputTokens + data.usage.workerOutputTokens)} tok over ${data.usage.tasksWithUsage} task${data.usage.tasksWithUsage === 1 ? "" : "s"}`}>
+                    {fmtTokens(data.usage.totalTokens)} tok
+                    {data.usage.totalCostUsd > 0 ? ` · $${data.usage.totalCostUsd.toFixed(2)}` : ""}
+                  </Badge>
                 )}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

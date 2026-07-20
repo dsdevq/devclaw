@@ -560,6 +560,31 @@ def _parse_blocked_reason(agent_message: str | None) -> str | None:
     return reason or "worker reported BLOCKED without a stated reason"
 
 
+def _collect_usage(conversation) -> dict | None:
+    """Best-effort per-task usage from the SDK's conversation stats.
+
+    The ACP agent records each turn's token usage (and, when the CLI reports
+    one, its cost) into the conversation's combined metrics; this flattens
+    them into a plain dict that rides the result payload to the host. Usage
+    is telemetry, never a gate: any schema drift or absent stats degrades to
+    None (block omitted) rather than failing a finished run. All-zero stats
+    also return None — an ACP server that doesn't report usage should read
+    as "unknown", not "free".
+    """
+    try:
+        metrics = conversation.conversation_stats.get_combined_metrics()
+        tokens = getattr(metrics, "accumulated_token_usage", None)
+        usage = {
+            "input_tokens": int(getattr(tokens, "prompt_tokens", 0) or 0),
+            "output_tokens": int(getattr(tokens, "completion_tokens", 0) or 0),
+            "cache_read_tokens": int(getattr(tokens, "cache_read_tokens", 0) or 0),
+            "cost_usd": round(float(getattr(metrics, "accumulated_cost", 0.0) or 0.0), 6),
+        }
+        return usage if any(usage.values()) else None
+    except Exception:
+        return None
+
+
 def _agent_message_text(payload: dict) -> str:
     """Pull the plain text out of a MessageEvent payload (``model_dump`` shape).
 
@@ -827,6 +852,7 @@ def main() -> None:
             # stdout broken? nothing else we can do; let the run continue.
             pass
 
+    usage: dict | None = None
     try:
         with contextlib.redirect_stdout(captured_stdout):
             # acp_command is configurable (DEVCLAW_ACP_COMMAND / payload); the
@@ -851,6 +877,7 @@ def main() -> None:
             )
             conversation.send_message(wrapped_goal)
             conversation.run()
+            usage = _collect_usage(conversation)
             agent.close()
     except Exception as exc:
         # A clear usage/rate limit becomes status="rate_limited" so the host
@@ -882,6 +909,8 @@ def main() -> None:
             "workspace_dir": workspace_dir,
             "agent_output": captured_stdout.getvalue(),
         }
+        if usage:
+            blocked_payload["usage"] = usage
         if hook_warnings:
             blocked_payload["hook_warnings"] = hook_warnings
         _emit_result(blocked_payload)
@@ -901,6 +930,8 @@ def main() -> None:
         "message": "OpenHands completed.",
         "agent_output": captured_stdout.getvalue(),
     }
+    if usage:
+        result_payload["usage"] = usage
     if hook_warnings:
         result_payload["hook_warnings"] = hook_warnings
 

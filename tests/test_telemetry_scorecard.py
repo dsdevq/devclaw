@@ -268,6 +268,96 @@ def test_structural_grade_extracted_from_full_response_text(store):
     assert sc["evaluator"]["structural_grades"]["clean"] == 1
 
 
+def _land_task_with_usage(store: StateStore, *, pr_url: str = "", usage: dict | None = None) -> str:
+    """A done task whose result_json carries the runner's per-task usage block
+    (mission-control borrow item 2) — the exact payload shape mark_done stores."""
+    tid = f"tid-{time.time_ns()}"
+    store.create_task(id=tid, kind="implement_feature", workspace_dir="/w", goal="g")
+    result: dict = {"status": "ok"}
+    if usage is not None:
+        result["usage"] = usage
+    store.mark_done(tid, json.dumps(result), pr_url=pr_url or None)
+    return tid
+
+
+def test_scorecard_usage_sums_worker_and_cognition_into_tokens_per_merged_pr(store):
+    """Item 2's legibility number: the window's total token spend (cognition +
+    worker) divided by merged PRs. OAuth runs report no dollar cost, so the
+    dollar ratio stays None when no real cost was recorded — tokens are the
+    honest cross-billing unit."""
+    _land_task_with_usage(
+        store, pr_url="https://gh/x/1",
+        usage={"input_tokens": 1000, "output_tokens": 500, "cache_read_tokens": 0, "cost_usd": 0.0},
+    )
+    _land_task_with_usage(
+        store, pr_url="https://gh/x/2",
+        usage={"input_tokens": 300, "output_tokens": 200, "cache_read_tokens": 10, "cost_usd": 0.0},
+    )
+    # Legacy row without a usage block — contributes nothing, breaks nothing.
+    _land_task(store, workspace="/w", status="done")
+    # Cognition rows: one with REAL usage, one legacy estimate-only.
+    store.append_trace_event(
+        trace_id="c1", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "goal_planner",
+                 "tokens_in": 400, "tokens_out": 100, "cost_usd": 0.0},
+    )
+    store.append_trace_event(
+        trace_id="c2", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "goal_planner",
+                 "tokens_in_est": 80, "tokens_out_est": 20},
+    )
+
+    sc = compute_scorecard(store, window_hours=24)
+    u = sc["usage"]
+    assert u["worker_input_tokens"] == 1300
+    assert u["worker_output_tokens"] == 700
+    assert u["worker_cache_read_tokens"] == 10
+    assert u["tasks_with_usage"] == 2
+    assert u["cognition_tokens_in"] == 480  # 400 real + 80 estimated fallback
+    assert u["cognition_tokens_out"] == 120
+    assert u["total_tokens"] == 1300 + 700 + 480 + 120
+    # 2 merged PRs → integer tokens-per-PR; no dollar cost recorded → None.
+    assert u["tokens_per_merged_pr"] == (1300 + 700 + 480 + 120) // 2
+    assert u["cost_per_merged_pr_usd"] is None
+
+
+def test_scorecard_cost_per_merged_pr_when_real_cost_recorded(store):
+    _land_task_with_usage(
+        store, pr_url="https://gh/x/1",
+        usage={"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "cost_usd": 0.30},
+    )
+    store.append_trace_event(
+        trace_id="c1", goal_id="g", kind="cognition",
+        payload={"kind": "cognition", "role": "evaluator",
+                 "tokens_in": 10, "tokens_out": 5, "cost_usd": 0.10,
+                 "response_preview": json.dumps({"verdict": "achieved"})[:240]},
+    )
+    sc = compute_scorecard(store, window_hours=24)
+    u = sc["usage"]
+    assert u["total_cost_usd"] == pytest.approx(0.40)
+    assert u["cost_per_merged_pr_usd"] == pytest.approx(0.40)
+
+
+def test_scorecard_usage_zero_prs_reports_null_ratios(store):
+    _land_task_with_usage(
+        store,  # done but NO pr_url → merged_with_pr stays 0
+        usage={"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "cost_usd": 0.0},
+    )
+    sc = compute_scorecard(store, window_hours=24)
+    assert sc["usage"]["tokens_per_merged_pr"] is None
+    assert sc["usage"]["cost_per_merged_pr_usd"] is None
+
+
+def test_format_scorecard_renders_usage_and_per_pr_line(store):
+    _land_task_with_usage(
+        store, pr_url="https://gh/x/1",
+        usage={"input_tokens": 100, "output_tokens": 50, "cache_read_tokens": 0, "cost_usd": 0.0},
+    )
+    text = format_scorecard(compute_scorecard(store, window_hours=24))
+    assert "usage:" in text
+    assert "per merged PR:" in text
+
+
 def test_format_scorecard_renders_structural_when_any_reported(store):
     """format_scorecard shows structural block only when the window contained
     at least one graded response — an all-zero row would be noise."""
