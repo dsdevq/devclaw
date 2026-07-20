@@ -1,17 +1,13 @@
 # Proposal — Eval-driven guardrail proportioning + the living eval workbench
 
-- **Status:** **LOCKED (direction) · execution not scheduled** — locked with
-  Denys 2026-07-20. Same shape as the gnhf / mission-control proposals before
-  their tranches were scheduled: the *thesis, principles, reuse decisions,
-  workbench shape, and phased order* below are agreed and should not be
-  re-litigated; every previously-**[OPEN]** item was answered and closed the
-  same day (§5 resolved, §10 empty — nothing requires an answer before
-  execution). Graduates to an ADR when a tranche is scheduled.
-  Any locked line is reopenable — say so and we adjust.
-- **Sequencing:** comes AFTER the mission-control packaging borrow (#1 packaging
-  is the scoreboard's actual gap; days of work, zero codebase risk). Packaging
-  first, this second — sequence, don't stack.
-- **Date opened:** 2026-07-20 · **Locked:** 2026-07-20
+- **Status:** **GRADUATED → [ADR 0004](../decisions/0004-eval-workbench.md)**
+  — tranche scheduled 2026-07-20 (the mission-control packaging borrow, which
+  this was sequenced after, completed the same day). The ADR is canonical from
+  here on; this doc is history — the full narrative, the clarify-step Q&A
+  trail, and the honest tensions the ADR distills. Locked with Denys
+  2026-07-20; every previously-**[OPEN]** item was answered and closed the
+  same day (§5 resolved, §10 empty).
+- **Date opened:** 2026-07-20 · **Locked:** 2026-07-20 · **Graduated:** 2026-07-20
 - **Authors:** Denys + Claude (conversation of 2026-07-20)
 - **Supersedes / relates:** the deferred stage 3 of [ADR 0003](decisions/0003-goal-program-unification.md);
   the deferred portability spike; the "scored benchmark overdue" thread.
