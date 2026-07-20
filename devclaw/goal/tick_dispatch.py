@@ -29,6 +29,7 @@ from . import decomposer as _decomposer
 from . import research as _research
 from . import world_research as _world_research
 from . import delivery_strategy as _delivery
+from . import repo_brief as _repo_brief
 from .engine import GoalEngine
 from .models import Action, Goal, GoalStatus
 from .notify import Notifier
@@ -180,17 +181,37 @@ async def _dispatch_action(
     # raised by store.transition() (propagated UNTOUCHED to tick_goal's
     # top-level choke point, same as before this PR).
     dispatch_exc: "Exception | None" = None
+    # Repo-scoped worker brief (MC borrow item 3): prepend the accumulated
+    # notes previous workers handed back for THIS repo — build quirks, test
+    # gotchas — so a fresh goal doesn't relearn them from zero. Mechanism,
+    # not cognition (one SQLite read); skipped for read-only reviews so the
+    # reviewer's grounded read isn't seeded with prior claims to confirm.
+    brief_prefix = ""
+    if action.tool != "review_repository":
+        scope = _repo_brief.scope_key_for(goal.workspace_dir)
+        if scope:
+            brief_prefix = _repo_brief.render_brief_prefix(store.read_repo_brief(scope))
     try:
         with store.transaction():
             try:
                 digest = _prior_attempts_digest(checklist, list(action.addresses))
                 dispatch_action = (
-                    replace(action, goal=action.goal + digest) if digest else action
+                    replace(action, goal=brief_prefix + action.goal + digest)
+                    if (digest or brief_prefix) else action
                 )
                 ref = _run_atomic(engine.dispatch(dispatch_action, goal, notify_url))
             except Exception as exc:  # noqa: BLE001 — caught again below, outside the txn
                 dispatch_exc = exc
                 raise
+            # Re-stamp the ref with the CLEAN action text. The brief prefix +
+            # retry digest are worker INPUT; the ref's goal is what settle
+            # records as a delivery and what the direction evaluator reads as
+            # "grounded deliveries" — prior workers' unverified hints must not
+            # ride that channel as evidence (invariant-guard finding), and
+            # _action_label telemetry stays legible instead of leading with
+            # the brief header on every settle.
+            if dispatch_action is not action:
+                ref = replace(ref, goal=action.goal)
             # Carry the action's checklist addresses onto the in-flight ref so
             # the settle hook can update the right items without re-reading
             # the plan.

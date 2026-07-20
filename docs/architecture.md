@@ -131,7 +131,9 @@ PRs in [`flows/delivery.md`](./flows/delivery.md).
 **SQLite (`devclaw.db`) is the single source of truth.** Since Tranche 1 the
 goal layer lives in the same DB as the task queue: `goal_status`,
 `goal_steering`, `goal_log`, `goal_deliveries`, `goal_docs`,
-`goal_phase_history`. The familiar files — `STATUS.md`, `log.md`, `inbox.md`,
+`goal_phase_history`, plus the goal-transcending `project_docs` (the repo
+brief workers accumulate, keyed by normalized workspace path — it survives
+goal cancel+refile on purpose). The familiar files — `STATUS.md`, `log.md`, `inbox.md`,
 `deliveries.md`, `checklist.yaml`, `firmed-draft.yaml` — are **generated
 views**: human- and rollback-readable, **never read back for decisions**. Only
 `goal.yaml`, `spec.md`, `discovery.md` stay plain files.

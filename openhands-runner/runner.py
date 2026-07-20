@@ -250,7 +250,11 @@ _RETURN_CONTRACT = (
     "ACCEPTANCE: for each acceptance criterion stated in the Goal, whether it is "
     "met and the evidence; write 'none stated' if the Goal listed none.\n"
     "FOLLOW-UPS: anything you had to work around, left unfinished, or that needs "
-    "a human — or 'none'.\n\n"
+    "a human — or 'none'.\n"
+    "REPO NOTES: durable repo-level facts a future engineer on a DIFFERENT task "
+    "in this repository would need — build/test quirks, non-obvious commands, "
+    "environment gotchas — as short semicolon-separated clauses, or 'none'. "
+    "Never task-specific detail (that belongs in CHANGED), never speculation.\n\n"
     "Report only checks you truly ran, not ones you intended to. If you write "
     "BLOCKED, still fill CHANGED / VERIFIED / ACCEPTANCE with how far you got."
 )
@@ -585,6 +589,36 @@ def _collect_usage(conversation) -> dict | None:
         return None
 
 
+# The hand-back's REPO NOTES field — durable repo-level facts for FUTURE tasks
+# on the same repo (build/test quirks, non-obvious commands). Same parsing
+# philosophy as the BLOCKED line: anchored to line start, light markdown
+# decoration tolerated, the agent's OWN final message only, model-agnostic
+# plain text. "none"/empty degrade to None — absence of notes is the normal
+# case, never an error.
+_REPO_NOTES_LINE_RE = re.compile(
+    r"^[ \t>#*_-]*REPO NOTES:[ \t]*(.*?)[ \t*_]*$",
+    re.MULTILINE,
+)
+
+
+def _parse_repo_notes(agent_message: str | None) -> str | None:
+    """If the agent's final hand-back carries REPO NOTES, return them.
+
+    The LAST matching line wins (mirrors ``_parse_blocked_reason``). A value
+    of 'none' (any case) or empty returns None — the contract asks for 'none'
+    explicitly, and an unfilled field must read as "nothing to record", not
+    ride to the host as literal prose."""
+    if not agent_message:
+        return None
+    matches = _REPO_NOTES_LINE_RE.findall(agent_message)
+    if not matches:
+        return None
+    notes = matches[-1].strip().strip("*_ ").strip()
+    if not notes or notes.lower().rstrip(".") == "none":
+        return None
+    return notes
+
+
 def _agent_message_text(payload: dict) -> str:
     """Pull the plain text out of a MessageEvent payload (``model_dump`` shape).
 
@@ -902,6 +936,7 @@ def main() -> None:
     # "ok" (fail-closed). Parsed from the agent's OWN final message, not the
     # captured decorative stdout (which echoes the prompt's contract text).
     blocked_reason = _parse_blocked_reason(last_agent_message[0])
+    repo_notes = _parse_repo_notes(last_agent_message[0])
     if blocked_reason is not None:
         blocked_payload: dict = {
             "status": "blocked",
@@ -911,6 +946,8 @@ def main() -> None:
         }
         if usage:
             blocked_payload["usage"] = usage
+        if repo_notes:
+            blocked_payload["repo_notes"] = repo_notes
         if hook_warnings:
             blocked_payload["hook_warnings"] = hook_warnings
         _emit_result(blocked_payload)
@@ -932,6 +969,8 @@ def main() -> None:
     }
     if usage:
         result_payload["usage"] = usage
+    if repo_notes:
+        result_payload["repo_notes"] = repo_notes
     if hook_warnings:
         result_payload["hook_warnings"] = hook_warnings
 

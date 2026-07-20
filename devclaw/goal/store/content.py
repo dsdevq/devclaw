@@ -301,6 +301,21 @@ class GoalContentMixin:
         (legacy goals, from-scratch goals that world-research instead)."""
         return self._goal_state.read_doc(goal_id, "repo_analysis") or ""
 
+    # ---- repo brief (project-scoped worker memory — MC borrow item 3) -----
+    # project_docs kind "repo_brief" — row-only, keyed by NORMALIZED workspace
+    # path so it outlives any one goal (goal cancel+refile keeps the brief).
+    # Written at settle from the worker's REPO NOTES hand-back; read at
+    # dispatch and prepended to the next worker's goal text.
+
+    def write_repo_brief(self, scope_key: str, content: str) -> None:
+        """Upsert the accumulated repo brief for a workspace scope key."""
+        self._goal_state.write_project_doc(scope_key, "repo_brief", content, _now_ms())
+
+    def read_repo_brief(self, scope_key: str) -> str:
+        """The accumulated repo brief, or '' when no worker on this repo has
+        handed back notes yet."""
+        return self._goal_state.read_project_doc(scope_key, "repo_brief") or ""
+
     # ---- checklist (decomposer output — the durable structured plan) ------
     # PR6: goal_docs (kind "checklist") is the source of truth; checklist.yaml
     # is a generated view, same shape as STATUS.md/log.md/deliveries.md.

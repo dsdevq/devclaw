@@ -503,6 +503,10 @@ class PollResult:
     #: status (a one-child failure must not mark the succeeded items failed).
     #: None for task refs, non-terminal polls, and engines that predate it.
     tasks: Optional[list] = None
+    #: the worker's REPO NOTES hand-back — durable repo-level facts for future
+    #: tasks on the same repo (MC borrow item 3). None when the worker
+    #: reported none; for program refs, the children's notes joined.
+    repo_notes: Optional[str] = None
 
     @property
     def running(self) -> bool:
