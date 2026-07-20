@@ -134,6 +134,10 @@ export interface Unknown {
   id: string;
   question: string;
   why: string;
+  /** Structured choices from the firming model; [] for free-form questions. */
+  options: string[];
+  /** Documentation-only suggested default — never auto-fired. */
+  defaultIfNoAnswer: string | null;
 }
 
 export interface GoalDetail {
