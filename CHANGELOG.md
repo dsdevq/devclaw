@@ -1,6 +1,28 @@
 # Changelog
 
-All notable changes to devclaw. Newest first. No releases tagged yet — every section is dated by the day its work landed on `main`.
+All notable changes to devclaw. Newest first. One release candidate tagged (`v0.1.0-rc.1`); every section is dated by the day its work landed on `main`.
+
+## [2026-06-26 → 2026-07-20] — consolidated (177 commits, PRs #215–#299)
+
+Day-by-day entries paused for this stretch; the arcs, each with named regression tests and PR-level detail in the git history:
+
+### Added
+- **Goal↔program unification (ADR 0003, "one primitive, one dial")** — a goal and a program are the same primitive; `create_goal(mode=long_lived|one_shot)` selects the re-evaluation cadence (per-tick drip vs plan-once fan-out); `start_program` demoted to deprecated sugar. Stages 1–2b landed (#290–#295).
+- **Operator console** — the React SPA at `/console` redesigned into the real human surface: app shell + IA, tabbed goal detail with lifecycle timeline, one-tap Resume/Answer on blocked goals, env catalog + per-project config overrides (#272–#276).
+- **Browser-E2E verification gate** — fails closed on un-rendered UI changes, with a reasoned escape valve and app-surface (not library-only) trigger scoping (#264, #267, #278).
+- **Observability**: deduplicated problems catalog + `list_problems` tool (#260, #262), first-class trace read surface (CLI + `/traces.json`, #249), per-delivery diff stats (#286), `RUN_SUMMARY.md` close-out artifact (#289), morning-digest skill (#263).
+- **Worker honesty**: structured `BLOCKED:` honest-exit status (#280), structured task briefs with acceptance criteria (#252), prior-attempt failures carried into re-dispatch briefs (#285, #288), reality-anchored acceptance asserts under the review gate (#298).
+- **Claude-Code dev harness** for developing devclaw itself — rules, invariant-guard agent, `/ship`, main-branch guard (#241, #244, #253).
+
+### Changed
+- **Docs audit + restructure** — one canonical architecture doc, ADRs, flows/reference/runbooks, an INDEX with currency tags (#239, #240).
+- **Skills split** into always-on doctrine vs self-selected craft; the wired-but-inert skill library removed (#243, #257).
+- **Worker ACP agent command is a config seam** (`DEVCLAW_ACP_COMMAND`) — the model-agnostic invariant made concrete (#283).
+
+### Fixed / hardened
+- **Harden-loop tranche** (#228–#238): `resume_goal` recovery verb, structured `blocked_kind` with mechanical auto-heal, corrupt-doc/prep self-heal, six cognition-grounding fixes, LEGAL-table UNBLOCK extension.
+- **Systemic tranche** (#277–#282): per-retry workspace isolation, structural per-item circuit breaker, review-gate timeout degradation ladder, server-side automerge race kill.
+- **State hygiene**: events retention prune, weekly VACUUM, loud DB-size alarm (#269–#271); quota pauses classified not failed, gate baseline survives pause-resume (#245, #297, #299).
 
 ## [2026-06-25] — Restaurant realignment (#114)
 

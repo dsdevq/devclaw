@@ -1,10 +1,20 @@
 # devclaw
 
-> **DevClaw is the chef. The waiter — an OpenClaw agent — takes orders; devclaw cooks.**
+**An autonomous software-development loop you supervise instead of operate.**
 
-DevClaw is a **software-development agentic loop**: instead of prompting an agent task by task, you hand it a ticket or a durable goal with verifiable completion criteria, and a self-executing loop carries it — plan → sandboxed execution → verification gate → evaluate → iterate — with hard brakes (retry caps, a no-progress watchdog, `stalled`/`needs_human` verdicts) so it never optimizes into the void. The prompt is a component inside the loop, not the point of control.
+Coding agents are excellent at *tasks* and unreliable at *goals*. Prompting one task at a time makes you the project manager of your own tooling; pointing an agent at a big objective and walking away produces the opposite failure — overnight loops that drift, ship green-tests-but-broken work, or burn the night retrying a doomed step. devclaw is the layer between those two failure modes: you hand it a **durable goal with verifiable completion criteria**, and a self-executing loop carries it — plan → sandboxed execution → verification gate → evaluate → iterate — across days and many PRs, with hard brakes (retry caps, a no-progress watchdog, `stalled`/`needs_human` verdicts) so it never optimizes into the void. When it genuinely needs a human decision it blocks loudly with the exact question; everything else it carries alone. The prompt is a component inside the loop, not the point of control.
 
-Concretely, DevClaw owns the **craft of software development as a service**: durable goals, planning, decomposition, sandbox execution (via OpenHands), pre-PR review, gate verification, durable Tailscale deploys, and grounded direction evaluation. It sits behind MCP and is called by an **OpenClaw waiter agent** that translates Denys's chat into structured tool calls — devclaw doesn't talk to the user, it cooks.
+![devclaw operator console — portfolio overview](./docs/assets/console-overview.png)
+
+**"Done" is never the agent's word for it.** A worker proposing *done* only triggers a read-only repository review, judged by a separate grounded evaluator against the goal's own firmed criteria — and verification **fails closed**: a gate crash is a failure, not an approval. The same honesty runs the other way: a worker facing a provably futile contract refuses to burn quota re-attempting it and blocks with an explanation and concrete options instead —
+
+![devclaw operator console — a blocked goal stating exactly what it needs](./docs/assets/console-goal-detail.png)
+
+*Both screenshots are the live operator console (`/console`) driving real repositories — not a mockup.*
+
+**Measured, not vibes.** The first measured pass-rate run (real docker sandbox, real `claude`, a production .NET repo): **5/5 tickets shipped and gate-verified** — four net-new API features and one hardening fix, delivered as PRs, **+19 net-new tests, zero existing tests deleted/skipped/weakened, zero regressions**. Honest scope: small-to-medium machine-verifiable backend tasks; UI and ambiguous specs still need a human (see `evals/`).
+
+> **DevClaw is the chef.** The waiter — an [OpenClaw](https://openclaw.ai) chat agent, the user-facing assistant — takes orders and translates chat into structured MCP tool calls; devclaw cooks. It owns the **craft of software development as a service**: durable goals, planning, decomposition, sandbox execution (via [OpenHands](https://github.com/All-Hands-AI/OpenHands), the open-source coding-agent SDK), pre-PR adversarial review, gate verification, durable Tailscale deploys, and grounded direction evaluation. devclaw never talks to the user directly.
 
 Cognition is always `claude` over a Pro/Max OAuth session — **no `ANTHROPIC_API_KEY`, no metered billing** for autonomous runs.
 
@@ -162,8 +172,8 @@ Async by default: a tool call returns a `task_id` immediately and the work runs 
 
 **One primitive, one dial** (ADR 0003): a goal and a program are the same thing — a goal — differing only in *re-evaluation cadence*, selected by `create_goal(mode=…)`:
 
-- **`long_lived`** (default): the per-tick loop — each heartbeat plans the single next action, judges *direction* (not just shipped PRs), and stays steerable mid-flight.
-- **`one_shot`**: plan once (same intake spine: grill → firm → decompose), then run the whole checklist as **one parallel program** with per-item verification and PR-per-slice delivery — zero per-tick planner cognition. When the checklist drains, done is proposed mechanically and still gated on the grounded done-gate review.
+- **`long_lived`** (default) — the **drip**: each heartbeat plans the single next action, judges *direction* (not just shipped PRs), and stays steerable mid-flight. For fog-of-war objectives where the path reveals itself as work lands.
+- **`one_shot`** — the **fan-out**: plan once (same intake spine: grill → firm → decompose), then run the whole checklist as **one parallel program** with per-item verification and PR-per-slice delivery — zero per-tick planner cognition. For work that's fully plannable up front. When the checklist drains, done is proposed mechanically and still gated on the grounded done-gate review.
 
 Both modes share every gate, the delivery contract, and the close discipline. `start_program` survives as a deprecated alias for `create_goal(mode='one_shot')`; raw queue programs still exist underneath as the execution substrate a goal dispatches into.
 
@@ -266,6 +276,16 @@ devclaw cognition decompose "Ship the accounts API" \
 Both print latency + token usage from the call. Inspection-only: they construct
 no registry/GoalStore and never reach the queue or engine.
 
+### The operator console (`/console`)
+
+The human surface for supervising the fleet — a React SPA (Vite + TypeScript, `devclaw/server/console/`) served by the same HTTP server; `/` redirects to it. Three levels, mirroring the screenshots above:
+
+- **Overview** — portfolio at a glance: projects / running / **needs-you** counts, the blocked-goals feed, recent activity, and the dispatch/off-hours state in the corner.
+- **Projects** — every repository devclaw is driving, with live goal rollups (status joined live from the goal store, never cached).
+- **Goal detail** — objective, phase pills, lifecycle timeline (`investigating → firming → executing → verifying → done`), tabs for tasks / pull requests / activity / schedule, and the block banner with one-tap verbs: **Resume** (blocker cleared, same contract), **Steer** (change direction), **Answer** (reply to the firming questions), **Cancel**.
+
+The console reads generated views and JSON projections — it never mutates state outside the same MCP-tool verbs the waiter uses. Rebuild with `npm --prefix devclaw/server/console run build`.
+
 ### Durable deploy hosting
 
 The handoff for an `achieved` goal: a running product the owner opens, not a diff to read.
@@ -303,7 +323,8 @@ npm install -g @agentclientprotocol/claude-agent-acp
 DEVCLAW_TRANSPORT=stdio devclaw-mcp        # local dev (MCP over stdio)
 # or HTTP for a long-running service:
 DEVCLAW_TRANSPORT=http DEVCLAW_PORT=8000 devclaw-mcp
-#   → MCP at /mcp, dashboards at /dashboard (programs) · /goals · /projects, SSE at /programs/:id/events
+#   → MCP at /mcp, the operator console at /console (/ redirects there),
+#     server-rendered dashboards at /dashboard (programs) · /goals · /projects, SSE at /programs/:id/events
 ```
 
 (`devclaw-mcp` is the console script for the server; `devclaw` is the control-plane CLI; `python -m devclaw.server` / `python -m devclaw.cli` work too.)
@@ -343,7 +364,7 @@ To validate the **real** pipeline (a logged-in `claude` driving OpenHands in a d
 
 ## Status
 
-DevClaw is the live runtime. As of mid-2026 it serves as the chef behind an OpenClaw waiter agent — the spec-kit elicitation flow (`build_project` / `answer_question` / `approve_spec`) and the preview hosting module were removed (drift; vault-rejected), and the durable goal layer + Tailscale deploys carry the load.
+DevClaw is the live runtime. As of mid-2026 it serves as the chef behind an OpenClaw waiter agent, driving real repositories daily: the durable goal layer + Tailscale deploys carry the load, the goal↔program unification (ADR 0003, "one primitive, one dial") is landed, and the operator console is the deployed human surface. Earlier drift (the spec-kit elicitation flow, the preview hosting module) was removed rather than maintained.
 
 ## What this is NOT
 
