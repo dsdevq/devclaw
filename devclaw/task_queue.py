@@ -401,6 +401,9 @@ class TaskQueue(_NotifyMixin):
         #: used ONLY to resolve a per-project review_gate override. None is fine:
         #: the gate falls back to the devclaw-wide REVIEW_GATE_ENABLED default.
         self._registry: Optional[object] = None
+        #: last operator-hold reason _pump logged (normalized: local-time suffix
+        #: stripped), so a persistent hold logs ONCE per reason, not every tick.
+        self._hold_logged: Optional[str] = None
 
     def set_on_settle(self, hook: Optional[Callable[[], None]]) -> None:
         """Register the terminal-state hook (the goal layer's heartbeat wake)."""
@@ -723,19 +726,34 @@ class TaskQueue(_NotifyMixin):
         # dispatch until it lifts. The tick loop calls _pump every TICK_SECONDS,
         # so dispatch auto-resumes within one tick of the pause expiring.
         until, reason = self._store.global_pause()
+        pause_expired = False
         if until:
             if _now_ms() < until:
                 return
             self._store.clear_global_pause()
-            sys.stderr.write(f"task-queue: quota pause expired ({reason[:80]}) — resuming\n")
+            pause_expired = True
         # Operator controls (manual pause toggle / daily run-window): hold ALL new
         # launches while active. In-flight tasks run to completion; the tick loop
         # re-checks every TICK_SECONDS, so dispatch resumes when the window opens.
-        blocked, _why = operator_block(
+        # Checked BEFORE announcing a pause-expiry "resuming": a quota reset can
+        # land outside the run window (2026-07-20: reset 6am UTC, window closed
+        # 4am UTC), and logging "resuming" then holding silently reads as a
+        # missed auto-resume. The hold is logged once per reason, not per tick.
+        blocked, why = operator_block(
             self._store.operator_hold(), self._store.get_run_schedule(), _now_ms()
         )
         if blocked:
+            hold_key = why.split(" (local ")[0]  # window reason carries a per-minute local time
+            if pause_expired or hold_key != self._hold_logged:
+                prefix = f"quota pause expired ({reason[:80]}) — " if pause_expired else ""
+                sys.stderr.write(f"task-queue: {prefix}dispatch held: {why}\n")
+                self._hold_logged = hold_key
             return
+        if pause_expired:
+            sys.stderr.write(f"task-queue: quota pause expired ({reason[:80]}) — resuming\n")
+        if self._hold_logged is not None:
+            sys.stderr.write(f"task-queue: dispatch hold lifted ({self._hold_logged}) — resuming\n")
+            self._hold_logged = None
         if not self._store.has_active_work():
             return
         running = self._store.count_running()

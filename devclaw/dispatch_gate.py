@@ -14,7 +14,7 @@ FAILS OPEN — a bad schedule must never silently wedge dispatch.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 #: Shape of a run_schedule; the disabled default returned when none is persisted.
@@ -64,6 +64,29 @@ def schedule_blocks(schedule: dict, now_utc_ms: int) -> tuple[bool, str]:
     if within_window(local.hour * 60 + local.minute, start, end):
         return False, ""
     return True, f"outside run window {start}–{end} {tz} (local {local:%H:%M})"
+
+
+def next_window_open_ms(schedule: dict, now_utc_ms: int) -> int | None:
+    """UTC ms of the next window-open instant, or None when the schedule isn't
+    blocking right now (disabled, malformed, unknown tz, or already open).
+
+    The legibility half of the window gate: a blocked read surface can say
+    "held until <when>" instead of looking idle. Same fail-open stance as
+    :func:`schedule_blocks` — an uncertain schedule yields None, never a bogus
+    timestamp."""
+    blocked, _ = schedule_blocks(schedule, now_utc_ms)
+    if not blocked:
+        return None
+    # blocked=True implies the tz resolved and start/end parsed non-degenerate.
+    zone = ZoneInfo(schedule.get("tz") or DEFAULT_SCHEDULE["tz"])
+    local = datetime.fromtimestamp(now_utc_ms / 1000, tz=timezone.utc).astimezone(zone)
+    sm = _parse_hhmm(schedule.get("start") or DEFAULT_SCHEDULE["start"])
+    if sm is None:  # unreachable given blocked=True; belt-and-braces fail-open
+        return None
+    target = local.replace(hour=sm // 60, minute=sm % 60, second=0, microsecond=0)
+    if target <= local:
+        target += timedelta(days=1)
+    return int(target.timestamp() * 1000)
 
 
 def operator_block(

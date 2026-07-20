@@ -210,3 +210,33 @@ def test_engine_goal_operator_block_open_for_test_doubles():
     from devclaw.goal.tick import _engine_goal_operator_block
 
     assert _engine_goal_operator_block(object(), "g") == (False, "")
+
+
+# ---- next_window_open_ms (the "held until when" legibility helper) ---------
+
+def test_next_window_open_is_none_when_open_or_disabled():
+    open_s = {"enabled": True, "start": "09:00", "end": "18:00", "tz": "UTC"}
+    assert gate.next_window_open_ms(open_s, _ms(2026, 7, 5, 12, 0)) is None
+    off = {"enabled": False, "start": "09:00", "end": "18:00", "tz": "UTC"}
+    assert gate.next_window_open_ms(off, _ms(2026, 7, 5, 3, 0)) is None
+    bad_tz = {"enabled": True, "start": "09:00", "end": "18:00", "tz": "Mars/Olympus"}
+    assert gate.next_window_open_ms(bad_tz, _ms(2026, 7, 5, 3, 0)) is None  # fails open
+
+
+def test_next_window_open_same_day():
+    s = {"enabled": True, "start": "09:00", "end": "18:00", "tz": "UTC"}
+    assert gate.next_window_open_ms(s, _ms(2026, 7, 5, 3, 0)) == _ms(2026, 7, 5, 9, 0)
+
+
+def test_next_window_open_rolls_to_tomorrow():
+    s = {"enabled": True, "start": "09:00", "end": "18:00", "tz": "UTC"}
+    assert gate.next_window_open_ms(s, _ms(2026, 7, 5, 20, 0)) == _ms(2026, 7, 6, 9, 0)
+
+
+def test_next_window_open_overnight_window_in_tz():
+    """The 2026-07-20 incident shape: window 22:00–05:00 Europe/London, quota
+    reset lands 06:02 UTC (07:02 London, closed) → next open is 22:00 London
+    that evening = 21:00 UTC in summer."""
+    s = {"enabled": True, "start": "22:00", "end": "05:00", "tz": "Europe/London"}
+    now = _ms(2026, 7, 20, 6, 2)                                   # 06:02 UTC
+    assert gate.next_window_open_ms(s, now) == _ms(2026, 7, 20, 22, 0, tz="Europe/London")

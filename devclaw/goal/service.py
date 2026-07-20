@@ -17,6 +17,7 @@ import os
 import sys
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -34,11 +35,18 @@ from .notify import HttpNotifier, Notifier, NullNotifier
 from .store import GoalStore
 from .tick import AUTODEPLOY_ENABLED, EVAL_EVERY, VERIFY_DONE, sweep_orphaned_refs, tick_all, tick_goal
 from .transitions import Event
+from ..dispatch_gate import next_window_open_ms, operator_block, schedule_blocks
 from ..loom import trace as _trace
-from ..state_store import StateStore
+from ..state_store import StateStore, _now_ms
 from ..task_queue import TaskQueue
 from ..engine.workspace import prepare_workspace
 from .. import trend_detector as _trend_detector_mod
+
+
+def _iso_utc(ms: int) -> str:
+    """UTC ISO-8601 for an epoch-ms value — the shape the goal-status
+    timestamps already use on the read surfaces."""
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
 
 if TYPE_CHECKING:
     from ..project_registry import ProjectRegistry
@@ -478,6 +486,42 @@ class GoalService:
             backlog=backlog, repo_url=repo_url, verify_cmd=verify_cmd, spec=spec,
         ).to_dict()
 
+    def _dispatch_hold(self, goal_id: Optional[str] = None) -> Optional[dict]:
+        """Why NEW dispatch is held right now, or None when it can flow.
+
+        Read-only projection for the status surfaces (get_goal / list_goals /
+        tail_goal): a held instance must SAY so — a quota pause or a closed
+        run-window otherwise renders as `in_flight`+`blocked_on: null`, i.e.
+        indistinguishable from healthy idle (the 2026-07-20 silent window-hold).
+        Precedence mirrors the write path: quota pause, then manual hold, then
+        the global window, then the per-goal window. Never raises — a read
+        surface degrades to None over a bad clock/schedule, it doesn't 500."""
+        try:
+            now = _now_ms()
+            until, reason = self._store.global_pause()
+            if until and now < until:
+                return {"kind": "quota_pause", "reason": reason,
+                        "until": _iso_utc(until)}
+            hold = self._store.operator_hold()
+            schedule = self._store.get_run_schedule()
+            blocked, why = operator_block(hold, schedule, now)
+            if not blocked and goal_id is not None:
+                schedule = self._store.get_run_schedule(goal_id)
+                blocked, why = schedule_blocks(schedule, now)
+            if not blocked:
+                return None
+            out: dict = {
+                "kind": "operator_hold" if hold[0] else "run_window",
+                "reason": why,
+            }
+            if not hold[0]:
+                nxt = next_window_open_ms(schedule, now)
+                if nxt is not None:
+                    out["until"] = _iso_utc(nxt)
+            return out
+        except Exception:  # noqa: BLE001 — display path; see docstring
+            return None
+
     def get_goal(self, goal_id: str) -> dict:
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)
@@ -516,6 +560,7 @@ class GoalService:
             "recent_log": self._goal_store.recent_log(goal_id, n=15),
             "firmed_draft": firmed_draft,
             "phase_history": [dict(e) for e in s.phase_history],
+            "dispatch_hold": self._dispatch_hold(goal_id),
         }
 
     def _firmed_draft_payload(self, goal_id: str) -> Optional[dict]:
@@ -610,6 +655,7 @@ class GoalService:
             "discovery": self._goal_store.read_discovery(goal_id),
             "spec": self._goal_store.read_spec(goal_id),
             "live_events": live_events,
+            "dispatch_hold": self._dispatch_hold(goal_id),
         }
 
     def list_goals(self) -> list[dict]:
@@ -617,6 +663,9 @@ class GoalService:
         # project_registry.project_rollup can derive project↔goal association
         # by workspace match — no stored goal_ids list to drift stale.
         out = []
+        # Account-wide hold (quota pause / manual hold / global window) computed
+        # ONCE — per-goal windows are get_goal detail, not worth N reads here.
+        hold = self._dispatch_hold()
         for gid in self._goal_store.list_goal_ids():
             g = self._goal_store.load_goal(gid)
             s = self._goal_store.load_status(gid)
@@ -630,6 +679,7 @@ class GoalService:
                 "progress": {"last_at": s.last_progress_at, "stalled": s.no_progress_notified},
                 "direction": s.last_eval_verdict,
                 "actions_dispatched": s.actions_dispatched,
+                "dispatch_hold": hold,
             })
         return out
 
