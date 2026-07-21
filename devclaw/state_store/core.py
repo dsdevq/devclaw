@@ -166,6 +166,12 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         self._txn_failed = False
         self._bootstrap()
 
+    @property
+    def db_path(self) -> str:
+        """Resolved path of the backing SQLite file — doubles as the durable
+        identity of this devclaw instance (the sandbox owner-label seed)."""
+        return self._db_path
+
     # ---- transactions ---------------------------------------------------
     #
     # Group several writes into ONE atomic unit spanning multiple store methods

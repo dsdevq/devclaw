@@ -47,7 +47,7 @@ from .planner import PlannedTask, PlannerError, plan_program
 from .quality import format_feedback, review_panel
 from .quality.browser_gate import PLAYWRIGHT_CONFIG_NAMES, browser_run_verdict
 from .quality.reachability import judge_reachability
-from .engine.sandcastle import run_sandcastle, sweep_orphan_sandboxes
+from .engine.sandcastle import run_sandcastle, sandbox_owner_id, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
 from .state_store import Program, StateStore, Task, TaskKind, _now_ms
 # Leaf concerns split out of this module. The git ``_sync`` helpers are re-exported
@@ -361,6 +361,11 @@ class TaskQueue(_NotifyMixin):
         reachability_judge: Optional[Callable[..., Awaitable[dict]]] = None,
     ) -> None:
         self._store = store
+        # This queue's sandbox-owner id (derived from its state-DB path): stamps
+        # every launched sandbox and scopes the startup sweep, so two devclaw
+        # processes sharing one docker daemon (live service + a measure/eval
+        # run) never reap each other's in-flight containers.
+        self._sandbox_owner: str = sandbox_owner_id(store.db_path)
         # Injectable for tests — default to the real planner / sandcastle runner.
         self._planner: PlannerFn = planner or (lambda g, w: plan_program(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
@@ -670,7 +675,7 @@ class TaskQueue(_NotifyMixin):
         definition orphaned. No-op when docker is unavailable (stub/host engine
         environments, CI).
         """
-        swept = sweep_orphan_sandboxes()
+        swept = sweep_orphan_sandboxes(self._sandbox_owner)
         if swept:
             sys.stderr.write(
                 f"task-queue: reaped {swept} orphaned sandbox container(s)\n"
@@ -1185,6 +1190,7 @@ class TaskQueue(_NotifyMixin):
                 on_event=on_event,
                 verify_cmd=verify_cmd,
                 sandbox_image=self._sandbox_image(workspace_dir),
+                owner_id=self._sandbox_owner,
             )
             try:
                 # Wall-clock guard: on timeout, wait_for cancels the runner coroutine,

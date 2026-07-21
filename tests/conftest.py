@@ -32,7 +32,7 @@ def _disable_sandbox_sweep_by_default(monkeypatch):
     sweep to a no-op; the wiring test injects its own recording stub the same
     way, and the sweep's own unit tests patch its subprocess seam directly.
     """
-    monkeypatch.setattr(task_queue, "sweep_orphan_sandboxes", lambda: 0)
+    monkeypatch.setattr(task_queue, "sweep_orphan_sandboxes", lambda owner_id=None: 0)
 
 
 #: Program basenames a test process must NEVER spawn for real. Built from the
