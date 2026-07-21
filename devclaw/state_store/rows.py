@@ -248,6 +248,50 @@ def _row_to_program(r: sqlite3.Row) -> Program:
     )
 
 
+# ---- failure-class bucketing (eval_outcomes projection, ADR 0006) -----------
+# Purely MECHANICAL string bucketing of a settled task's error text into a
+# short class label — never an LLM call (the zero-token guard extends to the
+# projection: classification carried the last two root-cause diagnoses without
+# cognition, so the projection derives its classes the same way). Checked in
+# priority order; first hit wins. The phrases are the stable marker strings the
+# settle paths already emit (task_queue's _WORKER_BLOCKED_MARKER /
+# _REVIEW_CRASH_MARKER / _verify_failure_summary / the timeout + pause-bound +
+# delivery messages), so bucketing here can't drift from the wording without a
+# test catching it. Basket report errors ride the same buckets — the reports
+# store the identical settle-path texts.
+_FAILURE_CLASS_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("blocked:worker", ("worker reported blocked:",)),
+    ("review_crash", ("review gate crashed",)),
+    ("review_rejected", ("code review requested changes",)),
+    ("browser_gate_failed", ("browser gate (failing closed)",)),
+    ("test_integrity", ("test-integrity",)),
+    ("verify_failed", ("verify gate failed", "verify gate timed out")),
+    ("timeout", ("wall-clock timeout",)),
+    ("delivery_failed", ("gate passed but delivery failed",)),
+    ("no_result_line", ("no result line",)),
+    # AUTH before the rate/quota bucket, mirroring loom.limits' priority: an
+    # auth-flavored pause-bound failure is a login problem, not a cap.
+    ("auth", ("failed to authenticate", "authentication required",
+              "oauth session expired", "please run /login")),
+    ("rate_limited", ("usage-limit pauses", "usage limit", "rate limit",
+                      "out of extra usage", "out of usage", "quota")),
+)
+
+
+def derive_failure_class(error: Optional[str]) -> str:
+    """Bucket a settled-failed task's error text into a short mechanical class
+    (``review_rejected``, ``verify_failed``, ``timeout``, ``rate_limited``,
+    ``blocked:worker``, …). Pure string matching — zero LLM, deterministic,
+    best-effort: anything unrecognized lands in the ``engine_error`` catch-all
+    rather than raising. Case-insensitive so wording-case drift can't unbucket
+    a class silently."""
+    text = (error or "").lower()
+    for label, needles in _FAILURE_CLASS_RULES:
+        if any(n in text for n in needles):
+            return label
+    return "engine_error"
+
+
 def _row_to_event(r: sqlite3.Row) -> TaskEvent:
     return TaskEvent(
         id=r["id"],

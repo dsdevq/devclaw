@@ -26,10 +26,12 @@ from .rows import (
     TaskKind,
     TaskStatus,
     _now_ms,
+    derive_failure_class,
 )
 
 __all__ = [
     "StateStore",
+    "derive_failure_class",
     "Task",
     "Program",
     "TaskEvent",

@@ -142,6 +142,19 @@ views**: human- and rollback-readable, **never read back for decisions**. Only
 append-only event log and its views are projections. Goal state is owned by
 `GoalStore` and mutated only through the CAS'd `transition()`.
 
+**Continuous-eval — the `eval_outcomes` projection (ADR 0006).** Every task
+settle is an evaluation sample for free: `StateStore.mark_done` /
+`mark_failed` / `mark_task_cancelled` materialize one `eval_outcomes` row
+**inside the settle's own commit** (same single writer, exactly-once — the
+insert fires only when the settle UPDATE actually moved a row, made structural
+by a partial unique index on `task_id`). `failure_class` is **mechanical
+string bucketing** of the settle-path marker texts (`review_rejected`,
+`verify_failed`, `timeout`, `rate_limited`, `blocked:worker`, … —
+`state_store/rows.derive_failure_class`), never an LLM call — zero extra
+tokens per settle. Basket runs (`evals/measure_passrate.py`) land in the SAME
+table as `source='basket'` rows via `devclaw evals ingest <file-or-dir>`,
+idempotent on (source, report_ref, ticket). See `tests/test_eval_outcomes.py`.
+
 **Self-observability — the `problems` catalog (capture/dedup layer).** Beside
 `traces`, a `problems` table turns "devclaw fails/stalls N times a day" into a
 ranked, countable set. `StateStore.record_problem(...)` — the **single writer**
