@@ -1,11 +1,11 @@
 # Proposal — Continuous evaluation as a projection of the live event stream
 
-- **Status:** **LOCKED (direction)** — 2026-07-21. All seven `[OPEN]` items
-  were answered by Denys the same evening (clarify step complete; resolutions
-  recorded in place in §5). Locking commits direction, not schedule —
-  sequencing stays Denys's call; graduation to an ADR happens when the
-  (reshaped ADR 0004 step 2) tranche is scheduled.
-- **Date opened:** 2026-07-21 · **Locked:** 2026-07-21
+- **Status:** **GRADUATED → [ADR 0006](../decisions/0006-continuous-eval-projection.md)**
+  — 2026-07-21, the same evening the draft landed: clarify step (all seven
+  `[OPEN]` items answered by Denys, resolutions in §5), lock, tranche
+  scheduled, graduation. The ADR is canonical from here on; this doc keeps
+  the full narrative + the clarify-step trail.
+- **Date opened:** 2026-07-21 · **Locked:** 2026-07-21 · **Graduated:** 2026-07-21
 - **Authors:** Denys + Claude (conversation of 2026-07-21)
 - **Supersedes / relates:** amends the *shape* of [ADR 0004](../decisions/0004-eval-workbench.md)
   step 2 (the `eval_runs` table / console "Evals" tab) — see §4; absorbs the

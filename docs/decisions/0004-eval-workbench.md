@@ -4,6 +4,11 @@
   graduated from [`../proposals/eval-workbench.md`](../proposals/eval-workbench.md)
   under the spec lifecycle. This record freezes the *decision and rationale*;
   system snapshots inside reflect their writing date.
+- **Amended 2026-07-21 by [ADR 0006](./0006-continuous-eval-projection.md):**
+  step 2's artifact is reshaped — a two-source (`live|basket`) outcome
+  projection written at task settle replaces the basket-only `eval_runs`
+  table, and the Evals tab gains the clean-night headline. Steps 1/3/4/5 and
+  the 2×2 shedding rule stand unchanged.
 - **Supersedes:** the "harden blind, then harden more" default — the implicit
   policy that every live failure earns another Python guardrail plus tests,
   with no instrument saying whether the guardrail pays for itself.
