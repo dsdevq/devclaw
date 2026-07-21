@@ -37,7 +37,14 @@ from devclaw.engine.sandcastle import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
 REPO_URL = os.environ.get("MEASURE_REPO_URL", "https://github.com/dsdevq/lifekit-dashboard.git")
 VERIFY_CMD = os.environ.get("MEASURE_VERIFY_CMD", "cd backend && dotnet test")
 WORKROOT = Path(os.environ.get("MEASURE_WORKROOT", str(Path.home() / "projects" / ".devclaw-measure")))
-REPORT_DIR = Path(__file__).resolve().parent / "runs"
+# Overridable for containerized runs (VPS one-off `docker compose run`): /app
+# is root-owned there, so the default file-relative runs/ dir isn't writable —
+# point MEASURE_REPORT_DIR at the mounted workroot instead (2026-07-21 VPS
+# smoke lost its report JSON to exactly this; measure.db carried the truth).
+REPORT_DIR = Path(
+    os.environ.get("MEASURE_REPORT_DIR")
+    or Path(__file__).resolve().parent / "runs"
+)
 
 # If set, each task workspace is pinned to this SHA before dispatch — so a re-run
 # measures the model against the same starting state as the original 5/5
