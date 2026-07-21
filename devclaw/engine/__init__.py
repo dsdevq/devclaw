@@ -48,6 +48,11 @@ class EngineRequest:
     #: AFTER the agent finishes. Its exit code is the real definition of "done"
     #: (the agent's own "I'm finished" is not trusted). None → no gate.
     verify_cmd: Optional[str] = None
+    #: optional per-task sandbox image (ADR 0005) — the owning project's
+    #: ``sandbox_image`` override, resolved by the task queue at dispatch.
+    #: None → the engine's own DEVCLAW_SANDBOX_IMAGE default. Docker-less
+    #: engines (host, stub) ignore it.
+    sandbox_image: Optional[str] = None
 
 
 #: Terminal verdict from one task. ``status == "ok"`` carries

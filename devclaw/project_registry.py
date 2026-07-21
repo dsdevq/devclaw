@@ -32,6 +32,7 @@ interview* artifact.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -58,8 +59,27 @@ _UNSET: Any = object()
 #: non-null value pins this project's behaviour regardless of the env default.
 #: ``bool`` fields persist as INTEGER (0/1), ``str`` fields as TEXT.
 _OVERRIDE_BOOL_FIELDS = ("automerge", "autodeploy", "review_gate", "verify_done")
-_OVERRIDE_STR_FIELDS = ("merge_strategy", "browser_gate_mode")
+_OVERRIDE_STR_FIELDS = ("merge_strategy", "browser_gate_mode", "sandbox_image")
 _OVERRIDE_FIELDS = _OVERRIDE_BOOL_FIELDS + _OVERRIDE_STR_FIELDS
+
+#: docker image-ref grammar for the ``sandbox_image`` override, enforced at
+#: THIS single write choke point (create/update) so a stored pin can never be
+#: flag-shaped ("--env-file=…" would be parsed by docker as a FLAG, injecting
+#: host env — incl. a stray metered API key — into an autonomous sandbox),
+#: whitespace-ridden, or empty ("" would silently degrade to the default
+#: instead of erroring). The console edge re-checks the same grammar for a
+#: friendly 400; this raise is the backstop the MCP path hits.
+_IMAGE_REF_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$")
+
+
+def _validate_sandbox_image(value: Optional[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, str) or not _IMAGE_REF_RE.fullmatch(value):
+        raise ValueError(
+            f"sandbox_image must be a docker image ref "
+            f"([a-zA-Z0-9][a-zA-Z0-9._/:@-]*), got: {value!r}"
+        )
 
 
 def _now_ms() -> int:
@@ -97,6 +117,11 @@ class Project:
     review_gate: Optional[bool] = None    # devclaw default: task_queue.REVIEW_GATE_ENABLED
     verify_done: Optional[bool] = None    # DEVCLAW_GOAL_VERIFY_DONE
     browser_gate_mode: Optional[str] = None  # DEVCLAW_GOAL_BROWSER_GATE_MODE: flexible|strict
+    #: per-project sandbox image (ADR 0005) — the exotic-needs escape hatch and
+    #: the migration bridge (.NET projects pin devclaw-sandbox-dotnet:local
+    #: until the mise path passes its live gate). None = the engine's
+    #: DEVCLAW_SANDBOX_IMAGE default.
+    sandbox_image: Optional[str] = None
     created_at: int = field(default_factory=_now_ms)
     updated_at: int = field(default_factory=_now_ms)
 
@@ -116,6 +141,7 @@ class Project:
             "reviewGate": self.review_gate,
             "verifyDone": self.verify_done,
             "browserGateMode": self.browser_gate_mode,
+            "sandboxImage": self.sandbox_image,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
         }
@@ -156,6 +182,7 @@ def _row_to_project(r: sqlite3.Row) -> Project:
         review_gate=_bool_col("review_gate"),
         verify_done=_bool_col("verify_done"),
         browser_gate_mode=_str_col("browser_gate_mode"),
+        sandbox_image=_str_col("sandbox_image"),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
     )
@@ -242,13 +269,15 @@ class ProjectRegistry:
         review_gate: Optional[bool] = None,
         verify_done: Optional[bool] = None,
         browser_gate_mode: Optional[str] = None,
+        sandbox_image: Optional[str] = None,
     ) -> Project:
+        _validate_sandbox_image(sandbox_image)
         p = Project(
             id=id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
             preview_url=preview_url, notes=notes, goal_ids=list(goal_ids or []),
             automerge=automerge, merge_strategy=merge_strategy, autodeploy=autodeploy,
             review_gate=review_gate, verify_done=verify_done,
-            browser_gate_mode=browser_gate_mode,
+            browser_gate_mode=browser_gate_mode, sandbox_image=sandbox_image,
         )
         with self._lock:
             try:
@@ -256,15 +285,15 @@ class ProjectRegistry:
                     """INSERT INTO projects
                          (id, name, repo_url, workspace_dir, preview_url, status,
                           goal_ids, notes, automerge, merge_strategy, autodeploy,
-                          review_gate, verify_done, browser_gate_mode,
+                          review_gate, verify_done, browser_gate_mode, sandbox_image,
                           created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         p.id, p.name, p.repo_url, p.workspace_dir, p.preview_url,
                         p.status, json.dumps(p.goal_ids), p.notes,
                         _bool_db(p.automerge), p.merge_strategy, _bool_db(p.autodeploy),
                         _bool_db(p.review_gate), _bool_db(p.verify_done),
-                        p.browser_gate_mode,
+                        p.browser_gate_mode, p.sandbox_image,
                         p.created_at, p.updated_at,
                     ),
                 )
@@ -315,6 +344,7 @@ class ProjectRegistry:
         review_gate: Optional[bool] = _UNSET,
         verify_done: Optional[bool] = _UNSET,
         browser_gate_mode: Optional[str] = _UNSET,
+        sandbox_image: Optional[str] = _UNSET,
     ) -> Project:
         """Partial update — only the supplied fields change. Returns the updated
         project. Raises KeyError if unknown. ``updated_at`` always bumps.
@@ -353,6 +383,9 @@ class ProjectRegistry:
             p.verify_done = verify_done
         if browser_gate_mode is not _UNSET:
             p.browser_gate_mode = browser_gate_mode
+        if sandbox_image is not _UNSET:
+            _validate_sandbox_image(sandbox_image)
+            p.sandbox_image = sandbox_image
         p.updated_at = _now_ms()
         self._save(p)
         return p
@@ -390,14 +423,15 @@ class ProjectRegistry:
                 """UPDATE projects SET
                      name=?, repo_url=?, workspace_dir=?, preview_url=?, status=?,
                      goal_ids=?, notes=?, automerge=?, merge_strategy=?, autodeploy=?,
-                     review_gate=?, verify_done=?, browser_gate_mode=?, updated_at=?
+                     review_gate=?, verify_done=?, browser_gate_mode=?, sandbox_image=?,
+                     updated_at=?
                    WHERE id=?""",
                 (
                     p.name, p.repo_url, p.workspace_dir, p.preview_url, p.status,
                     json.dumps(p.goal_ids), p.notes,
                     _bool_db(p.automerge), p.merge_strategy, _bool_db(p.autodeploy),
                     _bool_db(p.review_gate), _bool_db(p.verify_done),
-                    p.browser_gate_mode,
+                    p.browser_gate_mode, p.sandbox_image,
                     p.updated_at, p.id,
                 ),
             )

@@ -547,6 +547,12 @@ async def config_env_json(_request: Request) -> Response:
 _OVR_BOOL = ("automerge", "autodeploy", "review_gate", "verify_done")
 _OVR_STR = {"merge_strategy": ("squash", "merge", "rebase"),
             "browser_gate_mode": ("flexible", "strict")}
+#: free-form string overrides — validated by shape, not enum. sandbox_image is
+#: a docker image ref (ADR 0005's escape hatch); the shared grammar (defined
+#: at the registry write choke point, which also enforces it as the backstop)
+#: blocks flag-shaped/whitespace junk here with a friendly 400.
+from ..project_registry import _IMAGE_REF_RE as _OVR_IMAGE_RE  # noqa: E402
+_OVR_FREE_STR = ("sandbox_image",)
 
 
 def _project_overrides(p) -> dict:
@@ -557,6 +563,7 @@ def _project_overrides(p) -> dict:
         "verify_done": p.verify_done,
         "merge_strategy": p.merge_strategy,
         "browser_gate_mode": p.browser_gate_mode,
+        "sandbox_image": p.sandbox_image,
     }
 
 
@@ -594,6 +601,10 @@ async def project_config_set(request: Request) -> Response:
         elif k in _OVR_STR:
             if v is not None and v not in _OVR_STR[k]:
                 return JSONResponse({"error": "bad_value", "field": k, "hint": f"one of {_OVR_STR[k]}|null"}, status_code=400)
+            patch[k] = v
+        elif k in _OVR_FREE_STR:
+            if v is not None and (not isinstance(v, str) or not _OVR_IMAGE_RE.fullmatch(v)):
+                return JSONResponse({"error": "bad_value", "field": k, "hint": "docker image ref|null"}, status_code=400)
             patch[k] = v
         else:
             return JSONResponse({"error": "unknown_field", "field": k}, status_code=400)

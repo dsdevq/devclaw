@@ -1064,16 +1064,19 @@ async def update_project(
     autodeploy: Optional[Literal["on", "off", "inherit"]] = None,
     review_gate: Optional[Literal["on", "off", "inherit"]] = None,
     verify_done: Optional[Literal["on", "off", "inherit"]] = None,
+    sandbox_image: Optional[str] = None,
 ) -> str:
     """Update a registered project's facts — only the fields you pass change. Use to
     record a preview URL, pause/archive it, or correct the repo/workspace.
 
     Per-project override knobs — ``automerge`` / ``merge_strategy`` /
-    ``autodeploy`` / ``review_gate`` / ``verify_done`` — each take a concrete
-    value to PIN this project (overriding its devclaw-wide env default),
-    'inherit' to CLEAR a prior override back to that default, or omit to leave
-    whatever is currently set untouched. (bool knobs take 'on'/'off';
-    merge_strategy takes 'squash'/'merge'/'rebase'.)"""
+    ``autodeploy`` / ``review_gate`` / ``verify_done`` / ``sandbox_image`` —
+    each take a concrete value to PIN this project (overriding its devclaw-wide
+    env default), 'inherit' to CLEAR a prior override back to that default, or
+    omit to leave whatever is currently set untouched. (bool knobs take
+    'on'/'off'; merge_strategy takes 'squash'/'merge'/'rebase'; sandbox_image
+    takes a docker image ref — ADR 0005's escape hatch, e.g. pin
+    'devclaw-sandbox-dotnet:local' until the mise path passes its gate.)"""
     override_kwargs: dict = {}
     _onoff = {"on": True, "off": False, "inherit": None}
     for field, val in (("automerge", automerge), ("autodeploy", autodeploy),
@@ -1082,6 +1085,8 @@ async def update_project(
             override_kwargs[field] = _onoff[val]
     if merge_strategy is not None:
         override_kwargs["merge_strategy"] = None if merge_strategy == "inherit" else merge_strategy
+    if sandbox_image is not None:
+        override_kwargs["sandbox_image"] = None if sandbox_image == "inherit" else sandbox_image
     try:
         p = registry.update(
             project_id, name=name, repo_url=repo_url, workspace_dir=workspace_dir,
@@ -1090,6 +1095,10 @@ async def update_project(
         )
     except KeyError:
         raise ToolError(f"unknown project_id: {project_id}")
+    except ValueError as exc:
+        # flag-shaped/empty sandbox_image etc. — surface the registry's
+        # validation verdict instead of a bare 500
+        raise ToolError(str(exc))
     return json.dumps(p.to_dict(), indent=2)
 
 

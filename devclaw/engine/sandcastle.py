@@ -311,10 +311,15 @@ def _build_docker_args(
     claude_dir: str,
     payload: str,
     allowlist: tuple[str, ...] = SANDBOX_CLAUDE_ALLOWLIST,
+    sandbox_image: str | None = None,
 ) -> list[str]:
     """Assemble the full ``docker run`` argv for one task. Pure (no I/O) so the
     mount posture — curated claude allowlist, writable scratch tmpfs, no API-key
-    leak, host networking — is unit-testable without docker."""
+    leak, host networking — is unit-testable without docker.
+
+    ``sandbox_image`` is the per-task override (the owning project's
+    ``sandbox_image`` registry field, riding the EngineRequest — ADR 0005's
+    escape hatch/migration bridge); None → the DEVCLAW_SANDBOX_IMAGE default."""
     return [
         "run",
         "--rm",
@@ -353,7 +358,7 @@ def _build_docker_args(
         f"{CONTAINER_CLAUDE_DIR}/shell-snapshots:rw,exec",
         "-e",
         "OPENHANDS_SUPPRESS_BANNER=1",
-        SANDBOX_IMAGE,
+        sandbox_image or SANDBOX_IMAGE,
         payload,
     ]
 
@@ -402,6 +407,7 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
         host_bind_path=host_bind_path,
         claude_dir=claude_dir,
         payload=payload,
+        sandbox_image=req.sandbox_image,
     )
 
     try:
