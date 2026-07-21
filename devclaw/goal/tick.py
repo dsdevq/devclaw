@@ -43,7 +43,7 @@ from .planner import ClaudeCaller
 from .store import GoalDocCorrupt, GoalStore
 from .transitions import Event, IllegalTransition, TransitionConflict
 from ..loom import trace as _trace
-from ..loom.limits import classify_failure, pause_seconds
+from ..loom.limits import FailureKind, classify_failure, pause_seconds
 from ..planner import PlannerError, planned_from_checklist as _planned_from_checklist
 from ..state_store import _now_ms
 from ..engine.workspace import prepare_workspace
@@ -830,25 +830,53 @@ async def tick_all(
             resume_hhmm = datetime.fromtimestamp(
                 until / 1000, tz=timezone.utc
             ).strftime("%H:%M")
-            await _notify(
-                notifier, NotifyLevel.OWNER,
-                f"⏸️ paused on a usage limit — {reason}; resuming ~{resume_hhmm} UTC",
-                summarize=summary_caller,
+            if reason.startswith(FailureKind.AUTH.value):
+                # An auth pause is ACTIONABLE, not weather: waiting won't fix a
+                # broken login, a human re-login will (2026-07-20 night: the old
+                # REAL classification burned the whole run window in silent
+                # terminal failures). Say what to do; the fixed re-probe both
+                # auto-resumes after the fix and re-pings while still broken.
+                msg = (
+                    f"🔑 paused — Claude auth/login failure ({reason}). Waiting "
+                    f"won't fix this: re-login on the devclaw host (`claude` → "
+                    f"/login). Work auto-resumes on the next probe ~{resume_hhmm} "
+                    f"UTC; I'll ping again if it's still broken."
+                )
+            else:
+                msg = f"⏸️ paused on a usage limit — {reason}; resuming ~{resume_hhmm} UTC"
+            await _notify(notifier, NotifyLevel.OWNER, msg, summarize=summary_caller)
+            kind = (
+                FailureKind.AUTH.value
+                if reason.startswith(FailureKind.AUTH.value) else "limit"
             )
-            _engine_set_pause_notified(engine, True)
+            _engine_set_pause_notified(engine, True, kind=kind)
         return {gid: Outcome.RATE_LIMITED for gid in store.list_goal_ids()}
     if until:
         _engine_clear_pause(engine)
     # Resume ping — the counterpart of the pause ping above, once per pause.
     # Checked whenever no pause is ACTIVE (not only on the expiry tick that
     # cleared it): the task queue lazily clears an expired pause too, and the
-    # owner must still hear the resume in that race.
+    # owner must still hear the resume in that race. An AUTH episode is the
+    # exception: its pause expiring means "re-probe now", not "the limit
+    # lifted" — announcing a resume would be a lie while the login may still be
+    # broken. The auth check keys on the kind PERSISTED with the ping (the
+    # queue's 10s pump wipes the live pause_reason first on the dominant
+    # ordering — invariant-guard find, 2026-07-21), with the live reason as a
+    # fallback for engines predating the kind accessor. Skip the ping but still
+    # clear the flag: if the probe re-trips auth, the fresh pause re-pings (the
+    # periodic still-broken reminder); if the login was fixed, work just
+    # resumes and the next delivery speaks for itself.
     if _engine_pause_notified(engine):
-        await _notify(
-            notifier, NotifyLevel.OWNER,
-            "▶️ usage limit lifted — resuming work",
-            summarize=summary_caller,
+        auth_episode = (
+            _engine_pause_notified_kind(engine) == FailureKind.AUTH.value
+            or bool(until and reason.startswith(FailureKind.AUTH.value))
         )
+        if not auth_episode:
+            await _notify(
+                notifier, NotifyLevel.OWNER,
+                "▶️ usage limit lifted — resuming work",
+                summarize=summary_caller,
+            )
         _engine_set_pause_notified(engine, False)
 
     # Operator controls: a manual pause toggle or a daily run-window can hold ALL
@@ -1057,10 +1085,26 @@ def _engine_pause_notified(engine: GoalEngine) -> bool:
     return bool(fn()) if callable(fn) else False
 
 
-def _engine_set_pause_notified(engine: GoalEngine, on: bool) -> None:
+def _engine_set_pause_notified(engine: GoalEngine, on: bool, kind: str = "") -> None:
     fn = getattr(engine, "set_pause_notified", None)
-    if callable(fn):
+    if not callable(fn):
+        return
+    if on and kind:
+        try:
+            fn(on, kind)
+        except TypeError:  # older double without the kind param — degrade
+            fn(on)
+    else:
         fn(on)
+
+
+def _engine_pause_notified_kind(engine: GoalEngine) -> str:
+    """The kind persisted WITH the pause ping ("" when the engine/double
+    doesn't carry one). This — not the live pause_reason — is what the resume
+    path keys on: the queue's 10s pump lazily clears an expired pause (reason
+    included) before the heartbeat looks, on the dominant ordering."""
+    fn = getattr(engine, "pause_notified_kind", None)
+    return str(fn() or "") if callable(fn) else ""
 
 
 def _engine_operator_block(engine: GoalEngine) -> tuple[bool, str]:
@@ -1079,15 +1123,17 @@ def _engine_goal_operator_block(engine: GoalEngine, goal_id: str) -> tuple[bool,
 
 
 def _maybe_pause(engine: GoalEngine, store: GoalStore, goal_id: str, err: str) -> "Outcome | None":
-    """If ``err`` is a usage/rate-limit, set the shared quota pause and return
-    Outcome.RATE_LIMITED; otherwise None (the caller handles it as a real error).
-    Centralizes the goal-side quota guard so every cognition call can use it."""
+    """If ``err`` is a usage/rate-limit or an auth failure, set the shared quota
+    pause and return Outcome.RATE_LIMITED; otherwise None (the caller handles it
+    as a real error). Centralizes the goal-side pause guard so every cognition
+    call can use it. AUTH pausing here is what turned the 2026-07-20 night's
+    ~58 terminal planner failures into one pause + one actionable ping."""
     # now_utc lets absolute reset wording ("resets 10pm (UTC)") become a real
     # hint; a stated hint is trusted past the default cap (pause_seconds).
     cls = classify_failure(err, now_utc=datetime.now(timezone.utc))
     if not (cls.is_pausing and hasattr(engine, "set_global_pause")):
         return None
-    backoff = pause_seconds(cls.retry_after_s, stated=cls.stated)
+    backoff = pause_seconds(cls.retry_after_s, stated=cls.stated, kind=cls.kind)
     engine.set_global_pause(_now_ms() + backoff * 1000, f"{cls.kind.value} (goal cognition)")
     store.append_log(goal_id, f"paused — {cls.kind.value}; resuming in ~{backoff}s")
     return Outcome.RATE_LIMITED

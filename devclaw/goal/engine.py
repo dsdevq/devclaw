@@ -173,8 +173,14 @@ class InProcessEngine:
         (the goal tick pings once per pause + once on resume, not every tick)."""
         return self._store.pause_notified()
 
-    def set_pause_notified(self, on: bool) -> None:
-        self._store.set_pause_notified(on)
+    def set_pause_notified(self, on: bool, kind: str = "") -> None:
+        self._store.set_pause_notified(on, kind)
+
+    def pause_notified_kind(self) -> str:
+        """The kind recorded with the pause ping (see StateStore) — lets the
+        resume path suppress a false "limit lifted" for an auth episode even
+        after the queue's pump lazily cleared the pause + reason."""
+        return self._store.pause_notified_kind()
 
     def operator_block(self, now_ms: int) -> tuple[bool, str]:
         """The manual-hold + daily run-window gate (``dispatch_gate.operator_block``),

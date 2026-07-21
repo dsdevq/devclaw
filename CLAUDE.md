@@ -88,7 +88,9 @@ Recent work made the loop fail **loud, not silent**. Match it when you add code:
 - **Usage limits pause-and-resume.** A quota/rate-limit hit is *classified*, not
   failed: one account-wide `paused_until` gates both queue and heartbeat, WIP is
   preserved, the owner is pinged once, and it auto-resumes when the cap resets
-  (#189/#190/#191). Zero tokens while paused.
+  (#189/#190/#191). Zero tokens while paused. Auth failures (expired login) ride
+  the same pause since the 2026-07-20 night incident — actionable "re-login"
+  ping, fixed re-probe cadence, auto-resume after the human fixes the login.
 - **Mechanical blocks auto-heal; recovery is a verb, not a fake steer.** Blocks
   carry a structured `blocked_kind`; `mechanical:corrupt_doc` and
   `mechanical:prep` self-heal when their condition clears (zero LLM, damped by

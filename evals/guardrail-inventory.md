@@ -100,6 +100,7 @@ the cognitive half is the movable part).
 ### C2. Quota/rate failure classifier — **H (cognitive impl, structural intent)**
 - `devclaw/loom/limits.py` `classify_failure` + regex banks; vendored copy in `runner.py` `_detect_usage_limit`.
 - Structural intent: never burn quota re-probing a limit. Cognitive impl: a large, chronically-patched regex bank (#189/#190 + repeated wording misses) — could move to a cheap model classify.
+- Misfire history +1 (2026-07-20 unattended night): auth deliberately classified REAL ("surface, don't pause") — an expired VPS login burned the whole run window as ~58 terminal cognition failures, no pause, no ping. Fixed by adding the pausing AUTH kind (fixed re-probe + actionable re-login ping), with a STRONG/WEAK pattern split so bare 401/Unauthorized in gate-feedback prose about the app under development stays REAL (a pausing AUTH raised the misfire cost from "benign retry" to "2h account pause"). Another instance of the bank being patched per incident — evidence FOR the cheap-model-classify replacement.
 - A/B: no off-switch (fail-open default REAL). Shedding = replace-not-delete; robustness win, not cost-cut. Rank last.
 
 ### C3. Worker honest-block / honest-exit — **S** — `_WORKER_BLOCKED_MARKER` fail-fast-closed path (#280); runner `_parse_blocked_reason`. Out of scope.
