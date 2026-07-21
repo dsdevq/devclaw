@@ -108,6 +108,85 @@ def test_sweep_survives_one_failed_rm(monkeypatch):
     assert sc.sweep_orphan_sandboxes() == 2
 
 
+# ---- owner-scoped sweep (multi-process seam) ----
+#
+# Two devclaw processes legitimately share one docker daemon (the live service
+# + a one-off measure/eval run). "Every sandbox-labeled container is orphaned
+# at MY startup" only holds per-instance: the unscoped sweep was live friendly
+# fire — a service restart mid-eval SIGKILLed the eval's in-flight sandboxes
+# (exit 137, 2026-07-21).
+
+
+def test_sweep_scoped_to_owner_spares_other_instances_sandboxes(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(args):
+        calls.append(args)
+        if args[0] == "ps":
+            # own, a concurrent instance's, and a legacy pre-scoping container
+            return _completed(args, stdout="own1 abc123\nforeign1 def456\nlegacy1 \n")
+        return _completed(args)
+
+    monkeypatch.setattr(sc, "_docker_run_sync", fake_run)
+    assert sc.sweep_orphan_sandboxes("abc123") == 2
+    rms = [a for a in calls if a[0] == "rm"]
+    # own id reaped, legacy (no owner label) reaped, the OTHER instance's spared
+    assert rms == [["rm", "-f", "own1"], ["rm", "-f", "legacy1"]]
+
+
+def test_sweep_owner_query_keeps_the_sandbox_label_filter(monkeypatch):
+    # Scoping must narrow the sweep, never widen it: the ps query still filters
+    # on the sandbox label (deploy containers stay out of scope) and asks for
+    # the owner label per container.
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(args):
+        if args[0] == "ps":
+            seen["ps"] = args
+        return _completed(args, stdout="")
+
+    monkeypatch.setattr(sc, "_docker_run_sync", fake_run)
+    sc.sweep_orphan_sandboxes("abc123")
+    assert f"label={sc.SANDBOX_LABEL}" in seen["ps"]
+    assert sc.SANDBOX_OWNER_LABEL_KEY in " ".join(seen["ps"])
+    assert "devclaw.deploy" not in " ".join(seen["ps"])
+
+
+def test_sandbox_launch_stamps_owner_label():
+    args = sc._build_docker_args(
+        container_name="devclaw-deadbeef",
+        host_bind_path="/host/ws",
+        claude_dir="/home/u/.claude",
+        payload="{}",
+        owner_id="abc123",
+    )
+    i = args.index(f"{sc.SANDBOX_OWNER_LABEL_KEY}=abc123")
+    assert args[i - 1] == "--label"
+
+
+def test_sandbox_launch_without_owner_omits_owner_label():
+    # None (tests / direct callers) → argv byte-identical to the pre-scoping
+    # posture: no dangling --label, no empty owner value.
+    args = sc._build_docker_args(
+        container_name="devclaw-deadbeef",
+        host_bind_path="/host/ws",
+        claude_dir="/home/u/.claude",
+        payload="{}",
+    )
+    assert not any(a.startswith(sc.SANDBOX_OWNER_LABEL_KEY) for a in args)
+
+
+def test_sandbox_owner_id_is_stable_and_instance_specific():
+    # Same DB path → same id across restarts (own orphans stay reapable);
+    # different DB path (live devclaw.db vs a measure.db) → different id.
+    assert sc.sandbox_owner_id("/var/lib/devclaw/devclaw.db") == sc.sandbox_owner_id(
+        "/var/lib/devclaw/devclaw.db"
+    )
+    assert sc.sandbox_owner_id("/var/lib/devclaw/devclaw.db") != sc.sandbox_owner_id(
+        "/var/lib/devclaw/workspaces/.measure/measure.db"
+    )
+
+
 # ---- bounded _teardown ----
 
 

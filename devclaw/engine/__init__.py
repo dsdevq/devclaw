@@ -53,6 +53,11 @@ class EngineRequest:
     #: None → the engine's own DEVCLAW_SANDBOX_IMAGE default. Docker-less
     #: engines (host, stub) ignore it.
     sandbox_image: Optional[str] = None
+    #: optional owner-instance id — stamps the sandbox's ``devclaw.owner``
+    #: label so the startup orphan sweep only ever reaps THIS instance's
+    #: leftovers, never a concurrent devclaw process's live sandboxes on the
+    #: same daemon. Docker-less engines (host, stub) ignore it.
+    owner_id: Optional[str] = None
 
 
 #: Terminal verdict from one task. ``status == "ok"`` carries
