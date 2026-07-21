@@ -82,3 +82,17 @@ async def test_settle_refuses_to_hang_when_dispatch_is_stuck(monkeypatch):
     monkeypatch.setattr(mp.asyncio, "sleep", fake_sleep)
     with pytest.raises(RuntimeError, match="pending"):
         await mp._settle(queue, store, "t1")
+
+
+def test_report_dir_honors_env_override(monkeypatch):
+    # Named regression for the 2026-07-21 VPS smoke: the one-off container's
+    # /app is root-owned, so the file-relative default runs/ dir crashed the
+    # report write AFTER a green run. MEASURE_REPORT_DIR must win when set.
+    import importlib
+    monkeypatch.setenv("MEASURE_REPORT_DIR", "/tmp/some-mounted-dir/runs")
+    try:
+        reloaded = importlib.reload(mp)
+        assert str(reloaded.REPORT_DIR) == "/tmp/some-mounted-dir/runs"
+    finally:
+        monkeypatch.delenv("MEASURE_REPORT_DIR")
+        importlib.reload(mp)
