@@ -65,6 +65,17 @@ where it would have to live). A blocker is a FACT about the repo, not
 an owner decision — even if the owner ends up okay stubbing it, the
 blocker line stays.
 
+**4b. A missing toolchain declaration is a blocker (ADR 0005).** The
+sandbox provisions the toolchain from the repository's OWN declaration
+files (`.mise.toml` / `.tool-versions`, or `global.json` /
+`package.json` engines) at task start. When the goal requires a
+language stack and neither the discovery brief nor REPOSITORY CONTEXT
+shows any such declaration, add a `blockers[]` line naming the missing
+declaration file and the toolchain it must pin — the decomposer turns
+it into the first checklist item. Do NOT add the line when a
+declaration already exists; ground its absence like every other repo
+fact.
+
 **5. Open `unknowns` for everything you cannot decide.** For round 1:
 every gap the research couldn't close becomes an unknown. For round N:
 re-examine the merged state (prior draft + owner answers) and emit a

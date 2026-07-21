@@ -228,6 +228,20 @@ Rules that keep asserts honest and safe:
     item is genuinely done — a wrong assert blocks a correct item. When in
     doubt, omit it and rely on `evidence_target`.
 
+**11. Greenfield stacks DECLARE their toolchain first (ADR 0005).** The
+sandbox provisions the project's toolchain from the repository's OWN
+declaration files (`.mise.toml` / `.tool-versions`, or `global.json` /
+`package.json` engines) at task start — there is no per-stack sandbox
+image. When the goal requires a language stack and NEITHER the
+`repo_digest` nor REPOSITORY CONTEXT shows any such declaration (a
+greenfield build, or a repo predating the convention), the FIRST
+checklist item — before any scaffold or code item — creates the
+declaration file pinning the needed toolchain version(s), and every
+stack-dependent item `depends_on` it (directly or transitively). The
+project owns that file forever. Do NOT emit this item when a
+declaration already exists — ground its absence in the digest/context
+like every other repo fact.
+
 ## Anti-patterns — reject these in your own output
 
 - **Vague items.** *"Implement the MCP server"* is not an item — it's a
