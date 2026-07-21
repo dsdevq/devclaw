@@ -12,7 +12,7 @@ Each task runs on its OWN fresh clone of the repo so the delivered branches/PRs
 don't collide. Sequential (concurrency 1) for quota safety + clean rate-limiting.
 
 Run (env MUST be set before import — the runner reads the image/model at import):
-    DEVCLAW_SANDBOX_IMAGE=devclaw-sandbox-dotnet \
+    DEVCLAW_SANDBOX_IMAGE=devclaw-sandbox:local \
     DEVCLAW_EXEC_MODEL=claude-sonnet-4-6 \
     .venv/bin/python evals/measure_passrate.py
 """
