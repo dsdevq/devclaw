@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
+import sys
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -36,7 +38,18 @@ from .rows import (
     _row_to_event,
     _row_to_program,
     _row_to_task,
+    derive_failure_class,
 )
+
+#: The retry loop's terminal-escalation suffix ("… (failed after N attempts)") —
+#: the one place the attempt count survives into what the store sees at settle
+#: time, so the eval_outcomes projection parses it back out. Best-effort: fail-
+#: fast paths (timeout, review crash, worker block) never carry it → NULL.
+_ATTEMPTS_SUFFIX_RE = re.compile(r"\(failed after (\d+) attempts\)\s*$")
+
+#: Raw error text is truncated to this many chars in eval_outcomes rows — the
+#: full text stays on the task row; the projection only needs enough to read.
+_EVAL_ERROR_MAX_CHARS = 500
 
 # ---- retention (volume hygiene) ---------------------------------------------
 # Production evidence: a live devclaw.db reached 402MB with 200k+ trace rows —
@@ -314,6 +327,35 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 -- carried-past failures (a limit that auto-resumes) from
                 -- terminal ones. The capture/dedup layer; the ranked report is
                 -- a deliberate follow-up. See state_store/problems.py.
+                -- Continuous-eval OUTCOME PROJECTION (ADR 0006): one row per
+                -- settled evaluation sample. source='live' rows materialize
+                -- inside the settle write itself (mark_done / mark_failed /
+                -- mark_task_cancelled — the same single writer that owns task
+                -- rows, sharing the settle commit, exactly-once); source=
+                -- 'basket' rows land via `devclaw evals ingest` from
+                -- measure_passrate report JSONs (idempotent on source +
+                -- report_ref + ticket). failure_class is MECHANICAL string
+                -- bucketing (rows.derive_failure_class) — never an LLM call.
+                CREATE TABLE IF NOT EXISTS eval_outcomes (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source       TEXT NOT NULL CHECK (source IN ('live','basket')),
+                    task_id      TEXT,              -- live: task uuid; basket: NULL ok
+                    ticket       TEXT,              -- basket: basket ticket id; live: NULL
+                    goal_id      TEXT,
+                    program_id   TEXT,
+                    kind         TEXT,              -- fix_bug | implement_feature | ...
+                    workspace_dir TEXT,
+                    status       TEXT NOT NULL,     -- done | failed | cancelled
+                    verify_passed INTEGER,          -- 1/0, NULL = no gate ran
+                    pr_url       TEXT,
+                    attempts     INTEGER,
+                    wall_ms      INTEGER,
+                    failure_class TEXT,             -- short mechanical class, NULL when done
+                    error        TEXT,              -- truncated (<=500 chars) raw error
+                    report_ref   TEXT,              -- basket: report JSON filename
+                    settled_at   INTEGER NOT NULL   -- epoch ms
+                );
+
                 CREATE TABLE IF NOT EXISTS problems (
                   fingerprint     TEXT PRIMARY KEY,
                   category        TEXT NOT NULL,
@@ -403,6 +445,16 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 CREATE INDEX IF NOT EXISTS idx_traces_ts        ON traces(ts);
                 CREATE INDEX IF NOT EXISTS idx_problems_category ON problems(category);
                 CREATE INDEX IF NOT EXISTS idx_problems_count    ON problems(count);
+                CREATE INDEX IF NOT EXISTS idx_eval_outcomes_settled
+                    ON eval_outcomes(settled_at);
+                -- Exactly-once belts: one projection row per live task settle
+                -- (the settle UPDATE's rowcount guard is the primary defense;
+                -- this makes a re-insert structurally impossible), and re-
+                -- ingesting the same basket report is a no-op, not duplicates.
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_outcomes_live_task
+                    ON eval_outcomes(task_id) WHERE source = 'live';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_outcomes_basket
+                    ON eval_outcomes(source, report_ref, ticket) WHERE source = 'basket';
                 """
             )
             self._commit()
@@ -485,12 +537,17 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         a poller (goalclaw) can't see done-without-PR and re-dispatch. COALESCE
         keeps an already-recorded pr_url when None is passed (program/plain path)."""
         with self._lock:
-            self._db.execute(
+            cur = self._db.execute(
                 "UPDATE tasks SET status = 'done', result_json = ?, "
                 "pr_url = COALESCE(?, pr_url), completed_at = ? "
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (result_json, pr_url, _now_ms(), task_id),
             )
+            if cur.rowcount == 1:
+                # eval_outcomes projection (ADR 0006): materialized inside the
+                # settle's own commit, only when a row actually moved — a no-op
+                # re-settle writes nothing (exactly-once).
+                self._insert_live_outcome(task_id, status="done", result_json=result_json)
             self._commit()
 
     def mark_failed(self, task_id: str, error: str) -> None:
@@ -500,8 +557,11 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (error, _now_ms(), task_id),
             )
-            self._commit()
             moved = cur.rowcount == 1
+            if moved:
+                # eval_outcomes projection — same commit as the settle itself.
+                self._insert_live_outcome(task_id, status="failed", error=error)
+            self._commit()
         # Observability: a task settling FAILED is a problem devclaw hit — record
         # it (deduped) at this single choke point so every failure site
         # (timeout, review-crash, pause-bound, all-attempts-exhausted) is
@@ -531,6 +591,9 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 "WHERE id = ? AND status IN ('pending', 'running')",
                 (_now_ms(), task_id),
             )
+            if cur.rowcount == 1:
+                # eval_outcomes projection — same commit as the settle itself.
+                self._insert_live_outcome(task_id, status="cancelled")
             self._commit()
             return cur.rowcount == 1
 
@@ -619,6 +682,151 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 (goal_id,),
             ).fetchone()
         return _row_to_task(row) if row else None
+
+    # ---- eval outcomes (continuous-eval projection, ADR 0006) -----------
+
+    def _insert_live_outcome(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        result_json: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Materialize the ``eval_outcomes`` projection row for a task that just
+        settled. Called by mark_done/mark_failed/mark_task_cancelled INSIDE their
+        lock, AFTER the settle UPDATE (so the row read back already carries the
+        final pr_url/completed_at) and BEFORE their ``_commit`` — the insert
+        shares the settle's commit, so a settle and its projection row are one
+        atomic unit. Exactly-once: callers only invoke this when the settle
+        UPDATE moved a row, and the partial unique index on (task_id) makes a
+        duplicate structurally an IGNORE.
+
+        Everything is derived from what the store already knows at settle time,
+        mechanically (zero LLM):
+          * ``verify_passed`` — the result's verify block (done), or 0 when the
+            error buckets as ``verify_failed``; NULL = no gate produced a verdict;
+          * ``failure_class`` — :func:`rows.derive_failure_class` string bucketing;
+          * ``attempts`` — parsed from the retry loop's terminal "(failed after
+            N attempts)" suffix; fail-fast paths carry no count → NULL;
+          * ``wall_ms`` — completed_at − started_at from the row itself.
+
+        Best-effort: a projection hiccup logs and is dropped — it must never
+        unsettle the task (the settle UPDATE still commits)."""
+        try:
+            row = self._db.execute(
+                "SELECT * FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None:
+                return
+            verify_passed: Optional[int] = None
+            if result_json:
+                try:
+                    verify = (json.loads(result_json) or {}).get("verify") or {}
+                    if verify.get("ran"):
+                        verify_passed = 1 if verify.get("passed") else 0
+                except (TypeError, ValueError):
+                    pass
+            failure_class: Optional[str] = None
+            if status == "failed":
+                failure_class = derive_failure_class(error)
+                if failure_class == "verify_failed" and verify_passed is None:
+                    verify_passed = 0
+            attempts: Optional[int] = None
+            if error:
+                m = _ATTEMPTS_SUFFIX_RE.search(error)
+                if m:
+                    attempts = int(m.group(1))
+            completed, started = row["completed_at"], row["started_at"]
+            wall_ms = (completed - started) if (completed and started) else None
+            self._db.execute(
+                "INSERT OR IGNORE INTO eval_outcomes "
+                "(source, task_id, goal_id, program_id, kind, workspace_dir, "
+                " status, verify_passed, pr_url, attempts, wall_ms, "
+                " failure_class, error, settled_at) "
+                "VALUES ('live', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    row["parent_goal_id"],
+                    row["program_id"],
+                    row["kind"],
+                    row["workspace_dir"],
+                    status,
+                    verify_passed,
+                    row["pr_url"],
+                    attempts,
+                    wall_ms,
+                    failure_class,
+                    (error or "")[:_EVAL_ERROR_MAX_CHARS] or None,
+                    completed if completed else _now_ms(),
+                ),
+            )
+        except Exception as err:  # noqa: BLE001 — telemetry must never unsettle
+            sys.stderr.write(
+                f"state-store: eval_outcomes projection failed task={task_id}: {err}\n"
+            )
+
+    def record_basket_outcome(
+        self,
+        *,
+        report_ref: str,
+        ticket: str,
+        status: str,
+        task_id: Optional[str] = None,
+        kind: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
+        verify_passed: Optional[bool] = None,
+        pr_url: Optional[str] = None,
+        wall_ms: Optional[int] = None,
+        error: Optional[str] = None,
+        settled_at: Optional[int] = None,
+    ) -> bool:
+        """Insert one ``source='basket'`` eval_outcomes row from a
+        measure_passrate report record. Idempotent on (source, report_ref,
+        ticket) via the partial unique index — re-ingesting the same report is
+        a no-op. Returns True iff a NEW row was inserted. ``failure_class`` is
+        derived here with the same mechanical bucketing live rows use."""
+        failure_class = derive_failure_class(error) if status == "failed" else None
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO eval_outcomes "
+                "(source, task_id, ticket, kind, workspace_dir, status, "
+                " verify_passed, pr_url, wall_ms, failure_class, error, "
+                " report_ref, settled_at) "
+                "VALUES ('basket', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    task_id,
+                    ticket,
+                    kind,
+                    workspace_dir,
+                    status,
+                    None if verify_passed is None else (1 if verify_passed else 0),
+                    pr_url,
+                    wall_ms,
+                    failure_class,
+                    (error or "")[:_EVAL_ERROR_MAX_CHARS] or None,
+                    report_ref,
+                    settled_at if settled_at is not None else _now_ms(),
+                ),
+            )
+            self._commit()
+            return cur.rowcount == 1
+
+    def list_eval_outcomes(
+        self, *, source: Optional[str] = None, limit: int = 100
+    ) -> list[dict]:
+        """Recent eval_outcomes rows, newest settle first — the read surface
+        the console/night-report layers (PR2/PR3) and tests project from.
+        Plain dicts, pure SELECT."""
+        where = "WHERE source = ?" if source else ""
+        args: tuple = (source, limit) if source else (limit,)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT * FROM eval_outcomes {where} "
+                "ORDER BY settled_at DESC, id DESC LIMIT ?",
+                args,
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---- programs -------------------------------------------------------
 

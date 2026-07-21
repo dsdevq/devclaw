@@ -22,6 +22,7 @@ Usage:
   python -m devclaw.cli trace list [--goal G] [--kind K] [--role R] [--since 24h|<iso>]
                                    [--errors-only] [--limit N] [--json]
   python -m devclaw.cli trace report [--since 24h|<iso>] [--json]
+  python -m devclaw.cli evals ingest <passrate-*.json | evals/runs dir> [--db PATH]
   python -m devclaw.cli projects list [--status active|paused|archived] [--json]
   python -m devclaw.cli projects show <id> [--json]
   python -m devclaw.cli projects register <id> <name> [--repo-url U] [--workspace-dir D]
@@ -43,6 +44,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from .goal.store import GoalStore
@@ -260,6 +262,112 @@ def _cmd_scorecard(args) -> int:
         print(json.dumps(sc, indent=2))
     else:
         print(format_scorecard(sc))
+    return 0
+
+
+# ---- evals ingest (continuous-eval projection, ADR 0006) --------------------
+#
+# Basket runs (evals/measure_passrate.py) keep writing their report JSONs to
+# evals/runs/passrate-*.json; this verb loads them into the SAME eval_outcomes
+# projection the live settle path writes, as source='basket' rows. Idempotent
+# on (source, report_ref, ticket) — re-ingesting a report is a no-op, never
+# duplicates. Purely mechanical (JSON parse + string bucketing), zero LLM.
+
+
+def _ingest_report_file(store: StateStore, path: Path) -> str:
+    """Ingest ONE candidate report JSON into ``eval_outcomes``; returns a
+    one-line human message. Never raises — an unreadable, unparseable, or
+    shape-incompatible file (e.g. the June stub-e2e ``suite-*/report.json``
+    scenario reports, which carry no per-task outcomes) is skipped with a
+    per-file reason, so a bad file can't crash a directory ingest."""
+    # A bare "report.json" (the June suite-dir layout) is ambiguous as both a
+    # message label and a report_ref — qualify it with its parent dir so refs
+    # stay unique per report and skip messages say WHICH suite was skipped.
+    ref = path.name if path.name != "report.json" else f"{path.parent.name}/report.json"
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as err:
+        return f"{ref}: skipped (unreadable or invalid JSON: {err})"
+    if not isinstance(data, dict) or not isinstance(data.get("records"), list):
+        if isinstance(data, dict) and "scenarios" in data:
+            return (
+                f"{ref}: skipped (stub e2e scenario report — "
+                "no per-task outcomes to project)"
+            )
+        return (
+            f"{ref}: skipped (unrecognized shape — expected a "
+            "measure_passrate report with a 'records' list)"
+        )
+    # The reports carry no timestamps of their own; the file's mtime is the
+    # stable mechanical stand-in for when the basket's tasks settled.
+    settled_at = int(path.stat().st_mtime * 1000)
+    new = dup = 0
+    skipped: list[str] = []
+    for rec in data["records"]:
+        if not isinstance(rec, dict) or not rec.get("id"):
+            skipped.append("<malformed record>")
+            continue
+        status = rec.get("status")
+        if status not in ("done", "failed", "cancelled"):
+            # e.g. 'pending' rows recorded while the queue was paused, or the
+            # harness's own clone-failed/pin-failed — not settled task outcomes.
+            skipped.append(f"{rec['id']} (status={status!r} is not a settled outcome)")
+            continue
+        wall_s = rec.get("wall_s")
+        inserted = store.record_basket_outcome(
+            report_ref=ref,
+            ticket=str(rec["id"]),
+            status=status,
+            task_id=rec.get("task_id"),
+            kind=rec.get("kind"),
+            workspace_dir=rec.get("workspace"),
+            verify_passed=rec.get("verify_passed"),
+            pr_url=rec.get("pr_url"),
+            wall_ms=(
+                int(float(wall_s) * 1000)
+                if isinstance(wall_s, (int, float)) and not isinstance(wall_s, bool)
+                else None
+            ),
+            error=rec.get("error"),
+            settled_at=settled_at,
+        )
+        if inserted:
+            new += 1
+        else:
+            dup += 1
+    msg = f"{ref}: {new} new row(s), {dup} already present"
+    if skipped:
+        msg += f"; skipped {len(skipped)} record(s): {', '.join(skipped)}"
+    return msg
+
+
+def _cmd_evals_ingest(args) -> int:
+    """``devclaw evals ingest <file-or-dir>`` — load passrate report JSON(s)
+    into the eval_outcomes projection as source='basket' rows."""
+    target = Path(args.path).expanduser()
+    if not target.exists():
+        print(f"error: {target} does not exist", file=sys.stderr)
+        return 2
+    if target.is_file():
+        candidates = [target]
+    else:
+        candidates = sorted(p for p in target.glob("*.json") if p.is_file())
+        # The June suite dirs keep a report.json one level down — offer each to
+        # the parser; incompatible ones come back as a per-file skip message.
+        candidates += sorted(
+            d / "report.json"
+            for d in target.iterdir()
+            if d.is_dir() and (d / "report.json").is_file()
+        )
+    if not candidates:
+        print(f"nothing to ingest under {target} (no *.json reports found)")
+        return 0
+    store = StateStore(os.path.abspath(args.db) if args.db else _db_path())
+    try:
+        for p in candidates:
+            print(_ingest_report_file(store, p))
+    finally:
+        store.close()
     return 0
 
 
@@ -859,6 +967,24 @@ def _build_parser() -> argparse.ArgumentParser:
     t_rep.add_argument("--json", action="store_true")
     t_rep.set_defaults(func=lambda reg, get, a: _cmd_trace_report(a))
 
+    p_evals = sub.add_parser(
+        "evals",
+        help="the continuous-eval outcome projection (ADR 0006) — basket ingest",
+    )
+    esub = p_evals.add_subparsers(dest="cmd", required=True)
+
+    e_ing = esub.add_parser(
+        "ingest",
+        help="load measure_passrate report JSON(s) into eval_outcomes as "
+             "source='basket' rows (idempotent — re-ingesting is a no-op)",
+    )
+    e_ing.add_argument("path",
+                       help="a passrate-*.json report file, or a directory of "
+                            "them (e.g. evals/runs/)")
+    e_ing.add_argument("--db",
+                       help="target devclaw.db (default: $DEVCLAW_DB or ./devclaw.db)")
+    e_ing.set_defaults(func=lambda reg, get, a: _cmd_evals_ingest(a))
+
     p_sched = sub.add_parser(
         "schedule",
         help="daily run-window (engine-wide or per-goal) that gates NEW dispatch",
@@ -969,7 +1095,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     # The `cognition` dry-run is inspection-only: it constructs NO registry and
     # NO GoalStore (zero state reads/writes, zero queue/engine), so route it
     # before either store is opened. Its func lambdas ignore reg/all_goals.
-    if args.group == "cognition":
+    # `evals ingest` routes early too: it opens its OWN StateStore (honoring
+    # --db), so the default-path registry/GoalStore must not be constructed —
+    # they'd create a stray devclaw.db beside the one actually targeted.
+    if args.group in ("cognition", "evals"):
         return args.func(None, None, args)
     reg = ProjectRegistry(_db_path())
     # All CLI subcommands receive the full goals list for uniformity. Only
