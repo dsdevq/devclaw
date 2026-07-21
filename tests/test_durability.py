@@ -73,7 +73,9 @@ def test_recover_sweeps_orphaned_sandbox_containers(store, monkeypatch, capsys):
     # Exactly one sweep per recover, scoped to THIS instance's owner id (derived
     # from the state-DB path) — an unscoped sweep reaps a concurrent devclaw's
     # live sandboxes (the 2026-07-21 mid-eval friendly fire).
-    assert calls == [sandbox_owner_id(store.db_path)]
+    import os
+
+    assert calls == [sandbox_owner_id(os.path.realpath(store.db_path))]
     assert "reaped 3 orphaned sandbox container(s)" in capsys.readouterr().err
 
 

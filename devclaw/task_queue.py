@@ -364,8 +364,10 @@ class TaskQueue(_NotifyMixin):
         # This queue's sandbox-owner id (derived from its state-DB path): stamps
         # every launched sandbox and scopes the startup sweep, so two devclaw
         # processes sharing one docker daemon (live service + a measure/eval
-        # run) never reap each other's in-flight containers.
-        self._sandbox_owner: str = sandbox_owner_id(store.db_path)
+        # run) never reap each other's in-flight containers. realpath'd so a
+        # symlink/relative respelling of the same DB can't mint a new id and
+        # strand the old id's orphans unreapable.
+        self._sandbox_owner: str = sandbox_owner_id(os.path.realpath(store.db_path))
         # Injectable for tests — default to the real planner / sandcastle runner.
         self._planner: PlannerFn = planner or (lambda g, w: plan_program(g, w))
         self._runner: RunnerFn = runner or run_sandcastle
