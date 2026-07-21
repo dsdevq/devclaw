@@ -1,7 +1,11 @@
 # Proposal — Continuous evaluation as a projection of the live event stream
 
-- **Status:** **DRAFT**
-- **Date opened:** 2026-07-21
+- **Status:** **LOCKED (direction)** — 2026-07-21. All seven `[OPEN]` items
+  were answered by Denys the same evening (clarify step complete; resolutions
+  recorded in place in §5). Locking commits direction, not schedule —
+  sequencing stays Denys's call; graduation to an ADR happens when the
+  (reshaped ADR 0004 step 2) tranche is scheduled.
+- **Date opened:** 2026-07-21 · **Locked:** 2026-07-21
 - **Authors:** Denys + Claude (conversation of 2026-07-21)
 - **Supersedes / relates:** amends the *shape* of [ADR 0004](../decisions/0004-eval-workbench.md)
   step 2 (the `eval_runs` table / console "Evals" tab) — see §4; absorbs the
@@ -10,9 +14,9 @@
   shedding rule are NOT reopened.
 
 > How to read this: **[CONFIRMED]** = agreed in conversation on 2026-07-21.
-> **[OPEN]** = must be answered (or explicitly deferred with an owner) before
-> this can flip to LOCKED. The clarify step is mandatory — see
-> `.claude/rules/spec-lifecycle.md`.
+> Sections once marked **[OPEN]** have all been resolved in place (§5) —
+> the mandatory clarify step (`.claude/rules/spec-lifecycle.md`) ran the
+> same evening the draft landed.
 
 ---
 
@@ -96,36 +100,45 @@ outcome projection above, and the tab grows the clean-night headline. Steps
 alone) are untouched. If this proposal locks, the amendment is recorded in
 ADR 0004's header, pointing here.
 
-## 5. Open items — the clarify step [OPEN]
+## 5. Clarify-step resolutions [all RESOLVED 2026-07-21, by Denys]
 
-- **[OPEN] O1 — Clean-night definition.** Which `blocked_kind` classes count
-  as mechanism-wedges? Working proposal: any `mechanical:*` block, any
-  cognition-timeout-terminal, any engine/gate crash class = wedge; a
-  `needs_answer` with a genuine question = clean (human-gated is the design,
-  not a failure); a quota/auth pause that self-heals inside the window =
-  clean but reported. Denys to confirm the boundary, especially the pause
-  case.
-- **[OPEN] O2 — Projection write path.** Settle-hook in the TaskQueue (rows
-  materialize at settle time, same transaction boundary) vs. a cheap
-  periodic projector reading the event log (no queue change, eventually
-  consistent)? Both keep the single-writer contract; pick one and name the
-  owner of the new table.
-- **[OPEN] O3 — Report trigger + channel.** How is "window close" detected
-  (heartbeat sees the edge? a scheduled check?), which notifier channel gets
-  it, and what happens when no notifier is configured (log-only?).
-- **[OPEN] O4 — Basket cadence.** Post-deploy smoke only, weekly, or
-  manual-only-for-now? Each basket run spends real quota from the shared
-  pool; the VPS cron exists as mechanism but the budget is a policy call.
-- **[OPEN] O5 — judge_rate on live PRs.** ADR 0004 step 3 scores basket PRs
-  with the judge. Can the same judge ride *live* PRs (sampled? all?), or is
-  judge_rate basket-only until quota says otherwise?
-- **[OPEN] O6 — Retention/rollup.** Per-task rows forever, or roll up beyond
-  N days into nightly aggregates?
-- **[OPEN] O7 — Event-driven-loop seam.** The parked idea (vault:
-  `event-driven-loop-idea-2026-07-20.md`) would demote the heartbeat to
-  reconciliation. The window-close report must not bake in "the heartbeat is
-  the trigger" in a way that fights that future — O3's answer should name
-  the trigger abstractly (a scheduled edge, whoever owns edges).
+- **[RESOLVED] O1 — Clean-night boundary.** Wedge = any `mechanical:*`
+  block, cognition-timeout-treated-as-terminal, and engine/gate crash
+  classes. Clean = a `needs_answer` with a genuine question (human-gated is
+  the design), and **a quota/auth pause that self-heals inside the window**
+  — the pause-and-resume machinery working unattended IS the mechanism
+  working. The report still lists self-healed pauses ("paused 32min,
+  self-resumed") so lost throughput stays visible without failing the night.
+- **[RESOLVED] O2 — Projection write path: settle-hook in the TaskQueue.**
+  Rows materialize the moment a task settles — the same writer that already
+  owns task rows, exactly-once, real-time, single-writer invariant intact.
+  The TaskQueue owns the projection table. Basket runs keep writing their
+  report JSONs; a small ingest verb (CLI/MCP) loads them as `source=basket`
+  rows, since basket runs use their own measure DB, not the live one.
+- **[RESOLVED] O3 — Report trigger + channel: the scheduled-edge owner →
+  the existing owner-notify channel.** Today the scheduled-edge owner is the
+  heartbeat: a mechanical "window just closed" check fires the report
+  through the same notifier that carries owner pings. Zero LLM. No notifier
+  configured → log-only, never an error.
+- **[RESOLVED] O4 — Basket cadence: automatic 1-ticket smoke after each
+  devclaw-mcp deploy; full baskets stay manual.** Deploys are empirically
+  when things break (2026-07-21: a deploy seam killed a gate run; the
+  deploy-script rot would have killed all future deploys). ~1 ticket of
+  quota per deploy buys same-day detection; 9-ticket baskets remain
+  deliberate, Denys-fired, around tranches and A/Bs.
+- **[RESOLVED] O5 — judge_rate is basket-only for now.** Fixed tickets give
+  comparable scores; live PRs already pass the review gate, and a second
+  LLM pass per live PR is standing quota spend with unknown headroom.
+  Revisit after ADR 0004 step 3 lands and a night's quota profile is known.
+- **[RESOLVED] O6 — Retention: keep per-task rows indefinitely.** Dozens of
+  rows a night is nothing for SQLite; the long tail is what trend charts
+  (and the portfolio narrative) need. StateStore's existing size
+  checks/VACUUM are the escape hatch if volume ever surprises.
+- **[RESOLVED] O7 — Event-driven seam: abstract trigger, heartbeat today.**
+  The spec names "the scheduled-edge owner" as the report trigger; the
+  heartbeat holds that job now, and the event-driven rework (parked, vault:
+  `event-driven-loop-idea-2026-07-20.md`) inherits it unchanged if/when it
+  lands. Nothing in this proposal blocks on, or preempts, that idea.
 
 ## 6. Explicitly out of scope [CONFIRMED]
 
