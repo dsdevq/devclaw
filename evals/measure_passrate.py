@@ -134,6 +134,56 @@ def _load_basket(path: str) -> list[dict]:
     return data
 
 
+#: safety bound for _settle: consecutive drain rounds where the task sits
+#: 'pending' with NO active pause before we give up loudly. Normally the pump
+#: claims a pending task immediately, so >1 such round means something is
+#: structurally wrong with dispatch — looping further would hang the run.
+_STALLED_ROUNDS_MAX = 3
+
+
+async def _settle(queue: TaskQueue, store: StateStore, task_id: str) -> None:
+    """Drain until ``task_id`` actually SETTLES, waiting out account-wide pauses.
+
+    ``queue.drain()`` alone only awaits in-flight work — when a usage/rate/auth
+    limit pauses the queue, the task is requeued to 'pending' with dispatch
+    gated and drain returns immediately. The June runner never met the July
+    pause machinery: the 2026-07-20 baseline recorded 6 tickets as pending/0.0s
+    while the queue sat paused (~/memory eval-tranche notes, 'drain-vs-pause
+    seam'). So: after each drain, if the task is still pending under an active
+    pause, sleep past ``paused_until`` and re-pump; the MAX_PAUSE_REQUEUES
+    bound in the queue guarantees this terminates (the task eventually settles
+    done or failed either way)."""
+    stalled_rounds = 0
+    while True:
+        await queue.drain()
+        row = store.get_task(task_id)
+        if row is None or row.status not in ("pending", "running"):
+            return
+        until, reason = store.global_pause()
+        now_ms = time.time() * 1000
+        if until and until > now_ms:
+            wait_s = (until - now_ms) / 1000 + 5  # small slack past the reset
+            stalled_rounds = 0
+            print(
+                f"=== queue paused ({reason.strip()}); waiting ~{int(wait_s)}s "
+                f"for the pause to lift before resuming this ticket",
+                flush=True,
+            )
+            await asyncio.sleep(wait_s)
+        else:
+            # pending with no pause: either the pause just expired (pump below
+            # re-dispatches) or dispatch is structurally stuck — bound it.
+            stalled_rounds += 1
+            if stalled_rounds > _STALLED_ROUNDS_MAX:
+                raise RuntimeError(
+                    f"task {task_id} sat 'pending' with no active pause for "
+                    f"{_STALLED_ROUNDS_MAX} drain rounds — dispatch is stuck, "
+                    "refusing to hang the measurement run"
+                )
+            await asyncio.sleep(1)
+        queue.pump()
+
+
 async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
     ws = WORKROOT / task["id"]
     if ws.exists():
@@ -167,7 +217,7 @@ async def _run_one(queue: TaskQueue, store: StateStore, task: dict) -> dict:
         kind=task["kind"], workspace_dir=str(ws), goal=task["goal"],
         verify_cmd=verify, deliver=True,
     )
-    await queue.drain()
+    await _settle(queue, store, tid)
     wall = round(time.time() - t0, 1)
 
     row = store.get_task(tid)
