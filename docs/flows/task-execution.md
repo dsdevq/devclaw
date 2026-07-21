@@ -73,7 +73,7 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │         -v ~/.claude/.claude.json:RO             │   │
      │  │         --tmpfs /home/agent/.claude/session-env  │   │
      │  │         --network host                           │   │
-     │  │         devclaw-sandbox-dotnet:local             │   │
+     │  │         devclaw-sandbox:local                    │   │
      │  │         '<JSON payload>'                         │   │
      │  └──────────────────────────────────────────────────┘   │                             │
      │                                                         │                             │
@@ -189,7 +189,7 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
 | Failure | Step | Symptom seen by the planner | Real fix |
 |---|---|---|---|
 | Empty workspace bind | Step C — `_translate_workspace_path` passed an out-of-prefix path → host bind was empty | Sandbox starts, claude finds empty repo, hits wall-clock | PR #117 — `_validate_workspace()` in Step C |
-| Wrong sandbox image | Step C — `DEVCLAW_SANDBOX_IMAGE=devclaw-sandbox:local` (no dotnet) | Sandbox runs, claude writes scaffold OK, **Step F** `dotnet test` exits 127 | Declare the toolchain in the repo (`global.json` / `.mise.toml`) — the Step-D pre-step provisions it (ADR 0005). Migration bridge until the live .NET gate passes: pin `devclaw-sandbox-dotnet:local` via `.env` + `compose/docker-compose.override.yml` |
+| Wrong sandbox image | Step C — an image without the needed SDK and no toolchain declaration in the repo | Sandbox runs, claude writes scaffold OK, **Step F** `dotnet test` exits 127 | Declare the toolchain in the repo (`global.json` / `.mise.toml`) — the Step-D pre-step provisions it (ADR 0005; gate passed live 2026-07-21, finance-sentry#291 on the lean image). Escape hatch for a stack mise can't provision: the project's `sandbox_image` registry override |
 | Docker GID drift | **Before** Step C — the very `docker run` in Step C never succeeds | Permission denied at `/var/run/docker.sock`, "sandbox exited 1 / no result line" — looks identical to Step H's "no terminal result" | `compose/.env` with `LIFEKIT_DOCKER_GID=990`; also: a fail-fast precheck in run_sandcastle that exec's `docker version` once on startup |
 
 All three were silent-timeout failures because the engine output in Step H
