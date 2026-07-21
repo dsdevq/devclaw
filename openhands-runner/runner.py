@@ -450,10 +450,14 @@ def _read_browser_report(workspace_dir: str) -> "dict | None":
 # (loom/limits.classify_failure) still sees the original text — false negatives
 # are fine, false positives are not.
 
-# AUTH: never a limit — a 401/expired login must surface as a real failure, not
-# pause forever. Checked FIRST, mirroring limits.py's priority order.
+# AUTH: never tagged rate_limited HERE — auth text flows through as a plain
+# error so the HOST classifier (loom/limits.py) sees the original wording and
+# routes it onto the AUTH pause path (fixed re-probe + actionable owner ping,
+# 2026-07-20 night incident). Checked FIRST, mirroring limits.py's priority
+# order; keep the pattern in sync with limits.py's _AUTH.
 _LIMIT_AUTH = re.compile(
     r"\b401\b|invalid authentication|failed to authenticate|unauthor|"
+    r"authentication[ _]required|"
     r"authentication_error|oauth.*(expired|invalid)|please run /login",
     re.IGNORECASE,
 )

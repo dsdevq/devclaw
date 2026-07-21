@@ -493,3 +493,31 @@ async def test_window_reopen_logs_hold_lifted_and_dispatches(store, capsys):
 
     assert "dispatch hold lifted" in capsys.readouterr().err
     assert store.get_task(tid).status == "done"
+
+
+async def test_worker_auth_failure_requeues_and_pauses_not_terminal(store, monkeypatch):
+    """Named regression for the 2026-07-20 unattended night: the worker's
+    'Authentication required' failure settled the task terminal-failed (and the
+    goal layer then burned the window re-dispatching into the same dead login).
+    An auth failure must ride the pause path: requeue + one account-wide pause,
+    on AUTH's fixed re-probe backoff."""
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    calls: list = []
+
+    async def auth_dead(req: EngineRequest):
+        calls.append(req.goal)
+        return {"status": "error",
+                "error": "Conversation run failed for id=8f2273: Authentication "
+                         "required (failed after 2 attempts)"}
+
+    q = TaskQueue(store, runner=auth_dead)
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g")
+    await q.drain()
+
+    t = store.get_task(tid)
+    assert t.status == "pending"              # requeued, NOT failed
+    assert len(calls) == 1                    # no doomed immediate retry
+    until, reason = store.global_pause()
+    assert until > _now_ms() and reason.startswith("auth")
+    # AUTH's fixed re-probe cadence, not the quota default
+    assert until - _now_ms() > (limits.AUTH_PAUSE_S - 60) * 1000

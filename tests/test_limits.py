@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from devclaw.limits import (
+    AUTH_PAUSE_S,
     RATE_LIMIT_MAX_PAUSE_S,
     RATE_LIMIT_PAUSE_S,
     RATE_LIMIT_STATED_MAX_S,
@@ -43,8 +44,15 @@ from devclaw.limits import (
     ("503 Service Unavailable", FailureKind.TRANSIENT),
     ("ECONNRESET: connection reset by peer", FailureKind.TRANSIENT),
     ("the request timed out after 90s", FailureKind.TRANSIENT),
-    # --- REAL (auth + genuine bugs → fail, never pause) ---
-    ("ACP error: Internal error: Failed to authenticate. API Error: 401 Invalid authentication credentials", FailureKind.REAL),
+    # --- AUTH (broken login → pause + actionable ping, fixed re-probe) ---
+    ("ACP error: Internal error: Failed to authenticate. API Error: 401 Invalid authentication credentials", FailureKind.AUTH),
+    # the two REAL wordings from the 2026-07-20 unattended-night incident —
+    # planner side (claude --print) and worker side (ACP conversation):
+    ("claude --print exited 1. stdout:\nFailed to authenticate: OAuth session expired and could not be refreshed", FailureKind.AUTH),
+    ("Conversation run failed for id=8f227341: Authentication required (failed after 2 attempts)", FailureKind.AUTH),
+    # --- REAL (genuine bugs + app-domain 401 prose → fail, never pause) ---
+    ("review: the /admin endpoint returns 401 Unauthorized for logged-in users — fix the guard", FailureKind.REAL),
+    ("AssertionError: expected 200 got 401", FailureKind.REAL),
     ("ModuleNotFoundError: No module named 'fastapi'", FailureKind.REAL),
     ("AssertionError: expected 200 got 500", FailureKind.REAL),
     ("", FailureKind.REAL),
@@ -55,9 +63,10 @@ def test_classify(text, kind):
 
 
 def test_auth_beats_429_substring():
-    # an auth error that happens to mention a code must still be REAL, not paused
+    # an auth error that happens to mention a code must still be AUTH (its own
+    # fixed re-probe + re-login ping), never routed onto the rate-limit policy
     c = classify_failure("401 Invalid authentication credentials (rate limit headers present)")
-    assert c.kind is FailureKind.REAL
+    assert c.kind is FailureKind.AUTH
 
 
 def test_pausing_flag():
@@ -65,6 +74,20 @@ def test_pausing_flag():
     assert classify_failure("usage limit reached").is_pausing is True
     assert classify_failure("503 overloaded").is_pausing is False  # transient retries, not pauses
     assert classify_failure("AssertionError").is_pausing is False
+
+
+def test_expired_oauth_login_pauses_instead_of_terminal_spam():
+    # Named regression for the 2026-07-20 unattended night: an expired VPS login
+    # classified REAL burned the whole run window as ~58 terminal cognition
+    # failures with no pause and no owner ping. AUTH must pause (account-wide,
+    # like quota) on the fixed re-probe cadence — no stated reset for a login.
+    c = classify_failure(
+        "Failed to authenticate: OAuth session expired and could not be refreshed"
+    )
+    assert c.kind is FailureKind.AUTH
+    assert c.is_pausing is True
+    assert c.retry_after_s is None
+    assert pause_seconds(c.retry_after_s, stated=c.stated, kind=c.kind) == AUTH_PAUSE_S
 
 
 @pytest.mark.parametrize("text,secs", [
@@ -162,3 +185,15 @@ def test_unstated_policy_unchanged():
     assert pause_seconds(None) == RATE_LIMIT_PAUSE_S            # default backoff
     assert pause_seconds(36000) == RATE_LIMIT_MAX_PAUSE_S       # legacy call form: old cap
     assert pause_seconds(None, stated=False) == RATE_LIMIT_PAUSE_S
+
+
+def test_gate_feedback_401_prose_never_pauses_the_account():
+    # Named regression for the invariant-guard find (2026-07-21): once AUTH
+    # became pausing, a bare 401/Unauthorized in gate/review feedback about the
+    # app under development must NOT trigger a 2h account pause + a false
+    # re-login ping. Weak matches stay REAL — but still shielded from the
+    # quota/rate patterns (checked first).
+    prose = "review requested changes: 401 Unauthorized from /api/items; also mentions rate limit headers"
+    c = classify_failure(prose)
+    assert c.kind is FailureKind.REAL
+    assert c.is_pausing is False

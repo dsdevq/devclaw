@@ -1313,9 +1313,13 @@ class TaskQueue(_NotifyMixin):
             # now_utc lets the classifier turn Claude's ABSOLUTE reset wording
             # ("resets 10pm (UTC)") into a real hint; a stated hint is trusted
             # past the default re-probe cap (pause_seconds' stated policy).
+            # AUTH rides the same path (2026-07-20 night incident) — an expired
+            # login dooms every call exactly like a cap, so requeue + pause; the
+            # kind routes it onto the fixed AUTH_PAUSE_S re-probe cadence and
+            # the goal layer words the owner ping as "re-login needed".
             cls = classify_failure(last_failure, now_utc=datetime.now(timezone.utc))
             if cls.is_pausing:
-                backoff = pause_seconds(cls.retry_after_s, stated=cls.stated)
+                backoff = pause_seconds(cls.retry_after_s, stated=cls.stated, kind=cls.kind)
                 self._store.set_global_pause(
                     _now_ms() + backoff * 1000, f"{cls.kind.value}: {last_failure[:160]}"
                 )

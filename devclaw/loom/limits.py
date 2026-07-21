@@ -10,11 +10,20 @@ blips back off briefly.
 Kinds:
   - RATE_LIMIT  short-term cap (per-minute / 5-hour) — pause, resume on reset
   - QUOTA       longer cap (weekly / "usage limit reached") — pause, resume on reset
+  - AUTH        expired/broken login — pause + actionable owner ping, re-probe
   - TRANSIENT   overloaded / 5xx / network blip — short backoff, then retry
-  - REAL        genuine code/agent/auth failure — fail (with feedback), don't wait
+  - REAL        genuine code/agent failure — fail (with feedback), don't wait
 
-Auth failures (401 / "failed to authenticate") are REAL on purpose: waiting won't
-fix them (they need a re-login), so they must surface, not silently pause forever.
+Auth failures (401 / "failed to authenticate" / an expired OAuth session) used to
+be REAL ("surface, don't pause") — the 2026-07-20 unattended night proved that
+wrong: an expired VPS login "surfaced" as ~58 terminal cognition failures across
+the whole run window with no pause and no owner ping, every call doomed until a
+human re-login. AUTH is now a pausing kind like QUOTA — one account-wide pause
+gates queue + heartbeat — but with its own fixed re-probe backoff
+(:data:`AUTH_PAUSE_S`, no reset time exists to parse) and an ACTIONABLE ping
+(the goal layer words it as "re-login needed", not "usage limit"). Waiting still
+doesn't fix auth; pausing stops the doomed-call burn while the ping gets the
+human, and the re-probe auto-resumes work after the re-login with no extra verb.
 
 Pure + deterministic (no I/O, no hidden clock) so it's trivially unit-tested
 against real error strings. ``retry_after_s`` is parsed from the text when the
@@ -40,27 +49,44 @@ RATE_LIMIT_PAUSE_S = 1800
 RATE_LIMIT_MAX_PAUSE_S = 3600
 RATE_LIMIT_STATED_MAX_S = 86_400
 
-
-def pause_seconds(retry_after_s: int | None, *, stated: bool = False) -> int:
-    """The backoff to use for a pausing failure. Centralizes the policy so task +
-    goal layers agree. ``stated=True`` means ``retry_after_s`` came from the
-    provider's own text (see :class:`Classification`), so it's trusted up to the
-    generous STATED cap; unstated hints keep the legacy default/cap."""
-    if stated and retry_after_s:
-        return min(retry_after_s, RATE_LIMIT_STATED_MAX_S)
-    return min(retry_after_s or RATE_LIMIT_PAUSE_S, RATE_LIMIT_MAX_PAUSE_S)
+#: fixed re-probe cadence for an AUTH pause. No reset time exists to parse (the
+#: provider can't say when a human will re-login), so the trade is: short →
+#: faster auto-resume after the re-login but chattier reminder pings + more
+#: doomed probe calls while broken; long → the reverse. 2h ≈ 3-4 pings across a
+#: broken night, ≤2h resume lag after the fix, ≤12 probe calls/day worst case.
+AUTH_PAUSE_S = 7200
 
 
 class FailureKind(str, Enum):
     RATE_LIMIT = "rate_limit"
     QUOTA = "quota"
+    AUTH = "auth"
     TRANSIENT = "transient"
     REAL = "real"
 
 
+def pause_seconds(
+    retry_after_s: int | None, *, stated: bool = False,
+    kind: "FailureKind | None" = None,
+) -> int:
+    """The backoff to use for a pausing failure. Centralizes the policy so task +
+    goal layers agree. ``stated=True`` means ``retry_after_s`` came from the
+    provider's own text (see :class:`Classification`), so it's trusted up to the
+    generous STATED cap; unstated hints keep the legacy default/cap. AUTH ignores
+    hints entirely — there is no stated reset for a broken login, only the fixed
+    :data:`AUTH_PAUSE_S` re-probe cadence."""
+    if kind is FailureKind.AUTH:
+        return AUTH_PAUSE_S
+    if stated and retry_after_s:
+        return min(retry_after_s, RATE_LIMIT_STATED_MAX_S)
+    return min(retry_after_s or RATE_LIMIT_PAUSE_S, RATE_LIMIT_MAX_PAUSE_S)
+
+
 #: kinds that mean "the model is unavailable for a while — pause and resume", as
-#: opposed to retry-now (TRANSIENT) or fail (REAL).
-PAUSING_KINDS = (FailureKind.RATE_LIMIT, FailureKind.QUOTA)
+#: opposed to retry-now (TRANSIENT) or fail (REAL). AUTH pauses too (2026-07-20
+#: night incident) — the difference is the ping wording + fixed re-probe, not
+#: the pause mechanics.
+PAUSING_KINDS = (FailureKind.RATE_LIMIT, FailureKind.QUOTA, FailureKind.AUTH)
 
 
 @dataclass(frozen=True)
@@ -83,13 +109,29 @@ class Classification:
 # retry-after parser) lives in openhands-runner/runner.py — the in-sandbox
 # runner can't import devclaw, so it carries its own copy to emit a structured
 # status="rate_limited" result. Keep the two in sync when editing.
-# AUTH first: "401 ... authenticate" must be REAL even though it's an API error —
-# otherwise we'd pause forever on an expired login instead of surfacing it.
+# AUTH first: harness-shaped auth wording must classify as AUTH even when the
+# text also mentions a rate-limit-shaped code — an expired login is never a
+# quota event. "authentication required" is the ACP/worker wording from the
+# 2026-07-20 night incident ("Conversation run failed …: Authentication
+# required"); the planner-side wording that night ("Failed to authenticate:
+# OAuth session expired and could not be refreshed") already matched.
+# STRONG vs WEAK split (invariant-guard find, 2026-07-21): now that AUTH
+# pauses the whole account, a bare "401"/"Unauthorized" in gate/review
+# feedback about the app under development ("expected 200 got 401", "the
+# /admin endpoint returns 401 for logged-in users") must NOT trigger a 2h
+# pause + a false re-login ping. Only STRONG (harness-shaped) wording is AUTH;
+# WEAK matches stay REAL — still checked before quota/rate so a 401 with
+# rate-limit words nearby is never misrouted onto the pause-with-reset path.
+# NB: the vendored runner.py copy (_LIMIT_AUTH) keeps the strong∪weak UNION —
+# its only job is shielding auth text from the rate_limited tag; the host
+# re-classifies from the original wording.
 _AUTH = re.compile(
-    r"\b401\b|invalid authentication|failed to authenticate|unauthor|"
+    r"invalid authentication|failed to authenticate|"
+    r"authentication[ _]required|"
     r"authentication_error|oauth.*(expired|invalid)|please run /login",
     re.IGNORECASE,
 )
+_AUTH_WEAK = re.compile(r"\b401\b|unauthor", re.IGNORECASE)
 # QUOTA: the longer "you're out for a while" caps (Claude Pro/Max usage limits).
 # NOTE: "out of (extra )?usage" is the REAL Claude Code wording observed live —
 # "Internal error: You're out of extra usage · resets 10pm (UTC)" — which the
@@ -202,6 +244,13 @@ def classify_failure(text: str | None, *, now_utc: datetime | None = None) -> Cl
         return h
 
     if _AUTH.search(t):
+        # No retry_after: a login has no reset time; pause_seconds(kind=AUTH)
+        # supplies the fixed re-probe cadence.
+        return Classification(FailureKind.AUTH, None, "auth")
+    if _AUTH_WEAK.search(t):
+        # Bare 401/unauthorized without harness wording: most likely feedback
+        # prose about the app under development — REAL (retry with feedback),
+        # but still shielded from the quota/rate patterns below.
         return Classification(FailureKind.REAL, None, "auth")
     if _QUOTA.search(t):
         h = _hint()

@@ -91,18 +91,29 @@ class ControlPlaneMixin:
     # still fire exactly once afterwards — the goal tick owns the flag's
     # lifecycle (set on the pause ping, cleared on the resume ping).
 
-    def set_pause_notified(self, on: bool) -> None:
+    def set_pause_notified(self, on: bool, kind: str = "") -> None:
         """Record (``on=True``) / reset (``on=False``) that the owner was told
         about the current global pause, so they're pinged once per pause and
-        once on resume — not every tick."""
+        once on resume — not every tick. ``kind`` (e.g. "auth") rides in the
+        same meta value: the resume path must know WHAT episode was announced
+        even after the pause itself is gone — the queue's 10s pump lazily
+        clears an expired pause (reason included) long before the ~15-min
+        heartbeat looks, so keying resume behavior on the live pause_reason
+        silently misses the dominant ordering (invariant-guard find, 2026-07-21)."""
         if on:
-            self.set_meta("pause_notified", "1")
+            self.set_meta("pause_notified", kind or "1")
         else:
             self.delete_meta("pause_notified")
 
     def pause_notified(self) -> bool:
         """Whether the owner has already been pinged about the current pause."""
-        return self.get_meta("pause_notified") == "1"
+        return self.get_meta("pause_notified") is not None
+
+    def pause_notified_kind(self) -> str:
+        """The classified kind recorded with the pause ping ("" for legacy or
+        kind-less pings)."""
+        raw = self.get_meta("pause_notified")
+        return "" if raw in (None, "1") else raw
 
     # ---- operator dispatch controls (manual pause + daily run window) ----
     # Human-facing siblings of the quota pause above. Distinct meta keys, so the

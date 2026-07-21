@@ -6,6 +6,7 @@ re-exports the same names so existing imports keep working."""
 from __future__ import annotations
 
 from .loom.limits import (  # noqa: F401
+    AUTH_PAUSE_S,
     RATE_LIMIT_MAX_PAUSE_S,
     RATE_LIMIT_PAUSE_S,
     RATE_LIMIT_STATED_MAX_S,

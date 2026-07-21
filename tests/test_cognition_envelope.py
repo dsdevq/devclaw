@@ -219,11 +219,12 @@ async def test_quota_wording_inside_json_error_envelope(monkeypatch):
 
 async def test_nonzero_exit_with_stderr_keeps_stderr_in_message(monkeypatch):
     """The pre-existing stderr path is untouched: non-zero exit with real
-    stderr still surfaces it (auth errors etc. stay classifiable)."""
+    stderr still surfaces it verbatim, so an auth failure classifies AUTH and
+    rides the pause+ping path (2026-07-20 night incident) instead of REAL."""
     _fake_subprocess(
         monkeypatch, stdout=b"", stderr=b"failed to authenticate", returncode=1,
     )
     with pytest.raises(PlannerError) as ei:
         await call_claude("p")
     assert "failed to authenticate" in str(ei.value)
-    assert classify_failure(str(ei.value)).kind is FailureKind.REAL
+    assert classify_failure(str(ei.value)).kind is FailureKind.AUTH

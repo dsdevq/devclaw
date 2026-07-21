@@ -85,10 +85,21 @@ def test_bare_retry_after_header_is_seconds(runner):
 
 
 def test_auth_shaped_text_is_never_a_limit(runner):
-    # limits.py checks AUTH first for the same reason: waiting can't fix an
-    # expired login — it must surface as a real failure, not pause forever.
+    # The runner must NOT tag auth text rate_limited: it flows through as a
+    # plain error so the HOST classifier (loom/limits.py) sees the original
+    # wording and routes it onto the AUTH pause path (fixed re-probe +
+    # actionable re-login ping — 2026-07-20 night incident).
     matched, retry_after = runner._detect_usage_limit(
         "401 rate limit: invalid authentication, please run /login"
+    )
+    assert matched is False and retry_after is None
+
+
+def test_authentication_required_flows_through_as_plain_error(runner):
+    # the exact worker wording from the 2026-07-20 night — must not be tagged
+    # rate_limited here (the host classifies it AUTH from the original text)
+    matched, retry_after = runner._detect_usage_limit(
+        "Conversation run failed: Authentication required (failed after 2 attempts)"
     )
     assert matched is False and retry_after is None
 
