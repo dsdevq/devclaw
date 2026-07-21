@@ -29,8 +29,10 @@ label, and :func:`sweep_orphan_sandboxes` reaps leftovers at the next startup
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
@@ -83,6 +85,10 @@ SWEEP_DOCKER_TIMEOUT_S = 10.0
 # Container-side mount targets. Match the Dockerfile's expectations.
 CONTAINER_WORKSPACE = "/workspace"
 CONTAINER_CLAUDE_DIR = "/home/agent/.claude"
+# mise's data dir inside the sandbox (the Dockerfile sets MISE_DATA_DIR to the
+# same path) — mount target for the per-project toolchain cache volume, filled
+# by the runner's provisioning pre-step (ADR 0005).
+CONTAINER_MISE_DATA = "/home/agent/.local/share/mise"
 
 # Which entries under the host ~/.claude get bound into the sandbox config dir.
 # Default: the OAuth *identity pair* — `.credentials.json` (the token) AND
@@ -273,6 +279,18 @@ def _validate_workspace(workspace_dir: str) -> str | None:
     return None
 
 
+def _toolchain_volume_name(host_bind_path: str) -> str:
+    """The per-project named docker volume caching mise-provisioned toolchains
+    (ADR 0005). Keyed on the HOST workspace path — the project identity axis —
+    so every task of a project shares one cache and no project can touch
+    another's (per-project isolation was an explicit lock decision, over a
+    shared cross-project cache). Deterministic; docker auto-creates the volume
+    on first mount."""
+    slug = re.sub(r"[^a-z0-9]+", "-", Path(host_bind_path).name.lower()).strip("-")[:40]
+    digest = hashlib.sha256(host_bind_path.encode("utf-8")).hexdigest()[:8]
+    return f"devclaw-toolchains-{slug or 'workspace'}-{digest}"
+
+
 def _build_claude_mounts(claude_dir: str, allowlist: tuple[str, ...]) -> list[str]:
     """``-v`` args binding ONLY the allowlisted entries under the host ~/.claude
     into the sandbox config dir, each read-only. The curated boundary: auth in,
@@ -314,6 +332,11 @@ def _build_docker_args(
         "--cpus", SANDBOX_CPUS,
         "-v",
         f"{host_bind_path}:{CONTAINER_WORKSPACE}",
+        # Per-project toolchain cache (ADR 0005): mise's data dir survives
+        # across this project's tasks, so only the first task per toolchain
+        # version pays the SDK download.
+        "-v",
+        f"{_toolchain_volume_name(host_bind_path)}:{CONTAINER_MISE_DATA}",
         # Curated claude config: only the allowlisted auth, read-only (NOT the whole
         # host ~/.claude — see SANDBOX_CLAUDE_ALLOWLIST).
         *_build_claude_mounts(claude_dir, allowlist),

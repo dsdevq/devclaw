@@ -67,7 +67,9 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │         workspace_dir )                          │                                 │
      │  │     • docker run --rm --name devclaw-XXXX        │ ──┐                             │
      │  │         -v <host_bind>:/workspace                │   │                             │ docker run fails here
-     │  │         -v ~/.claude/.credentials.json:RO        │   │                             │ if Node 2 lacks GID 990
+     │  │         -v devclaw-toolchains-<proj>:            │   │                             │ if Node 2 lacks GID 990
+     │  │            /home/agent/.local/share/mise         │   │  per-project toolchain      │
+     │  │         -v ~/.claude/.credentials.json:RO        │   │  cache (ADR 0005)           │
      │  │         -v ~/.claude/.claude.json:RO             │   │
      │  │         --tmpfs /home/agent/.claude/session-env  │   │
      │  │         --network host                           │   │
@@ -83,6 +85,12 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │                                                  │                                 │
      │  │  Step D — runner.py:                             │                                 │
      │  │     • read JSON payload from argv                │                                 │
+     │  │     • provision project-declared toolchain       │                                 │ toolchain_provision_failed:
+     │  │       (ADR 0005): detect .mise.toml/.tool-       │                                 │ declared toolchain that
+     │  │       versions (or translate global.json /       │                                 │ can't be provisioned fails
+     │  │       package.json engines), `mise install`,     │                                 │ CLOSED here, before the
+     │  │       export env so agent + verify gate inherit  │                                 │ agent spends anything
+     │  │       it; no declaration → zero-cost no-op       │                                 │
      │  │     • build wrapped_goal (skills + quality bar   │                                 │
      │  │       + the task body — which for a code task    │                                 │
      │  │       carries the planner's per-task acceptance  │                                 │
@@ -181,7 +189,7 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
 | Failure | Step | Symptom seen by the planner | Real fix |
 |---|---|---|---|
 | Empty workspace bind | Step C — `_translate_workspace_path` passed an out-of-prefix path → host bind was empty | Sandbox starts, claude finds empty repo, hits wall-clock | PR #117 — `_validate_workspace()` in Step C |
-| Wrong sandbox image | Step C — `DEVCLAW_SANDBOX_IMAGE=devclaw-sandbox:local` (no dotnet) | Sandbox runs, claude writes scaffold OK, **Step F** `dotnet test` exits 127 | `.env` + `compose/docker-compose.override.yml` to pin `devclaw-sandbox-dotnet:local` |
+| Wrong sandbox image | Step C — `DEVCLAW_SANDBOX_IMAGE=devclaw-sandbox:local` (no dotnet) | Sandbox runs, claude writes scaffold OK, **Step F** `dotnet test` exits 127 | Declare the toolchain in the repo (`global.json` / `.mise.toml`) — the Step-D pre-step provisions it (ADR 0005). Migration bridge until the live .NET gate passes: pin `devclaw-sandbox-dotnet:local` via `.env` + `compose/docker-compose.override.yml` |
 | Docker GID drift | **Before** Step C — the very `docker run` in Step C never succeeds | Permission denied at `/var/run/docker.sock`, "sandbox exited 1 / no result line" — looks identical to Step H's "no terminal result" | `compose/.env` with `LIFEKIT_DOCKER_GID=990`; also: a fail-fast precheck in run_sandcastle that exec's `docker version` once on startup |
 
 All three were silent-timeout failures because the engine output in Step H
@@ -202,13 +210,13 @@ couldn't distinguish *"the docker run from Step C never happened"* from
    healthcheck is `curl /health`; doesn't catch the GID drift. Add a
    `docker version` to the test so a broken-but-running orchestrator flips
    unhealthy in 30s instead of being discovered by the first task.
-4. **Sandbox image selection by detected stack.** Historically we planned to
-   reuse a `_detect_stack()` helper to pick the sandbox image automatically per
-   task instead of one global `DEVCLAW_SANDBOX_IMAGE` env. That helper lived in
-   `devclaw/server/tools.py` as part of the removed `setup_cicd` scaffolder and
-   was deleted along with it (its 5-stack template list was silently wrong for
-   fullstack repos). Any future revival needs to be per-task stack judgment by
-   an engineer task, not a hardcoded dict — same reason as the C5 shift.
+4. **Sandbox image selection by detected stack.** SUPERSEDED by
+   [ADR 0005](../decisions/0005-generic-sandbox-toolchain.md): there is no
+   per-stack image to select — one lean image, and the toolchain is a
+   project-declared fact provisioned by mise in the runner pre-step (Step D).
+   (Historically we planned to reuse a `_detect_stack()` helper to pick the
+   image per task; it was deleted with the `setup_cicd` scaffolder — its
+   5-stack template list was silently wrong for fullstack repos.)
 5. **AGENTS.md posture block for sandbox.** Generated `AGENTS.md` should
    prepend "you're in a docker-less sandbox; ignore stack-bring-up
    instructions from `CLAUDE.md`; use the unit-only verify path." Today

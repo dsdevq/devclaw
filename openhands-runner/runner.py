@@ -29,6 +29,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 
@@ -694,6 +695,191 @@ def _resolve_acp_command(req: dict) -> list[str]:
     return shlex.split(raw)
 
 
+# --- toolchain provisioning (ADR 0005) --------------------------------------
+# The sandbox image ships NO language SDKs beyond python+node; the project's
+# DECLARED toolchain is provisioned here, before the agent starts, and its
+# environment exported into this process so the agent's shells AND the verify
+# gate inherit it. Fail-closed: a declared toolchain that can't be provisioned
+# settles the task `error` with a legible reason — silently running a .NET
+# goal on a python+node box is exactly the silent degradation the hardening
+# philosophy forbids.
+
+# Wall-clock cap for `mise install`: the first task per toolchain version
+# downloads whole SDKs (minutes); later tasks hit the per-project cache volume
+# and finish in seconds.
+_TOOLCHAIN_INSTALL_TIMEOUT_S = 900
+#: mise-native declaration files — mise reads these directly, no translation.
+_MISE_NATIVE_FILES = (".mise.toml", "mise.toml", ".tool-versions")
+
+
+class ToolchainError(Exception):
+    """A declared toolchain that cannot be provisioned. The message is the
+    owner-actionable reason that rides the error result."""
+
+
+def _translate_global_json(workspace_dir: str) -> dict:
+    """``global.json`` ``sdk.version`` → ``{"dotnet": "<major.minor>"}``.
+
+    Fuzzy major.minor, not the exact patch: global.json almost always rides
+    rollForward semantics where any 9.0.x SDK satisfies "9.0.203", and exact
+    patch pins frequently don't exist as installable versions. Present-but-
+    unparseable raises (fail closed with the better message — dotnet itself
+    would refuse the file later anyway); a global.json that pins no
+    sdk.version declares nothing.
+    """
+    path = os.path.join(workspace_dir, "global.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ToolchainError(f"global.json is unreadable/invalid: {exc}")
+    version = str((data.get("sdk") or {}).get("version") or "")
+    m = re.match(r"(\d+)\.(\d+)", version)
+    if not m:
+        return {}
+    return {"dotnet": f"{m.group(1)}.{m.group(2)}"}
+
+
+def _translate_package_json(workspace_dir: str) -> dict:
+    """``package.json`` ``engines.node`` → ``{"node": "<version prefix>"}`` —
+    the first numeric component of the range (``^20.11`` → ``20.11``,
+    ``>=20`` → ``20``, i.e. the minimum the project supports)."""
+    path = os.path.join(workspace_dir, "package.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ToolchainError(f"package.json is unreadable/invalid: {exc}")
+    engines = data.get("engines")
+    spec = str(engines.get("node") or "") if isinstance(engines, dict) else ""
+    m = re.search(r"(\d+(?:\.\d+)?)", spec)
+    if not m:
+        return {}
+    return {"node": m.group(1)}
+
+
+def _detect_toolchain(workspace_dir: str) -> tuple:
+    """``(native, tools)`` for the workspace's declared toolchain.
+
+    ``native=True`` → a mise-native file is present; mise reads it as-is and
+    ``tools`` stays empty. Otherwise ``tools`` maps tool→version translated
+    from idiomatic declarations. ``(False, {})`` → nothing declared:
+    provisioning is a zero-cost no-op (the base python+node image behavior).
+    """
+    for name in _MISE_NATIVE_FILES:
+        if os.path.exists(os.path.join(workspace_dir, name)):
+            return True, {}
+    tools: dict = {}
+    tools.update(_translate_global_json(workspace_dir))
+    tools.update(_translate_package_json(workspace_dir))
+    return False, tools
+
+
+def _write_translated_mise_config(tools: dict) -> str:
+    """Record TRANSLATED tools in a mise config OUTSIDE the workspace and
+    OUTSIDE the user's real global config.
+
+    Not in /workspace: a generated file there would dirty the diff the review
+    gate and delivery see. Not ~/.config/mise/config.toml: a host-engine run
+    must never clobber the developer's own mise setup. MISE_GLOBAL_CONFIG_FILE
+    points mise at the tempfile; set in ``os.environ`` so every later mise
+    call — and the agent's own shells — resolve the same declaration."""
+    fd, path = tempfile.mkstemp(prefix="devclaw-mise-", suffix=".toml")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("[tools]\n")
+        for name in sorted(tools):
+            fh.write(f'{name} = "{tools[name]}"\n')
+    os.environ["MISE_GLOBAL_CONFIG_FILE"] = path
+    return path
+
+
+def _mise_run(args: list, workspace_dir: str, timeout: float) -> "subprocess.CompletedProcess":
+    """One bounded mise invocation, cwd=workspace so mise sees the project's
+    own config files. MISE_TRUSTED_CONFIG_PATHS covers the workspace (mise
+    refuses untrusted config in non-interactive runs otherwise); MISE_YES
+    kills any residual prompt."""
+    env = dict(os.environ)
+    env.setdefault("MISE_TRUSTED_CONFIG_PATHS", workspace_dir)
+    env["MISE_YES"] = "1"
+    return subprocess.run(
+        ["mise", *args],
+        cwd=workspace_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _provision_toolchain(workspace_dir: str) -> dict | None:
+    """Detect and provision the project-declared toolchain.
+
+    Returns a summary dict for the observability event (tool list + duration —
+    the data that decides whether cold-start ever needs optimizing), or None
+    when nothing is declared and nothing was done. Raises :class:`ToolchainError`
+    on ANY failure — the caller settles the task error, never a silent skip.
+    """
+    native, tools = _detect_toolchain(workspace_dir)
+    if not native and not tools:
+        return None
+    if shutil.which("mise") is None:
+        # A declared toolchain with no mise on PATH is a stale sandbox image
+        # or an unprepared host-engine run — the deploy-skew class
+        # (lifekit-stack#93). Loud, never a silent python+node fallback.
+        raise ToolchainError(
+            "project declares a toolchain but `mise` is not on PATH "
+            "(stale sandbox image, or DEVCLAW_ENGINE=host without mise "
+            "installed on the host)"
+        )
+    if tools:
+        _write_translated_mise_config(tools)
+    started = time.time()
+    try:
+        install = _mise_run(["install"], workspace_dir, _TOOLCHAIN_INSTALL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ToolchainError(
+            f"`mise install` exceeded {_TOOLCHAIN_INSTALL_TIMEOUT_S}s"
+        )
+    if install.returncode != 0:
+        tail = (install.stderr or install.stdout or "").strip()[-2000:]
+        raise ToolchainError(f"`mise install` failed (exit {install.returncode}): {tail}")
+    # Export the provisioned environment (PATH shims, DOTNET_ROOT, …) into
+    # THIS process so the agent's shells and the verify gate inherit the same
+    # toolchain — "`dotnet test` must find the mise-installed SDK" is handled
+    # here structurally, not per-stack.
+    try:
+        envp = _mise_run(["env", "--json"], workspace_dir, 60)
+    except subprocess.TimeoutExpired:
+        raise ToolchainError("`mise env --json` timed out")
+    if envp.returncode != 0:
+        tail = (envp.stderr or envp.stdout or "").strip()[-2000:]
+        raise ToolchainError(f"`mise env --json` failed (exit {envp.returncode}): {tail}")
+    try:
+        env_map = json.loads(envp.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise ToolchainError(f"`mise env --json` returned non-JSON: {exc}")
+    if not isinstance(env_map, dict):
+        raise ToolchainError("`mise env --json` returned a non-object")
+    for key, value in env_map.items():
+        # mise honors [env] tables in the (trusted) workspace's own config, so
+        # this map is workspace-controlled — re-apply the OAuth-only denylist:
+        # a project's .mise.toml must not reintroduce a metered API key AFTER
+        # _refuse_api_key() already passed.
+        if key in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            continue
+        if isinstance(value, str):
+            os.environ[key] = value
+    return {
+        "native": native,
+        "tools": tools,
+        "seconds": round(time.time() - started, 1),
+    }
+
+
 def _refuse_api_key() -> None:
     """Refuse to run if an API key snuck into the env — preserves the
     Pro-subscription cost model (memory: pro-subscription-is-the-design)."""
@@ -770,6 +956,39 @@ def main() -> None:
     wrapped_goal = _wrap_goal(kind, goal, workspace_dir=workspace_dir)
 
     os.makedirs(workspace_dir, exist_ok=True)
+
+    # Provision the project-declared toolchain (ADR 0005) BEFORE the agent
+    # starts, so its shells and the verify gate inherit it. Fail CLOSED with a
+    # legible reason — a declared-but-unprovisionable toolchain must never
+    # silently degrade to the base python+node image.
+    try:
+        provisioned = _provision_toolchain(workspace_dir)
+    except ToolchainError as exc:
+        _emit_result({"status": "error", "error": f"toolchain_provision_failed: {exc}"})
+        sys.exit(2)
+    except Exception as exc:  # unexpected — still fail closed, still legible
+        _emit_result(
+            {
+                "status": "error",
+                "error": (
+                    f"toolchain_provision_failed: unexpected "
+                    f"{exc.__class__.__name__}: {exc}"
+                ),
+            }
+        )
+        sys.exit(2)
+    if provisioned is not None:
+        # Observability: tool list + duration — the measurement that decides
+        # whether cold-start ever warrants baked-image optimization.
+        _emit_event(
+            {
+                "id": None,
+                "type": "ToolchainProvision",
+                "source": "runner",
+                "ts": time.time(),
+                "payload": provisioned,
+            }
+        )
 
     # Drop the sandbox-only MCP config into the workspace so claude auto-
     # discovers it at project scope. The image bakes /opt/devclaw/sandbox-mcp.json
