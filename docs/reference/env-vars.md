@@ -87,7 +87,7 @@ session quota, not a bill.**
 
 | Var | Default | Purpose |
 |---|---|---|
-| `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | Per-task sandbox image (built from `.sandcastle/Dockerfile`). |
+| `DEVCLAW_SANDBOX_IMAGE` | `devclaw-sandbox:latest` | Per-task sandbox image (built from `.sandcastle/Dockerfile`). A project can pin its own via the registry's per-project `sandbox_image` override (ADR 0005 escape hatch/migration bridge), which beats this default for that project's tasks. |
 | `DEVCLAW_DOCKER_BIN` | `docker` | docker binary to spawn. |
 | `DEVCLAW_SANDBOX_MEMORY` | `2g` | Hard per-container memory ceiling. `--memory-swap == --memory` disables swap growth. |
 | `DEVCLAW_SANDBOX_CPUS` | `2.0` | Per-container CPU limit. |

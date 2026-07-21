@@ -1184,6 +1184,7 @@ class TaskQueue(_NotifyMixin):
                 goal=attempt_goal,
                 on_event=on_event,
                 verify_cmd=verify_cmd,
+                sandbox_image=self._sandbox_image(workspace_dir),
             )
             try:
                 # Wall-clock guard: on timeout, wait_for cancels the runner coroutine,
@@ -1404,6 +1405,17 @@ class TaskQueue(_NotifyMixin):
         return self._registry.resolve_override(
             workspace_dir, "review_gate", REVIEW_GATE_ENABLED
         )
+
+    def _sandbox_image(self, workspace_dir: str):
+        """Per-task sandbox image (ADR 0005): the owning project's
+        ``sandbox_image`` override if set, else None — the engine then applies
+        its own DEVCLAW_SANDBOX_IMAGE default (the queue deliberately does not
+        know the engine's default; docker-less engines ignore the field). The
+        escape hatch + migration bridge for stacks the mise path doesn't cover
+        yet. No registry wired → None."""
+        if self._registry is None:
+            return None
+        return self._registry.resolve_override(workspace_dir, "sandbox_image", None)
 
     def _browser_gate_mode(self, workspace_dir: str) -> str:
         """Browser-gate stance (``flexible``|``strict``) for a task in

@@ -82,6 +82,7 @@ def _build_docker_args(
     claude_dir: str,
     prompt: str,
     verify_cmd: str | None,
+    sandbox_image: str | None = None,
 ) -> list[str]:
     """``docker run`` argv for one claude-sdk task. The container's command is a
     shell pipeline that runs ``claude --print``, then (if requested) the verify
@@ -125,7 +126,7 @@ def _build_docker_args(
         "--tmpfs", f"{CONTAINER_CLAUDE_DIR}/session-env:rw,exec",
         "--tmpfs", f"{CONTAINER_CLAUDE_DIR}/shell-snapshots:rw,exec",
         # Refuse API-key drift — same belt + suspenders as the OpenHands path.
-        SANDBOX_IMAGE,
+        sandbox_image or SANDBOX_IMAGE,
         "bash", "-lc", inner,
     ]
 
@@ -197,6 +198,7 @@ async def run_claude_sdk(req: EngineRequest) -> EngineResult:
         claude_dir=claude_dir,
         prompt=_prompt(req),
         verify_cmd=req.verify_cmd,
+        sandbox_image=req.sandbox_image,
     )
 
     try:
