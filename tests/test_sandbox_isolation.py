@@ -11,6 +11,7 @@ no docker).
 
 import pytest
 
+from devclaw.engine import EngineRequest
 from devclaw.engine import sandcastle as sc
 
 
@@ -247,3 +248,47 @@ def test_build_docker_args_threads_the_trusted_copy():
         f"/tmp/devclaw-claude-XYZ.json:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro"
         in args
     )
+
+
+async def test_run_sandcastle_binds_trusted_copy_and_unlinks_it(no_prefix, tmp_path, monkeypatch):
+    """The integration wiring the pure mount tests can't see: run_sandcastle
+    computes the pre-trusted .claude.json copy, binds it into the container as
+    the .claude.json source, and deletes it in its outer `finally` once the
+    container has exited. A dropped `claude_json_src=` kwarg or a missing unlink
+    would keep the whole suite green — this pins the full path."""
+    (tmp_path / "f").write_text("x")  # a populated, existing workspace passes validation
+    fake_copy = tmp_path / "devclaw-claude-fake.json"
+    fake_copy.write_text("{}")
+
+    seen: dict = {}
+
+    def fake_write_trusted_copy(src, workspace_path):
+        seen["copy_args"] = (src, workspace_path)
+        return str(fake_copy)
+
+    monkeypatch.setattr(sc, "write_trusted_copy", fake_write_trusted_copy)
+
+    class _FakeProc:
+        returncode = 0  # non-None → teardown is correctly skipped on clean exit
+
+    async def fake_exec(_bin, *args, **kwargs):
+        seen["docker_args"] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(sc.asyncio, "create_subprocess_exec", fake_exec)
+
+    async def fake_consume(proc, on_event, label):
+        return {"status": "ok"}
+
+    monkeypatch.setattr(sc, "consume_runner_output", fake_consume)
+
+    req = EngineRequest(kind="implement_feature", workspace_dir=str(tmp_path), goal="g")
+    result = await sc.run_sandcastle(req)
+
+    assert result == {"status": "ok"}
+    # It asked write_trusted_copy to trust the CONTAINER workspace path...
+    assert seen["copy_args"][1] == sc.CONTAINER_WORKSPACE
+    # ...bound that copy into the container as the .claude.json source...
+    assert f"{fake_copy}:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro" in seen["docker_args"]
+    # ...and cleaned up the temp copy once the container exited.
+    assert not fake_copy.exists()

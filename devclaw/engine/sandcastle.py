@@ -113,7 +113,9 @@ CONTAINER_MISE_DATA = "/home/agent/.local/share/mise"
 # loop hangs after init without `.claude.json` (it needs the account identity to
 # act, not just the token — auth != agency; this was a live-found regression when
 # the default was credential-only). `.claude.json` here carries identity + caches,
-# NOT the leak (no mcpServers, projects empty). We still deliberately do NOT mount
+# NOT the leak (no mcpServers; the only `projects` entry is the one benign
+# `/workspace` trust flag we inject via claude_trust.write_trusted_copy — no
+# host history). We still deliberately do NOT mount
 # the whole host ~/.claude: that dir also holds skills/, plugins/ (+ their MCP
 # servers that need absent network/auth), the global CLAUDE.md (which points at the
 # unmounted ~/memory, so its instructions are dead in here), and projects/ +
