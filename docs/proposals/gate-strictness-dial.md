@@ -1,12 +1,11 @@
 # Proposal — Gate strictness dial: advisory-by-default gates with a per-goal opt-in to fail closed
 
-- **Status:** **LOCKED (direction)** — 2026-07-22. Direction agreed in
-  conversation; the mandatory clarify step (`.claude/rules/spec-lifecycle.md`)
-  ran the same day — all five `[OPEN]` items resolved by Denys, resolutions in
-  place in §5. **LOCKED is direction, not schedule** — sequencing stays Denys's
-  call; a locked line is reopenable (edit the doc, don't silently diverge).
-  **No code before a tranche is scheduled + this graduates to an ADR.**
-- **Date opened:** 2026-07-22 · **Locked:** 2026-07-22
+- **Status:** **GRADUATED → [ADR 0007](../decisions/0007-gate-strictness-dial.md)**
+  — 2026-07-22, the same day the draft landed: drafted, clarified (all five
+  `[OPEN]` items resolved by Denys, §5), locked, tranche scheduled, graduated.
+  The ADR is canonical from here on; this doc keeps the full narrative + the
+  clarify-step trail + the implementation-shape rationale (§9).
+- **Date opened:** 2026-07-22 · **Locked:** 2026-07-22 · **Graduated:** 2026-07-22
 - **Authors:** Denys + Claude (conversation of 2026-07-22)
 - **Supersedes / relates:** subsumes the per-project `DEVCLAW_GOAL_BROWSER_GATE_MODE`
   (`flexible|strict`) into a general per-goal dial (§4); names a **deferred
@@ -215,3 +214,21 @@ record + surface (O4/O5), env-var subsumption (O3). Named regression tests per
 `.claude/rules/testing.md`; `invariant-guard` run on the diff before PR (this
 proposal touches the loud-failure invariant, so the guard pass is mandatory, not
 optional). Sequencing stays Denys's call per the spec lifecycle.
+
+**Implementation shape [CONFIRMED 2026-07-22] — data + one pure policy function,
+NOT mode-objects.** The strict/trust dial is *data*: a `Strictness` enum
+(`TRUST | STRICT`) on the goal (per-project default). The consequence is decided
+by ONE pure function at the settle/gate choke point —
+`(gate_id, verdict, strictness) → block | advise_and_ship` — with the
+dial-able-vs-always-hard split (O2) encoded as a data set of always-hard gate
+ids inside it, readable at a glance. This matches devclaw's existing idiom (the
+gates are already *pure verdict functions*, `quality/browser_gate.py`: "Pure
+module — no subprocess, no I/O") and keeps the whole policy in one screen for the
+`invariant-guard` pass. **Deliberately NOT the Strategy pattern**: strict vs.
+trust is a one-branch consequence difference; a class-per-mode is ceremony, and
+`balanced` was dropped (O3) so there is no third variant to justify polymorphism.
+The Strategy-shaped seam is reserved for the *other* knob — the deferred
+judge-gate (§6), where "form a verdict by rigid rule" vs. "form it by model
+cognition" are genuinely divergent, swappable implementations (`RuleGate` vs.
+`JudgeGate` behind one verdict interface). Consequence knob = value; mechanism
+knob = strategy.
