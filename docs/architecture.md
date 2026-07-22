@@ -113,6 +113,16 @@ When the tick decides to *do* something (not just think):
    build/test gate already requires; evidence from a browser run that actually
    executed still counts in full. This closes the "green unit tests + static
    review, broken in the running app" hole without wedging library slices.
+   **The gate strictness dial (ADR 0007)** recalibrates *which* gates fail
+   closed: the two review-shaped gates — the browser-E2E gate and the pre-PR
+   adversarial review gate — are **dial-able**. Under a goal's `strict`
+   strictness they fail closed as above; under `trust` (the default) a finding
+   that survives every retry (including a browser suite that *ran and failed*)
+   **advises-and-ships** — recorded loud in the log + problems catalog and
+   surfaced in the PR body, with the human merge as the backstop — rather than
+   wedging. The verify gate, test-integrity gate, and the done-gate stay
+   **always-hard** in both modes, and every *unreviewable* case (a gate crash,
+   quota, worker-block) still fails closed regardless of the dial (#186 holds).
 6. **Deliver, then settle** — for `deliver=True` tasks the change becomes a
    branch/PR *before* `done` is observable, so a poller never reads "done
    without a PR". A delivery that can't push/PR settles `failed`, never a silent
@@ -397,7 +407,13 @@ call.
    with the heartbeat; the CAS is what makes that safe. Views are written
    atomically (tmp-file + `os.replace`) after each transaction commits. There
    is **no** `update_goal`/field-patch surface: a wrong contract is
-   cancel + recreate.
+   cancel + recreate. The **one** blessed exception (ADR 0007) is
+   `set_goal_strictness` — a narrow single-field verb that flips only the gate
+   strictness *dial* (`GoalStore.set_strictness`, atomic goal.yaml rewrite, also
+   reachable via MCP/HTTP/console). It is allowed because strictness changes the
+   *consequence of a gate verdict*, not the objective/done_when/backlog — it is a
+   mode toggle, not a contract patch; it does not go through `transition()`
+   (strictness is a goal.yaml fact, not a phase field).
 2. **Tasks are append-only events.** `StateStore`'s `events` table is an
    append-only log; state views are projections. (Goal-state tables:
    `goal_status`/`goal_docs` are mutable single-row-per-key, CAS'd or upserted;

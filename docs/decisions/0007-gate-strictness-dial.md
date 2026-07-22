@@ -70,7 +70,15 @@ whose output is depended on.**
    before-review), and the **done-gate** grounded `achieved` evaluation — these
    guard against the model gaming its own evidence or closing a goal on its own
    say-so, which the human merge does NOT reliably catch. The dial only ever
-   loosens the two review-shaped gates.
+   loosens the two review-shaped gates. **`ran_failed` is dial-able too**
+   (Denys, 2026-07-22): under `trust` a browser suite that actually *ran and
+   failed* — a proven-broken UI — advises-and-ships like any other browser
+   finding, rather than always-blocking like the verify gate. This deliberately
+   overrides the reachability judge's "`ran_failed` is hard evidence, never
+   overridable" stance: the strictness dial sits *above* that escape valve. The
+   trade is chosen for the CV/clean-nights scoreboard — a flagged-broken UI in
+   an open PR the human hasn't merged costs less than a wedged goal — and is
+   reopenable if a `strict`-worthy UI project wants proven-failure to block.
 4. **Advisory verdicts still count and still surface.** A non-blocking verdict is
    still written to the log + `problems` catalog + `eval_outcomes`. It is **not**
    a clean-night/cycle wedge (it shipped) but **is** listed in the cycle report
