@@ -45,6 +45,19 @@ EvalVerdict = Literal["on_track", "off_track", "achieved", "stalled", "needs_hum
 #: still a proposal gated on the grounded done-gate review in both modes).
 GoalMode = Literal["long_lived", "one_shot"]
 
+#: the gate strictness dial (ADR 0007). ``strict`` = a dial-able gate that fails
+#: BLOCKS the goal (today's fail-closed behavior). ``trust`` = a dial-able gate
+#: that fails is recorded loud (log + problems catalog + eval_outcomes) and
+#: surfaced in the PR body, but the change SHIPS rather than wedging — the human
+#: merge on open-PR-only delivery is the strict backstop. Only the two
+#: review-shaped gates (browser-E2E, adversarial review) obey the dial; the
+#: evidence-integrity gates (test-integrity, delivery-trust, done-gate) stay hard
+#: in BOTH modes (they guard against the model gaming its own evidence, which the
+#: human merge can't catch). Defaulted to ``trust`` so every existing goal.yaml
+#: (which predates the field) loads advisory — the scoreboard is clean-nights,
+#: not reliability, so a wedge costs more than a visibly-flagged imperfect diff.
+Strictness = Literal["trust", "strict"]
+
 
 @dataclass(frozen=True)
 class Goal:
@@ -77,6 +90,9 @@ class Goal:
     #: the execution dial (see :data:`GoalMode`). Defaulted so every existing
     #: goal.yaml (which predates the field) loads as today's per-tick loop.
     mode: GoalMode = "long_lived"
+    #: the gate strictness dial (see :data:`Strictness`, ADR 0007). Defaulted to
+    #: "trust" so existing goal.yaml (predates the field) loads advisory.
+    strictness: Strictness = "trust"
 
 
 #: case-insensitive markers by which a ``done_when`` disclaims boundedness —

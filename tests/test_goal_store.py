@@ -56,6 +56,28 @@ def test_create_goal_rejects_unparseable_cadence_at_creation(tmp_path):
     assert not store.exists("badcad")
 
 
+def test_create_goal_persists_and_defaults_strictness(tmp_path):
+    # ADR 0007: strictness round-trips through goal.yaml; default is "trust".
+    store = GoalStore(tmp_path)
+    store.create_goal("g_strict", objective="x", workspace_dir="/ws", strictness="strict")
+    assert store.load_goal("g_strict").strictness == "strict"
+    store.create_goal("g_default", objective="x", workspace_dir="/ws")
+    assert store.load_goal("g_default").strictness == "trust"
+
+
+def test_load_goal_defaults_strictness_to_trust_when_absent(tmp_path):
+    # A legacy goal.yaml written before the field must load advisory ("trust"),
+    # never wedge — mirrors the mode/stub_acceptable legacy-load contract.
+    import yaml
+
+    d = tmp_path / "legacy-strict"
+    d.mkdir()
+    (d / "goal.yaml").write_text(
+        yaml.safe_dump({"objective": "x", "workspace_dir": "/ws", "cadence": "1d"})
+    )
+    assert GoalStore(tmp_path).load_goal("legacy-strict").strictness == "trust"
+
+
 def test_create_goal_persists_stub_acceptable(tmp_path):
     # The owner's explicit opt-in for which tools may ship as stubs must
     # survive a round-trip through yaml — the done-gate reads it on every

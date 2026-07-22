@@ -288,6 +288,7 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
         backlog: list[str] | None = None,
         stub_acceptable: list[str] | None = None,
         mode: str = "long_lived",
+        strictness: str = "trust",
     ) -> Goal:
         """Write a new goal.yaml. Raises FileExistsError if the id is taken."""
         if self.exists(goal_id):
@@ -321,6 +322,7 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
                     "backlog": list(backlog or []),
                     "stub_acceptable": list(stub_acceptable or []),
                     "mode": mode,
+                    "strictness": strictness,
                 },
                 sort_keys=False,
             )
@@ -347,6 +349,9 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
             # Anything unrecognized (or a legacy file with no field) reads as
             # long_lived — the conservative default: the per-tick loop.
             mode=("one_shot" if raw.get("mode") == "one_shot" else "long_lived"),
+            # Legacy / unrecognized reads as "trust" (advisory) — the default
+            # dial: dial-able gates log-and-ship rather than wedge (ADR 0007).
+            strictness=("strict" if raw.get("strictness") == "strict" else "trust"),
         )
 
     # ---- helpers -----------------------------------------------------------
