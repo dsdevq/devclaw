@@ -1,8 +1,11 @@
 # Proposal — devclaw files (and later fixes) its own issues from the `problems` catalog
 
-- **Status:** **DRAFT** — 2026-07-22, Denys's idea right after the ops-agent cut.
-  Direction NOT locked; the `[OPEN]` clarify step (§5) is mandatory before LOCKED.
-- **Date opened:** 2026-07-22 · **Authors:** Denys + Claude
+- **Status:** **LOCKED (direction)** — locked 2026-07-22 after the §5 clarify step
+  (all eight `[OPEN]` items resolved with Denys). Direction is fixed; **schedule is
+  not** — a tranche is Denys's call. Reopenable: edit this doc and say so, don't
+  silently diverge. First build = **Stage 1 only** (file); Stage 2 (self-fix) stays
+  deferred.
+- **Date opened:** 2026-07-22 · **Locked:** 2026-07-22 · **Authors:** Denys + Claude
 - **Relates to:** [ADR 0006](../decisions/0006-continuous-eval-projection.md)
   (the cycle report + `problems`/`eval_outcomes` this reads from) and the ABANDONED
   `ops-agent-problems-consolidation.md` — this is the **dev-loop** half of that
@@ -34,16 +37,27 @@ This is almost entirely **wiring existing parts**, not new invention:
 **Stage 1 — file (safe, high-value, do first).** At run-cycle close (the same
 mechanical, zero-LLM edge that assembles the cycle report), for each problem that
 has **recurred past a threshold**, open/update a GitHub issue on the devclaw repo:
-- **body** carries the grounded context — failure class, count, first/last seen,
-  the representative trace, the goals/tasks it hit;
-- **labels** map from `failure_class` / problem category (`reasoning`, `gate`,
-  `engine`, `timeout`, `delivery`, …);
-- **idempotent** — one issue per problem fingerprint; recurrence updates the
-  existing issue (count/comment), never spawns duplicates; a closed-then-recurring
-  problem may reopen.
+- **body** carries the grounded context — `problems.category`/`kind`, `count`,
+  `terminal_count`, first/last seen, the `sample_message`, and the `last_goal_id`/
+  `last_task_id` pointers it hit (the `problems` row has no `trace_id` FK — those
+  pointers are the grounding it does carry);
+- **labels** map from `problems.category` (the Stage-1 source of record — see O3):
+  a fixed marker `devclaw:self-filed` + `class:<category>` (`class:gate`,
+  `class:cognition`, …);
+- **idempotent** — one issue per problem `fingerprint` (already the row PK);
+  recurrence while the issue is open → a **comment** (bump count/last-seen), never a
+  duplicate; a closed issue that recurs in a *new* cycle → **reopen** with a comment.
 Denys triages. This is the whole of stage 1: a mechanical `problems → gh issue`
 bridge with recurrence gating and a label map. Strong portfolio artifact — *the
 system files its own bugs, deduplicated, tagged, reproducible.*
+
+**One honest caveat on "wiring."** Recurrence-by-cycle (O1) is *not* pure wiring:
+the `problems` row tracks raw `count` + first/last-seen only — occurrences collapse
+into one row, so "seen across ≥ M distinct cycles" has **no backing column today**.
+Stage 1 therefore adds one small piece of persistence: a `problem_cycles(fingerprint,
+cycle_key)` table (`INSERT OR IGNORE` at cycle close for each problem last-seen inside
+the window) plus a nullable `issue_number`/`issue_state` column on `problems` (ALTER
+migration, same shape as `sandbox_image`). Everything else is wiring.
 
 **Stage 2 — fix (gated, later).** Devclaw can pick up one of its own issues as a
 durable goal → fix → the review / eval / browser gates run on the change. But
@@ -59,9 +73,14 @@ judges it: a bad self-fix could break the very gate meant to catch it. So:
 
 This is "done is a proposal" (already an invariant) extended to self-modification.
 On *other* repos (finance-sentry, closeloop, …) the full auto-loop stays as-is —
-only the self-referential case needs the brake. Devclaw must reliably recognize
-"this is my own repo" (workspace path / repo identity), and the auto-merge path
-(`delivery/merge.py`) must refuse when target == self.
+only the self-referential case needs the brake. Self-recognition is by **repo slug**
+(`dsdevq/devclaw`, constant `DEVCLAW_SELF_REPO`, env-overridable) compared via the
+existing `goal/remote_checks.py:parse_owner_repo(project.repo_url)` — the slug
+survives worktrees/clones/mount differences better than a workspace path. The refusal
+seam lives in **`goal/merge.py`** (`resolve_automerge`), which returns a hard,
+un-overridable `False` when target == self, beating any per-project `automerge=True`.
+(The auto-merge path is `goal/merge.py`, *not* `delivery/merge.py` — corrected from
+the DRAFT; `delivery/` only creates repos + PRs.)
 
 ## 4. Why this is the right home for recurrence (rescuing O4)
 
@@ -71,33 +90,58 @@ exactly the right **issue-creation trigger** here. A one-off `timeout` is noise;
 same reasoning failure three cycles running is a real, file-worthy issue. So this
 proposal absorbs O4 into the dev-loop where it belongs, instead of discarding it.
 
-## 5. `[OPEN]` — clarify step (mandatory before LOCKED)
+## 5. Clarify step — RESOLVED (locked 2026-07-22)
 
-- **[OPEN] O1 — Recurrence threshold.** What triggers an issue: seen ≥ N times,
-  or across ≥ M distinct cycles, or both? Default lean: ≥ M cycles (a problem that
-  survives cycles, not just a burst). Values TBD with a little live data.
-- **[OPEN] O2 — Idempotency + lifecycle.** One issue per problem fingerprint.
-  On recurrence: comment + bump a count label? On a closed issue that recurs:
-  reopen, or file fresh with a back-link? Who closes — human only, or does devclaw
-  close when the class goes quiet for K cycles?
-- **[OPEN] O3 — Label taxonomy.** Fixed map from `failure_class` / problem category
-  → GitHub labels. Who owns the label set (created on first use vs pre-seeded)?
-- **[OPEN] O4 — Noise budget.** Cap issues opened per cycle (e.g. ≤3), and
-  `log()` what was suppressed so silent truncation never reads as "all clear."
-- **[OPEN] O5 — Stage-2 trigger (human-in-the-loop for *starting* a self-fix).**
-  Does devclaw auto-open a fix-goal for its own issue, or only once Denys labels it
-  `accepted` / assigns it? Default lean: **human opt-in** — devclaw never starts
-  modifying itself unprompted; filing is automatic, fixing is invited.
-- **[OPEN] O6 — Self-repo recognition + auto-merge refusal.** How does devclaw
-  know a target repo is *itself*? Where does the "no auto-merge to self" check live
-  (`delivery/merge.py`? a project-registry flag?)? This is the safety seam — it
-  must be explicit and tested.
-- **[OPEN] O7 — Where issues live + who reads them.** devclaw repo Issues, a
-  project board, or also surfaced in the console? Should the cycle-report push
-  link the issues it filed ("filed #123, #124")?
-- **[OPEN] O8 — Egress / auth.** Issue creation is a `gh`/GitHub-API call from the
-  service (not the sandbox). Confirm the token scope + that this stays OAuth-clean
-  (no `ANTHROPIC_*` involved; this is a GitHub credential, separate concern).
+All eight items answered with Denys. Values below are the locked direction;
+threshold numbers are config constants tunable from live data, not code changes.
+
+- **O1 — Recurrence threshold. → RESOLVED.** File when a problem has appeared in
+  **≥ 3 distinct cycles** (matching the rescued O4 `TREND_REPEAT_THRESHOLD=3`)
+  **and** `terminal_count > 0` (it caused at least one *terminal* failure, not only
+  self-healed `mechanical:*` blocks). Distinct-cycle counting is backed by the new
+  `problem_cycles` table (§2 caveat); a self-healing block that never sticks
+  (`terminal_count == 0`) never qualifies. `3` is a constant, tunable later.
+- **O2 — Idempotency + lifecycle. → RESOLVED.** One issue per `fingerprint`;
+  persist `issue_number` + `issue_state` as a nullable `problems` column. Recurrence
+  while open → **comment** (bump count/last-seen), not a new issue. A closed issue
+  that recurs in a *new* cycle → **reopen with a comment**, never a duplicate.
+  **Closing is human-only in Stage 1** — devclaw does not auto-close. (Auto-close-
+  when-quiet-for-K-cycles is deferred; owner: Denys.)
+- **O3 — Label taxonomy. → RESOLVED.** Map from `problems.category` (the Stage-1
+  source; the distinct `eval_outcomes.failure_class` taxonomy is not used here).
+  Every filed issue gets a fixed marker `devclaw:self-filed` + `class:<category>`
+  (8-category vocab: `block`/`task_fail`/`gate`/`delivery`/`limit`/`cognition`/
+  `subprocess`/`other`). Labels are **created-on-first-use** (idempotent ensure-
+  exists before `gh issue create`), owned by a fixed map in code — no manual
+  pre-seed.
+- **O4 — Noise budget. → RESOLVED.** **≤ 3 new issues filed per cycle**, ranked by
+  (distinct-cycles desc, then `terminal_count` desc). Suppressed over-threshold
+  problems are named in the cycle-report line ("N more over threshold, not filed")
+  so silent truncation never reads as "all clear." Comments/reopens on *existing*
+  issues don't count against the cap (they aren't new noise).
+- **O5 — Stage-2 trigger (starting a self-fix). → RESOLVED: human opt-in.** Devclaw
+  never auto-opens a fix-goal on its own issue. A self-fix goal is created only once
+  Denys labels the issue `accepted` (or assigns it). Filing is automatic; fixing is
+  invited. Locked as direction — the mechanism is Stage 2 (deferred).
+- **O6 — Self-repo recognition + auto-merge refusal. → RESOLVED.** Recognize self by
+  **repo slug** `dsdevq/devclaw` (constant `DEVCLAW_SELF_REPO`, env-overridable) via
+  `parse_owner_repo(project.repo_url)`. The refusal seam is in **`goal/merge.py`**
+  (corrected from DRAFT's `delivery/merge.py`): `resolve_automerge` returns a hard,
+  un-overridable `False` when target == self, beating any per-project
+  `automerge=True`. Ships with a named regression test asserting auto-merge refuses
+  on self even with `automerge=True`.
+- **O7 — Where issues live + who reads them. → RESOLVED.** devclaw repo Issues
+  (`dsdevq/devclaw`), labeled as O3. The **cycle-report push links what it filed**
+  ("filed/updated: #123, #124"), appended in `cycle_report.render_summary` — rides
+  the existing digest, zero new push. Console surface **deferred** (the `problems`
+  catalog isn't in the console today — no `/problems.json` — so it's net-new and out
+  of Stage-1 scope; owner: Denys, later).
+- **O8 — Egress / auth. → RESOLVED.** Service-side `gh` call on the cycle-close edge
+  using the existing **`GITHUB_TOKEN`/`GH_TOKEN`** pillar (same credential as
+  `gh pr create`/`gh repo create`; scope `repo` → issues:write). **No `ANTHROPIC_*`
+  touched** — the OAuth-only invariant is untouched; this is an orthogonal GitHub
+  credential. Fail-loud: a `gh` failure logs + surfaces in the cycle report, never a
+  silent drop, never wedges the tick (best-effort, like the cycle-report push).
 
 ## 6. Invariants — referenced, not restated
 
