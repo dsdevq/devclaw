@@ -109,6 +109,12 @@ Computer-use is for apps we don't control; this isn't one.
    (watch + light control) or a pivot toward a daily driver? Recommendation:
    **packaging** — augment direct manipulation, don't replace the fire-and-forget
    thesis.
+8. **`[OPEN]` Screen decomposition — NOT one mega-page.** The reference mockup
+   deliberately concentrates every surface on a single scroll to *show* the whole
+   vision at once. The shipped console must split into proper screens/routes/tabs
+   (e.g. an overview vs goal-detail vs health/problems screen). Do NOT treat the
+   mockup's single-page layout as the target IA — rethink the layout at build time
+   (Denys, 2026-07-22).
 
 ## Out of scope / non-goals
 
