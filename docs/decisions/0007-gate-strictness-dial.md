@@ -52,9 +52,17 @@ whose output is depended on.**
    it **blocks** (today's fail-closed behavior). `balanced` is intentionally not
    built — it only becomes meaningful once the judge-gate exists.
 2. **The dial is a per-goal field with a per-project default** the goal inherits
-   when unset. `steer_goal` may flip it mid-flight — it changes the
-   *consequence-of-a-verdict*, not objective/done_when/backlog, so it is not the
-   field-patch the goals-are-durable rule forbids (no cancel + re-file needed).
+   when unset. It is changeable **end-to-end through a dedicated narrow verb**
+   `set_goal_strictness(goal_id, strictness)` — NOT a generic `update_goal`/patch
+   tool (goals stay durable; this is the one field O1 blessed as steerable,
+   because it changes the *consequence-of-a-verdict*, not objective/done_when/
+   backlog). The verb is exposed at every layer: `GoalStore.set_strictness`
+   (atomic goal.yaml rewrite) → `GoalService.set_strictness` → the **MCP tool**
+   `set_goal_strictness` → the **HTTP route** `POST /goals/{id}/strictness` → a
+   one-tap **console toggle** on Goal Detail. `create_goal` also accepts an
+   initial `strictness`. A change applies to FUTURE dispatches (the value is
+   snapshotted on the task/program row at dispatch); in-flight work keeps the
+   value it was dispatched with.
 3. **Only two gates are dial-able; three are always-hard.** Dial-able (obey the
    dial): the **browser-E2E gate** and the **pre-PR adversarial review gate** —
    both backstopped by the human merge. Always-hard (ignore the dial, fail
