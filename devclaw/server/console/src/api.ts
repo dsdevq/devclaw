@@ -443,6 +443,83 @@ export async function resumeGoal(id: string): Promise<{ resumed: boolean; messag
   return r.json();
 }
 
+// ---- Evals projection (ADR 0006) ------------------------------------------
+// Read-only views over the eval_outcomes projection + night_reports table.
+// Endpoints: GET /evals/outcomes.json (limit, source) and /evals/nights.json
+// (limit) — un-prefixed `.json` data-endpoint convention, same as the rest here.
+
+/** Build a URL preserving the bearer token AND appending query params, so the
+ *  Evals fetches work behind the token gate without clobbering either. */
+function withParams(path: string, params: Record<string, string | undefined>): string {
+  const p = new URLSearchParams();
+  const tok =
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("token")
+      : null;
+  if (tok) p.set("token", tok);
+  for (const [k, v] of Object.entries(params)) if (v) p.set(k, v);
+  const s = p.toString();
+  return s ? `${path}?${s}` : path;
+}
+
+/** One row of the eval_outcomes projection — a settled task (live) or an
+ *  ingested basket record (basket). Fields mirror the SQLite table 1:1. */
+export interface EvalOutcome {
+  id: number;
+  source: "live" | "basket";
+  task_id: string | null;
+  ticket: string | null;
+  goal_id: string | null;
+  program_id: string | null;
+  kind: string | null;
+  workspace_dir: string | null;
+  status: string; // done | failed | cancelled
+  verify_passed: number | null; // 1/0, null = no gate ran
+  pr_url: string | null;
+  attempts: number | null;
+  wall_ms: number | null;
+  failure_class: string | null;
+  error: string | null;
+  report_ref: string | null;
+  settled_at: number; // epoch ms
+}
+
+export async function fetchEvalOutcomes(opts?: {
+  limit?: number;
+  source?: "live" | "basket";
+}): Promise<EvalOutcome[]> {
+  const url = withParams("/evals/outcomes.json", {
+    limit: opts?.limit ? String(opts.limit) : undefined,
+    source: opts?.source,
+  });
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`evals/outcomes.json ${r.status}`);
+  return r.json();
+}
+
+/** One nightly-window report row (written by the night-report tranche). Absent
+ *  until that lands — the endpoint returns [] rather than erroring in that case. */
+export interface NightReport {
+  night_date: string; // YYYY-MM-DD of window open
+  window_start_ms: number;
+  window_end_ms: number;
+  clean: number; // 1 iff zero mechanism-wedges
+  wedges_json: string;
+  pauses_json: string;
+  summary: string;
+  sent_at: number | null;
+  created_at: number;
+}
+
+export async function fetchNightReports(limit?: number): Promise<NightReport[]> {
+  const url = withParams("/evals/nights.json", {
+    limit: limit ? String(limit) : undefined,
+  });
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`evals/nights.json ${r.status}`);
+  return r.json();
+}
+
 export async function answerGoal(
   id: string,
   answers: Record<string, string>,
