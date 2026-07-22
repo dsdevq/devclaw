@@ -10,6 +10,7 @@ import urllib.parse
 from starlette.responses import JSONResponse
 
 from .. import __version__
+from ..claude_trust import config_path_for, ensure_trusted_in_place
 from ._state import (
     AUTH_TOKEN,
     DB_PATH,
@@ -87,6 +88,14 @@ def main() -> None:
     # Crash recovery before anything serves: reset tasks left 'running' by a
     # dead process so the heartbeat resumes them. Sync — runs before the loop.
     reaped = queue.recover()
+
+    # Seed Claude workspace-trust for the cwd cognition runs `claude --print` in
+    # (this container's /app). Without it Claude Code (since ~2026-07) ignores
+    # the workspace's .claude/settings.json permissions and the planner/evaluator
+    # exit non-zero on the untrusted-workspace guard — goals can't even plan.
+    # Best-effort, idempotent, pure config (no ANTHROPIC_* — see claude_trust).
+    if ensure_trusted_in_place(config_path_for(), os.getcwd()):
+        sys.stderr.write(f"{SERVER_NAME}: seeded Claude workspace-trust for {os.getcwd()}\n")
 
     if transport == "stdio":
         sys.stderr.write(

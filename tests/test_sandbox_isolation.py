@@ -194,3 +194,56 @@ def test_strip_api_keys_removes_both_vars():
     assert "ANTHROPIC_API_KEY" not in clean
     assert "ANTHROPIC_AUTH_TOKEN" not in clean
     assert clean["PATH"] == "/bin"  # unrelated env preserved
+
+
+# ---- workspace-trust mount override (fix/claude-workspace-trust) ----
+# The in-sandbox claude dead-stopped on the untrusted-workspace guard because
+# the bound .claude.json (keyed by host paths) never trusted /workspace. The
+# fix binds a PRE-TRUSTED COPY for the .claude.json entry only; everything else
+# stays the raw read-only bind. These pin that seam.
+
+
+def test_claude_json_binds_the_trusted_copy_when_provided():
+    mounts = sc._build_claude_mounts(
+        CLAUDE_DIR,
+        (".credentials.json", ".claude.json"),
+        claude_json_src="/tmp/devclaw-claude-XYZ.json",
+    )
+    # .credentials.json still binds straight from the host dir, read-only...
+    assert (
+        f"{CLAUDE_DIR}/.credentials.json:{sc.CONTAINER_CLAUDE_DIR}/.credentials.json:ro"
+        in mounts
+    )
+    # ...but .claude.json binds the trusted copy at the SAME container target.
+    assert (
+        f"/tmp/devclaw-claude-XYZ.json:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro"
+        in mounts
+    )
+    # The raw host .claude.json is NOT bound when an override is present.
+    assert (
+        f"{CLAUDE_DIR}/.claude.json:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro"
+        not in mounts
+    )
+
+
+def test_claude_json_falls_back_to_raw_bind_without_override():
+    # None override (host config unreadable) → pre-trust behavior: raw bind.
+    mounts = sc._build_claude_mounts(CLAUDE_DIR, (".claude.json",), claude_json_src=None)
+    assert mounts == [
+        "-v",
+        f"{CLAUDE_DIR}/.claude.json:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro",
+    ]
+
+
+def test_build_docker_args_threads_the_trusted_copy():
+    args = sc._build_docker_args(
+        container_name="devclaw-test",
+        host_bind_path="/host/ws",
+        claude_dir=CLAUDE_DIR,
+        payload="{}",
+        claude_json_src="/tmp/devclaw-claude-XYZ.json",
+    )
+    assert (
+        f"/tmp/devclaw-claude-XYZ.json:{sc.CONTAINER_CLAUDE_DIR}/.claude.json:ro"
+        in args
+    )
