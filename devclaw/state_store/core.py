@@ -392,6 +392,21 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                   last_goal_id    TEXT NOT NULL DEFAULT '',
                   last_task_id    TEXT NOT NULL DEFAULT ''
                 );
+
+                -- Cross-cycle survival of a problem (self-issue-filing Stage 1,
+                -- proposal self-issue-filing.md O1). The `problems` catalog's
+                -- raw `count` can't express "seen across N distinct run-cycles"
+                -- — a burst of 50 in one night is one cycle, not N. This tiny
+                -- membership table records (fingerprint, cycle_key) once per
+                -- cycle a problem is active in; COUNT(DISTINCT cycle_key) is the
+                -- recurrence signal that gates issue-filing (rescues the dead
+                -- ops-agent O4 trend-repeat threshold). Bounded like `problems`
+                -- (one row per problem per cycle), and prunes with the problem.
+                CREATE TABLE IF NOT EXISTS problem_cycles (
+                  fingerprint TEXT NOT NULL,
+                  cycle_key   TEXT NOT NULL,
+                  PRIMARY KEY (fingerprint, cycle_key)
+                );
                 """
             )
 
@@ -450,6 +465,14 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 # Same dial on PROGRAMS — child tasks inherit it (ADR 0007),
                 # mirroring open_pr / verify_cmd inheritance.
                 "ALTER TABLE programs ADD COLUMN strictness TEXT NOT NULL DEFAULT 'trust'",
+                # Self-issue-filing Stage 1 (proposal self-issue-filing.md O2):
+                # the GitHub issue this problem was filed as, so filing is
+                # idempotent (one issue per fingerprint) and the age-out pass can
+                # find still-open issues to close. NULL issue_number = never
+                # filed; issue_state ∈ {'open','closed'} tracks the last known
+                # GitHub state so recurrence can reopen and age-out can close.
+                "ALTER TABLE problems ADD COLUMN issue_number INTEGER",
+                "ALTER TABLE problems ADD COLUMN issue_state TEXT",
             ):
                 try:
                     self._db.execute(sql)

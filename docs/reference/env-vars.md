@@ -138,6 +138,10 @@ three precedence layers with divergent defaults was a debugging trap.
 | `DEVCLAW_RUN_CYCLE_START` | `22:00` | Open time (`HH:MM`, in `DEVCLAW_RUN_CYCLE_TZ`) of the recurring run cycle (nightly by default) whose close fires the continuous-eval **cycle report** (ADR 0006): a mechanical, zero-LLM heartbeat edge that pushes the cycle's clean/wedge/pause slice through the notifier once per cycle. |
 | `DEVCLAW_RUN_CYCLE_END` | `05:00` | Close time (`HH:MM`) of the run cycle — the heartbeat emits the report on the first wakeup after this instant (once per `cycle_key`; the `cycle_reports` PK dedupes). |
 | `DEVCLAW_RUN_CYCLE_TZ` | `Europe/London` | Timezone the run-cycle `start`/`end` are read in, and the tz of the report's `cycle_key`. An unresolvable tz fails safe — the report is skipped, never crashes the heartbeat. |
+| `DEVCLAW_SELF_REPO` | *(unset)* | `owner/name` of the repo devclaw files its own recurring problems against — **itself** (self-issue-filing Stage 1, `docs/proposals/self-issue-filing.md`). Fires on the same once-per-cycle report edge (zero LLM). **Unset = the whole feature is off** — no GitHub call, nothing shelled (the default + every test path). Issue creation uses a `GITHUB_TOKEN`/`GH_TOKEN` credential, never `ANTHROPIC_*` (OAuth-only cognition untouched). |
+| `DEVCLAW_SELF_ISSUE_MIN_CYCLES` | `3` | Distinct run-cycles a problem must survive (with ≥1 terminal occurrence) before it earns a self-filed issue — the recurrence gate (rescues the ops-agent O4 trend-repeat threshold). A one-night burst is one cycle; three cycles running is a real, file-worthy problem. |
+| `DEVCLAW_SELF_ISSUE_QUIET_DAYS` | `3` | Quiet span (≈ cycle-spans, cycles being ~daily) after which an OPEN self-filed issue auto-closes as stale — the age-out exit that keeps the board from accumulating (backlog #259). It reopens automatically if the problem recurs. |
+| `DEVCLAW_SELF_ISSUE_MAX_PER_CYCLE` | `3` | Cap on NEW self-filed issues opened per cycle (noise budget). Reopens and closes are not capped (not new noise); anything suppressed over the cap is **named** in the cycle-report line, never silently dropped. |
 
 ## Deploy hosting
 
