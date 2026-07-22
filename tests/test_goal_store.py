@@ -42,6 +42,20 @@ def test_create_goal_writes_and_rejects_dupes(tmp_path):
         store.create_goal("newg", objective="dup", workspace_dir="/ws")
 
 
+def test_create_goal_rejects_unparseable_cadence_at_creation(tmp_path):
+    # An unparseable cadence (e.g. "urgent") must fail LOUD at creation, not
+    # write a goal that throws a tick error every heartbeat forever
+    # (fs-monitoring-outage-refile-2026-07-19 wedged this way). The message
+    # names the goal + the accepted shape so the caller can fix and re-file.
+    store = GoalStore(tmp_path)
+    with pytest.raises(ValueError, match="cadence must be a duration"):
+        store.create_goal(
+            "badcad", objective="x", workspace_dir="/ws", cadence="urgent",
+        )
+    # And the broken row must NOT have been written.
+    assert not store.exists("badcad")
+
+
 def test_create_goal_persists_stub_acceptable(tmp_path):
     # The owner's explicit opt-in for which tools may ship as stubs must
     # survive a round-trip through yaml — the done-gate reads it on every

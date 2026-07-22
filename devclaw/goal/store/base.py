@@ -292,6 +292,19 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
         """Write a new goal.yaml. Raises FileExistsError if the id is taken."""
         if self.exists(goal_id):
             raise FileExistsError(f"goal {goal_id!r} already exists")
+        # Fail LOUD at creation, not silently every tick. cadence is read by
+        # cadence_due() on every heartbeat via parse_duration(); an unparseable
+        # value like "urgent" otherwise writes fine here and then throws an
+        # isolated tick error every ~15min forever, wedging the goal with no
+        # actionable surface (fs-monitoring-outage-refile-2026-07-19 died this
+        # way — born with cadence "urgent", never once ticked).
+        try:
+            parse_duration(cadence)
+        except ValueError as e:
+            raise ValueError(
+                f"cannot create goal {goal_id!r}: {e} — cadence must be a "
+                f"duration like '15m', '6h', or '1d', not a word"
+            ) from e
         d = self._dir(goal_id)
         d.mkdir(parents=True, exist_ok=True)
         (d / "goal.yaml").write_text(
