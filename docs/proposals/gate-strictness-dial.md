@@ -1,10 +1,12 @@
 # Proposal — Gate strictness dial: advisory-by-default gates with a per-goal opt-in to fail closed
 
-- **Status:** **DRAFT** — 2026-07-22. Direction agreed in conversation; the
-  mandatory clarify step (`.claude/rules/spec-lifecycle.md`) has NOT run — the
-  `[OPEN]` items in §5 must be answered before this flips to LOCKED. **No code
-  before lock.**
-- **Date opened:** 2026-07-22
+- **Status:** **LOCKED (direction)** — 2026-07-22. Direction agreed in
+  conversation; the mandatory clarify step (`.claude/rules/spec-lifecycle.md`)
+  ran the same day — all five `[OPEN]` items resolved by Denys, resolutions in
+  place in §5. **LOCKED is direction, not schedule** — sequencing stays Denys's
+  call; a locked line is reopenable (edit the doc, don't silently diverge).
+  **No code before a tranche is scheduled + this graduates to an ADR.**
+- **Date opened:** 2026-07-22 · **Locked:** 2026-07-22
 - **Authors:** Denys + Claude (conversation of 2026-07-22)
 - **Supersedes / relates:** subsumes the per-project `DEVCLAW_GOAL_BROWSER_GATE_MODE`
   (`flexible|strict`) into a general per-goal dial (§4); names a **deferred
@@ -13,8 +15,8 @@
   head-on (§3) — read that section first.
 
 > How to read this: **[CONFIRMED]** = decided in the 2026-07-22 conversation.
-> **[OPEN]** = a real fork that needs Denys before lock. Do not treat an
-> `[OPEN]` item as settled by prose elsewhere in the doc.
+> Sections once marked **[OPEN]** are all resolved in place (§5) — the
+> mandatory clarify step ran the same day the draft landed.
 
 ---
 
@@ -97,12 +99,12 @@ at merge *is* the strict backstop for advisory gates — the reviewer devclaw
 removed from the loop is still there at the merge boundary. That is the crux of
 why this is a recalibration, not a weakening.
 
-The corollary — and the reason §5-O2 is load-bearing — is that this argument
-**only holds for gates whose escape is a human merge.** A gate that protects
-against the model *gaming its own evidence* where a human merge might not catch it
-(test-integrity: tests silently deleted; delivery-trust: red CI merged) may need
-to stay hard even under `trust`. Which gates are dial-able vs. always-hard is
-O2, and it is the most important open question in this proposal.
+The corollary — and the reason §5-O2 was the load-bearing question — is that
+this argument **only holds for gates whose escape is a human merge.** A gate
+that protects against the model *gaming its own evidence* where a human merge
+might not catch it (test-integrity: tests silently deleted; delivery-trust: red
+CI merged) stays hard even under `trust`. The dial-able-vs-always-hard line is
+resolved in §5-O2.
 
 ## 4. Relationship to the existing browser-gate mode [CONFIRMED]
 
@@ -112,41 +114,45 @@ the pattern for one gate — and the browser gate already carries a partial
 2026-07-18). This proposal **generalizes the mode** from one env-var-on-one-gate
 to a per-goal dial across the dial-able gate set (§5-O2), and the config-only
 trigger hole (the `angular.json` case) is closed for free by the deferred
-judge-gate (§6) or, if O3 chooses, a narrow interim trigger rule. The existing
-env var is subsumed; whether it is removed or kept as a global fallback is O3.
+judge-gate (§6). The new per-goal dial **replaces** `DEVCLAW_GOAL_BROWSER_GATE_MODE`;
+the env var, if set, becomes only the global default an unset per-goal dial
+falls back to (§5-O3).
 
-## 5. Clarify-step items — MUST be resolved before LOCK
+## 5. Clarify-step resolutions [all RESOLVED 2026-07-22, by Denys]
 
-- **[OPEN] O1 — Where the dial lives, and can it change.** Per-goal field set at
-  `create_goal`? Per-project default a goal inherits? Both (goal overrides
-  project)? And given goals-are-durable / no-field-patches
-  ([[feedback_goals_are_durable_no_field_patches]]): is strictness fixed at
-  creation (change ⇒ cancel + re-file), or is it a legitimate exception that
-  `steer_goal` may flip? *Leaning:* per-goal field, default `trust`, with a
-  per-project default; changing it mid-flight via steer is acceptable because it
-  changes *consequence-of-verdict*, not objective/done_when — but Denys decides.
-- **[OPEN] O2 — Which gates are dial-able vs. always-hard.** The load-bearing
-  one (§3). Candidate split to react to: **dial-able** (advisory under `trust`):
-  browser-E2E gate, pre-PR adversarial review gate. **Always-hard** (ignore the
-  dial): test-integrity gate, delivery-trust (CI-green-before-review), the
-  done-gate grounded `achieved` evaluation — because these guard against the
-  model gaming its own evidence or closing a goal on its own say-so, which the
-  human merge does not reliably catch. Denys must ratify or redraw this line.
-- **[OPEN] O3 — Dial shape + fate of the env var.** Three levels
-  (`trust | balanced | strict`) or two (`trust | strict`)? What does `balanced`
-  mean if kept (proposed: judge-gate can block, rigid rules cannot)? Does the new
-  dial *replace* `DEVCLAW_GOAL_BROWSER_GATE_MODE`, or does the env var remain a
-  global default the per-goal dial overrides?
-- **[OPEN] O4 — Advisory verdict still counts everywhere.** Confirm an advisory
-  (non-blocking) verdict is still written to the log + `problems` catalog +
-  `eval_outcomes`, and that a `trust`-mode surfaced verdict counts as a
-  clean-night *wedge* or *not* (proposed: NOT a wedge — it shipped — but listed
-  in the night report like a self-healed pause is, so lost quality stays
-  visible). Interacts with ADR 0006 §5-O1.
-- **[OPEN] O5 — Where the advisory verdict surfaces to the human.** Proposed: the
-  gate's reason rides into the **PR body** so the human sees it at the merge
-  boundary (making the human merge the real enforcement point per §3). Confirm,
-  and confirm it does not require an LLM call (mechanical text, zero tokens).
+- **[RESOLVED] O1 — Where the dial lives, and can it change.** A **per-goal
+  field**, default `trust`, with a **per-project default** the goal inherits
+  when unset. `steer_goal` **may flip it** mid-flight: it changes the
+  *consequence-of-a-verdict*, not the objective / done_when / backlog, so it is
+  not the kind of field-patch the goals-are-durable rule forbids
+  ([[feedback_goals_are_durable_no_field_patches]]) — no cancel + re-file
+  needed to change strictness.
+- **[RESOLVED] O2 — Which gates are dial-able vs. always-hard.** The
+  load-bearing split (§3), ratified as proposed. **Dial-able** (go advisory
+  under `trust`): the **browser-E2E gate** and the **pre-PR adversarial review
+  gate** — both have the human merge as a backstop. **Always-hard** (ignore the
+  dial, stay fail-closed in every mode): **test-integrity**, **delivery-trust**
+  (CI-green-before-review), and the **done-gate** grounded `achieved`
+  evaluation — these guard against the model gaming its own evidence or closing
+  a goal on its own say-so, which the human merge does NOT reliably catch. The
+  dial only ever loosens the two review-shaped gates; the three
+  evidence-integrity gates are outside its reach by construction.
+- **[RESOLVED] O3 — Dial shape + fate of the env var.** **Two levels:
+  `trust | strict`.** `balanced` is dropped for now — it only becomes meaningful
+  once the judge-gate (§6) exists (judge can block, rigid rules cannot), so it
+  waits for that graduation. The per-goal dial **replaces**
+  `DEVCLAW_GOAL_BROWSER_GATE_MODE`; a set env var survives only as the global
+  default an unset per-goal/per-project dial falls back to.
+- **[RESOLVED] O4 — Advisory verdict still counts everywhere.** An advisory
+  (non-blocking) verdict is **still written** to the log + `problems` catalog +
+  `eval_outcomes`. A `trust`-mode surfaced verdict is **NOT a clean-night
+  wedge** — it shipped — **but is listed in the night report** the way a
+  self-healed pause is (ADR 0006 §5-O1), so lost quality stays visible without
+  failing the night.
+- **[RESOLVED] O5 — Where the advisory verdict surfaces to the human.** The
+  gate's verdict + reason **rides into the PR body** so the human sees it at the
+  merge boundary — this is what makes the human merge the real enforcement point
+  for advisory gates (§3). **Mechanical text, zero LLM calls.**
 
 ## 6. Deferred graduation — the adversarial judge-gate [CONFIRMED as deferred, NOT this tranche]
 
