@@ -45,17 +45,17 @@ views are projections") applied to metrics.
    zero extra tokens) at the settle commit, by the same single writer that
    owns task rows. Basket runs land in the same table as `source=basket` via
    an ingest verb. This replaces ADR 0004 step 2's basket-only `eval_runs`.
-2. **Clean-night rate is the second headline metric** beside `pass_rate`,
+2. **Clean-cycle rate is the second headline metric** beside `pass_rate`,
    operationalizing the operator's real done-criterion ("kick off a goal for
-   the night and it runs without me"). A night is clean iff zero
+   the cycle and it runs without me"). A cycle is clean iff zero
    mechanism-wedges. Boundary (locked): wedge = `mechanical:*` blocks,
    cognition-timeout-treated-as-terminal, engine/gate crash classes; clean =
    a genuine `needs_answer` (human-gated is the design) and a **self-healed
    quota/auth pause** (the pause machinery working unattended IS the
-   mechanism working — listed in the report, never failing the night).
-3. **A mechanical window-close push report.** When the nightly run window
+   mechanism working — listed in the report, never failing the cycle).
+3. **A mechanical window-close push report.** When the run cycle
    closes, the *scheduled-edge owner* (today: the heartbeat) assembles the
-   night's slice — clean?, wedge list with classes, self-healed pauses, what
+   cycle's slice — clean?, wedge list with classes, self-healed pauses, what
    needs the operator — and pushes it through the existing notifier. Zero
    LLM. No notifier configured → log-only, never an error.
 4. **`measure_passrate` demotes to the experiment tool.** Field telemetry is
@@ -77,6 +77,17 @@ heartbeat": today the heartbeat holds the job; if the parked event-driven
 rework ever demotes the heartbeat to reconciliation, it inherits the edge
 unchanged. Nothing in this decision blocks on, or preempts, that idea.
 
+### Naming (generalized 2026-07-22, Denys)
+
+The report is over a **run cycle**, not literally "a night". The default
+window is nightly (22:00–05:00 `Europe/London`), but the mechanism is a
+recurring scheduled window with an operator-set cadence — the same abstraction
+intent as the *scheduled-edge owner* above. So the implemented vocabulary is
+`cycle`, not `night`: table `cycle_reports`, key `cycle_key`, env
+`DEVCLAW_RUN_CYCLE_{START,END,TZ}`, endpoint `GET /evals/cycles.json`, metric
+**clean-cycle rate**, `goal/cycle_report.py`. The graduated proposal keeps the
+original "night" wording as its locked snapshot; this ADR is canonical.
+
 ### Explicitly rejected
 
 - Heartbeat-embedded LLM evaluation and per-failure LLM autopsies — the
@@ -91,14 +102,14 @@ unchanged. Nothing in this decision blocks on, or preempts, that idea.
 
 Zero-token idle guard: untouched — every addition is arithmetic over
 existing rows, placed after the cheap idle gates. Single writer: the
-projection insert shares the settle commit inside the store; `night_reports`
+projection insert shares the settle commit inside the store; `cycle_reports`
 is written from layer-2 heartbeat code through the store. Quota: improved —
 live telemetry is free; basket spend becomes rarer and deliberate.
 
 ## Consequences
 
 - The workbench tranche (reshaped ADR 0004 step 2) becomes: `eval_outcomes`
-  + settle-hook + ingest/backfill; `night_reports` + window-close report;
+  + settle-hook + ingest/backfill; `cycle_reports` + window-close report;
   console Evals tab; deploy-smoke automation. Each lands independently.
 - The morning ritual inverts: the system reports to the operator; the
   operator answers questions and reads trends.

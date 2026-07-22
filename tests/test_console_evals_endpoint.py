@@ -4,10 +4,10 @@
     (params: limit, source). Pins that it returns the store's rows newest-first,
     honours the source filter, and 400s (never silently mis-filters) on bad
     input.
-  * ``GET /evals/nights.json`` — read-only ``night_reports`` list. Pins that an
-    empty table returns ``[]`` (never a 500) and that recorded nights come back;
+  * ``GET /evals/cycles.json`` — read-only ``cycle_reports`` list. Pins that an
+    empty table returns ``[]`` (never a 500) and that recorded cycles come back;
     the store read re-raises a real ``OperationalError`` (locked/corrupt DB)
-    rather than masking it as an empty clean-night list.
+    rather than masking it as an empty clean-cycle list.
 """
 
 from __future__ import annotations
@@ -92,38 +92,38 @@ def test_evals_outcomes_endpoint_rejects_bad_limit(tmp_path, monkeypatch):
     assert status == 400 and body["error"] == "bad_limit"
 
 
-# ── /evals/nights.json ──────────────────────────────────────────────────────
+# ── /evals/cycles.json ──────────────────────────────────────────────────────
 
-def test_evals_nights_endpoint_empty_when_no_reports(tmp_path, monkeypatch):
+def test_evals_cycles_endpoint_empty_when_no_reports(tmp_path, monkeypatch):
     from devclaw.server import http as http_mod
-    # night_reports is bootstrapped by StateStore (PR2) but empty until a
+    # cycle_reports is bootstrapped by StateStore (PR2) but empty until a
     # window closes; the endpoint returns [] rather than 500ing.
     store = _store(tmp_path)
     monkeypatch.setattr(http_mod, "store", store)
-    status, body = _get(http_mod.evals_nights_json)
+    status, body = _get(http_mod.evals_cycles_json)
     assert status == 200 and body == []
 
 
-def test_evals_nights_endpoint_returns_rows_when_table_present(tmp_path, monkeypatch):
+def test_evals_cycles_endpoint_returns_rows_when_table_present(tmp_path, monkeypatch):
     from devclaw.server import http as http_mod
     store = _store(tmp_path)
-    # Record a night via PR2's single-writer API (not a hand-rolled CREATE —
+    # Record a cycle via PR2's single-writer API (not a hand-rolled CREATE —
     # StateStore already owns the DDL).
-    store.record_night_report(
-        night_date="2026-07-21", window_start_ms=1, window_end_ms=2,
-        clean=True, wedges_json="[]", pauses_json="[]", summary="clean night",
+    store.record_cycle_report(
+        cycle_key="2026-07-21", window_start_ms=1, window_end_ms=2,
+        clean=True, wedges_json="[]", pauses_json="[]", summary="clean cycle",
         sent_at=3,
     )
     monkeypatch.setattr(http_mod, "store", store)
-    status, body = _get(http_mod.evals_nights_json)
+    status, body = _get(http_mod.evals_cycles_json)
     assert status == 200 and len(body) == 1
-    assert body[0]["night_date"] == "2026-07-21" and body[0]["clean"] == 1
+    assert body[0]["cycle_key"] == "2026-07-21" and body[0]["clean"] == 1
 
 
-def test_list_night_reports_reraises_real_operational_error_not_missing_table(tmp_path):
+def test_list_cycle_reports_reraises_real_operational_error_not_missing_table(tmp_path):
     """The defensive catch degrades to [] ONLY for a genuinely-absent table —
     a real fault (locked/corrupt DB, an OperationalError that is NOT
-    ``no such table``) must surface loudly, never read as an empty clean-night
+    ``no such table``) must surface loudly, never read as an empty clean-cycle
     list (loud-failure-over-silent-degradation)."""
     store = _store(tmp_path)
 
@@ -133,4 +133,4 @@ def test_list_night_reports_reraises_real_operational_error_not_missing_table(tm
 
     store._db = _Boom()
     with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-        store.list_night_reports(limit=10)
+        store.list_cycle_reports(limit=10)

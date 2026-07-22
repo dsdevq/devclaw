@@ -536,7 +536,7 @@ def _env_var_catalog() -> list[dict]:
 
 
 # ---- Evals projection (ADR 0006) ------------------------------------------
-# Read-only JSON over the eval_outcomes projection + the night_reports table.
+# Read-only JSON over the eval_outcomes projection + the cycle_reports table.
 # Un-prefixed `.json` data-endpoint convention (like /config/env.json,
 # /projects.json, /control.json) — NOT the contract's illustrative
 # `/api/evals/...`. The console Evals tab reads these.
@@ -569,15 +569,15 @@ async def evals_outcomes_json(request: Request) -> Response:
     return JSONResponse(store.list_eval_outcomes(source=source, limit=limit))
 
 
-@mcp.custom_route("/evals/nights.json", methods=["GET"])
-async def evals_nights_json(request: Request) -> Response:
-    """Recent ``night_reports`` rows (ADR 0006), newest window first. Param:
-    ``limit`` (default 100, max 1000). Defensive: if the table doesn't exist
-    yet (the night-report tranche unmerged) the store returns [], never a 500."""
+@mcp.custom_route("/evals/cycles.json", methods=["GET"])
+async def evals_cycles_json(request: Request) -> Response:
+    """Recent ``cycle_reports`` rows (ADR 0006), newest window first. Param:
+    ``limit`` (default 100, max 1000). The table is bootstrapped by StateStore,
+    so an empty table returns [] (never a 500); a real DB fault surfaces loudly."""
     limit, err = _evals_limit(request)
     if err is not None:
         return err
-    return JSONResponse(store.list_night_reports(limit=limit))
+    return JSONResponse(store.list_cycle_reports(limit=limit))
 
 
 @mcp.custom_route("/config/env.json", methods=["GET"])

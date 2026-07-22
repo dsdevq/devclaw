@@ -1,37 +1,37 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   fetchEvalOutcomes,
-  fetchNightReports,
+  fetchCycleReports,
   type EvalOutcome,
-  type NightReport,
+  type CycleReport,
 } from "../api";
 import { KIND_LABEL, taskStatusColor } from "../status";
 import { relativeTime } from "../util/time";
 import { EmptyState, ErrorNote, Loading, SectionLabel, StatusDot } from "../ui";
 
 // The Evals tab is a read-only projection of the eval_outcomes table (every
-// settled task + ingested basket runs) plus the night_reports table (the
-// nightly window-close report). Two headline metrics per ADR 0006:
+// settled task + ingested basket runs) plus the cycle_reports table (the
+// per-cycle window-close report). Two headline metrics per ADR 0006:
 //   * pass_rate — fraction of settled outcomes that are done AND verify-passed;
-//   * clean-night rate — fraction of nights with zero mechanism-wedges.
+//   * clean-cycle rate — fraction of cycles with zero mechanism-wedges.
 // Both feature-detect empty/missing tables and render an empty state, not a crash.
 
 type SourceFilter = "all" | "live" | "basket";
 
 export function Evals() {
   const [outcomes, setOutcomes] = useState<EvalOutcome[] | null>(null);
-  const [nights, setNights] = useState<NightReport[] | null>(null);
+  const [cycles, setCycles] = useState<CycleReport[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [filter, setFilter] = useState<SourceFilter>("all");
 
   useEffect(() => {
     let alive = true;
     const load = () =>
-      Promise.all([fetchEvalOutcomes({ limit: 200 }), fetchNightReports(60)])
+      Promise.all([fetchEvalOutcomes({ limit: 200 }), fetchCycleReports(60)])
         .then(([o, n]) => {
           if (!alive) return;
           setOutcomes(o);
-          setNights(n);
+          setCycles(n);
         })
         .catch((e) => alive && setErr(String(e)));
     load();
@@ -47,9 +47,9 @@ export function Evals() {
   const passed = rows.filter((o) => o.status === "done" && o.verify_passed === 1).length;
   const passRate = settled ? passed / settled : null;
 
-  const nightRows = nights ?? [];
-  const cleanNights = nightRows.filter((n) => n.clean === 1).length;
-  const cleanRate = nightRows.length ? cleanNights / nightRows.length : null;
+  const cycleRows = cycles ?? [];
+  const cleanCycles = cycleRows.filter((n) => n.clean === 1).length;
+  const cleanRate = cycleRows.length ? cleanCycles / cycleRows.length : null;
 
   const shown =
     filter === "all" ? rows : rows.filter((o) => o.source === filter);
@@ -73,12 +73,12 @@ export function Evals() {
               color={rateColor(passRate)}
             />
             <Metric
-              label="Clean nights"
+              label="Clean cycles"
               value={pct(cleanRate)}
               sub={
-                nightRows.length
-                  ? `${cleanNights} / ${nightRows.length} nights`
-                  : "no night reports yet"
+                cycleRows.length
+                  ? `${cleanCycles} / ${cycleRows.length} cycles`
+                  : "no cycle reports yet"
               }
               color={rateColor(cleanRate)}
             />
@@ -118,18 +118,18 @@ export function Evals() {
           </section>
 
           <section>
-            <SectionLabel count={nightRows.length}>Night reports</SectionLabel>
-            {nightRows.length === 0 ? (
+            <SectionLabel count={cycleRows.length}>Cycle reports</SectionLabel>
+            {cycleRows.length === 0 ? (
               <div className="card">
                 <EmptyState
-                  title="No night reports yet"
-                  hint="The nightly window-close report lands here once the night-report tranche ships."
+                  title="No cycle reports yet"
+                  hint="The per-cycle window-close report lands here once the cycle-report tranche ships."
                 />
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {nightRows.map((n) => (
-                  <NightRow key={n.night_date} n={n} />
+                {cycleRows.map((n) => (
+                  <CycleRow key={n.cycle_key} n={n} />
                 ))}
               </div>
             )}
@@ -272,7 +272,7 @@ function Td({ children }: { children: ReactNode }) {
   return <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}>{children}</td>;
 }
 
-function NightRow({ n }: { n: NightReport }) {
+function CycleRow({ n }: { n: CycleReport }) {
   const wedges = safeLen(n.wedges_json);
   const pauses = safeLen(n.pauses_json);
   const color = n.clean === 1 ? "var(--green)" : "var(--red)";
@@ -281,7 +281,7 @@ function NightRow({ n }: { n: NightReport }) {
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
         <StatusDot color={color} />
         <span className="mono" style={{ fontWeight: 550, fontSize: 13.5 }}>
-          {n.night_date}
+          {n.cycle_key}
         </span>
         <span className="badge" style={{ marginLeft: "auto" }}>
           {n.clean === 1 ? "clean" : `${wedges} wedge${wedges === 1 ? "" : "s"}`}

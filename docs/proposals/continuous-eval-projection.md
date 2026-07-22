@@ -5,6 +5,12 @@
   `[OPEN]` items answered by Denys, resolutions in §5), lock, tranche
   scheduled, graduation. The ADR is canonical from here on; this doc keeps
   the full narrative + the clarify-step trail.
+- **Naming note (2026-07-22):** during the tranche the "night" vocabulary was
+  generalized to "cycle" (the window is a recurring run cycle, nightly only by
+  default — Denys's call). This proposal keeps the original "night"/"clean-night
+  rate" wording as its locked snapshot; the shipped names (`cycle_reports`,
+  `cycle_key`, `DEVCLAW_RUN_CYCLE_*`, `/evals/cycles.json`, clean-cycle rate)
+  live in [ADR 0006](../decisions/0006-continuous-eval-projection.md)'s Naming note.
 - **Date opened:** 2026-07-21 · **Locked:** 2026-07-21 · **Graduated:** 2026-07-21
 - **Authors:** Denys + Claude (conversation of 2026-07-21)
 - **Supersedes / relates:** amends the *shape* of [ADR 0004](../decisions/0004-eval-workbench.md)

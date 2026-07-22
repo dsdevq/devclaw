@@ -444,8 +444,8 @@ export async function resumeGoal(id: string): Promise<{ resumed: boolean; messag
 }
 
 // ---- Evals projection (ADR 0006) ------------------------------------------
-// Read-only views over the eval_outcomes projection + night_reports table.
-// Endpoints: GET /evals/outcomes.json (limit, source) and /evals/nights.json
+// Read-only views over the eval_outcomes projection + cycle_reports table.
+// Endpoints: GET /evals/outcomes.json (limit, source) and /evals/cycles.json
 // (limit) — un-prefixed `.json` data-endpoint convention, same as the rest here.
 
 /** Build a URL preserving the bearer token AND appending query params, so the
@@ -497,10 +497,10 @@ export async function fetchEvalOutcomes(opts?: {
   return r.json();
 }
 
-/** One nightly-window report row (written by the night-report tranche). Absent
- *  until that lands — the endpoint returns [] rather than erroring in that case. */
-export interface NightReport {
-  night_date: string; // YYYY-MM-DD of window open
+/** One run-cycle window-close report row (written by the cycle-report edge).
+ *  Absent until a window has closed — the endpoint returns [] in that case. */
+export interface CycleReport {
+  cycle_key: string; // YYYY-MM-DD of window open
   window_start_ms: number;
   window_end_ms: number;
   clean: number; // 1 iff zero mechanism-wedges
@@ -511,12 +511,12 @@ export interface NightReport {
   created_at: number;
 }
 
-export async function fetchNightReports(limit?: number): Promise<NightReport[]> {
-  const url = withParams("/evals/nights.json", {
+export async function fetchCycleReports(limit?: number): Promise<CycleReport[]> {
+  const url = withParams("/evals/cycles.json", {
     limit: limit ? String(limit) : undefined,
   });
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`evals/nights.json ${r.status}`);
+  if (!r.ok) throw new Error(`evals/cycles.json ${r.status}`);
   return r.json();
 }
 

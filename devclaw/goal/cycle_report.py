@@ -1,22 +1,22 @@
-"""The night-window close report — the mechanical, ZERO-LLM edge (ADR 0006
+"""The cycle-window close report — the mechanical, ZERO-LLM edge (ADR 0006
 decision 3).
 
-When the nightly run window (22:00–05:00 Europe/London by default) closes, the
-*scheduled-edge owner* — today the goal heartbeat — assembles the night's slice
+When the per-cycle run window (22:00–05:00 Europe/London by default) closes, the
+*scheduled-edge owner* — today the goal heartbeat — assembles the cycle's slice
 from rows devclaw already writes (``eval_outcomes``, the ``problems`` catalog)
 and pushes a human-readable report through the existing notifier. It answers the
-operator's real done-criterion: "kick off a goal for the night and it runs
-without me." A night is **clean** iff **zero mechanism-wedges** fired in the
+operator's real done-criterion: "kick off a goal for the cycle and it runs
+without me." A cycle is **clean** iff **zero mechanism-wedges** fired in the
 window.
 
-Clean-night boundary (LOCKED, ADR 0006 §5-O1):
+Clean-cycle boundary (LOCKED, ADR 0006 §5-O1):
 
-- **wedge** (fails the night) = ``mechanical:*`` blocks, cognition-timeout-
+- **wedge** (fails the cycle) = ``mechanical:*`` blocks, cognition-timeout-
   treated-as-terminal, and engine/gate **crash** classes (an engine error, a
   review-gate crash, a no-result-line worker, a wall-clock timeout, a broken
   delivery). These are the loop's own plumbing breaking.
 - **clean** = a genuine ``needs_answer`` (human-gated is the design — surfaced
-  so the operator knows to answer, but it does NOT fail the night) and a
+  so the operator knows to answer, but it does NOT fail the cycle) and a
   **self-healed quota/auth pause** (the pause machinery working unattended IS
   the mechanism working — listed in ``pauses`` so the operator sees it, never a
   wedge). A gate *verdict* (review requested changes, verify/test-integrity/
@@ -37,15 +37,15 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 # ---- window config ----------------------------------------------------------
-# The nightly run window. Defaults to 22:00–05:00 Europe/London (the schedule tz
-# the operator's night runs use). Overridable via env for a different cadence /
+# The per-cycle run window. Defaults to 22:00–05:00 Europe/London (the schedule tz
+# the operator's cycle runs use). Overridable via env for a different cadence /
 # timezone; the pure helpers also take explicit overrides so tests pin a clock.
-NIGHT_WINDOW_START = os.environ.get("DEVCLAW_NIGHT_WINDOW_START", "22:00")
-NIGHT_WINDOW_END = os.environ.get("DEVCLAW_NIGHT_WINDOW_END", "05:00")
-NIGHT_WINDOW_TZ = os.environ.get("DEVCLAW_NIGHT_WINDOW_TZ", "Europe/London")
+CYCLE_WINDOW_START = os.environ.get("DEVCLAW_RUN_CYCLE_START", "22:00")
+CYCLE_WINDOW_END = os.environ.get("DEVCLAW_RUN_CYCLE_END", "05:00")
+CYCLE_WINDOW_TZ = os.environ.get("DEVCLAW_RUN_CYCLE_TZ", "Europe/London")
 
 
-# ---- failure-class → clean-night bucket (mechanical, zero LLM) ---------------
+# ---- failure-class → clean-cycle bucket (mechanical, zero LLM) ---------------
 # eval_outcomes failure_class values (state_store/rows.derive_failure_class) that
 # are MECHANISM wedges: the loop's own plumbing broke. review_rejected /
 # verify_failed / test_integrity / browser_gate_failed / blocked:worker are
@@ -63,7 +63,7 @@ _PROBLEM_WEDGE_CATEGORIES = frozenset({"cognition", "subprocess", "delivery"})
 # The self-healed quota/auth pause category — reported, never a wedge.
 _PROBLEM_PAUSE_CATEGORIES = frozenset({"limit"})
 # block kinds that are human-gated (a genuine needs_answer) — clean, surfaced as
-# "needs operator" but never failing the night. Anything else on a block whose
+# "needs operator" but never failing the cycle. Anything else on a block whose
 # kind starts "mechanical:" is a wedge.
 _HUMAN_GATED_BLOCK_KINDS = frozenset({
     "needs_answer", "bug", "lost_ref", "dispatch_cap", "block",
@@ -85,21 +85,21 @@ def _parse_hhmm(s: str) -> Optional[tuple[int, int]]:
 def most_recent_closed_window(
     now_ms: int,
     *,
-    start: str = NIGHT_WINDOW_START,
-    end: str = NIGHT_WINDOW_END,
-    tz: str = NIGHT_WINDOW_TZ,
+    start: str = CYCLE_WINDOW_START,
+    end: str = CYCLE_WINDOW_END,
+    tz: str = CYCLE_WINDOW_TZ,
 ) -> Optional[tuple[str, int, int]]:
-    """``(night_date, window_start_ms, window_end_ms)`` for the most-recent
-    night window that has ALREADY closed at ``now_ms``, or None if the schedule
+    """``(cycle_key, window_start_ms, window_end_ms)`` for the most-recent
+    cycle window that has ALREADY closed at ``now_ms``, or None if the schedule
     can't be resolved (fail-safe — a bad tz/time skips the report, never crashes
     the heartbeat).
 
     A window opens at ``start`` on date D and closes at ``end`` on D+1 (overnight
-    span). ``night_date`` is the YYYY-MM-DD of the OPEN (D), in the schedule tz —
-    the PRIMARY KEY that makes the report fire exactly once per night. The
+    span). ``cycle_key`` is the YYYY-MM-DD of the OPEN (D), in the schedule tz —
+    the PRIMARY KEY that makes the report fire exactly once per cycle. The
     "already closed" cut is what makes the heartbeat fire on the first wakeup
     after ``end`` and stay a no-op the rest of the day (the existence check does
-    the deduping; this picks WHICH night)."""
+    the deduping; this picks WHICH cycle)."""
     sh = _parse_hhmm(start)
     eh = _parse_hhmm(end)
     if sh is None or eh is None:
@@ -128,11 +128,11 @@ def most_recent_closed_window(
 
 
 @dataclass
-class NightReport:
-    """The assembled night slice — the shape :meth:`GoalService._maybe_emit_night_report`
+class CycleReport:
+    """The assembled cycle slice — the shape :meth:`GoalService._maybe_emit_cycle_report`
     persists + pushes. ``clean`` is 1 iff ``wedges`` is empty."""
 
-    night_date: str
+    cycle_key: str
     window_start_ms: int
     window_end_ms: int
     clean: bool
@@ -151,13 +151,13 @@ def _entry(cls: str, detail: str, ref: str) -> dict:
     return {"class": cls, "detail": (detail or "")[:200], "ref": ref or ""}
 
 
-def assemble_night_report(
+def assemble_cycle_report(
     store,
-    night_date: str,
+    cycle_key: str,
     window_start_ms: int,
     window_end_ms: int,
-) -> NightReport:
-    """Project the night's slice out of existing rows — ZERO LLM, pure SQL reads
+) -> CycleReport:
+    """Project the cycle's slice out of existing rows — ZERO LLM, pure SQL reads
     + mechanical bucketing. Reads ``eval_outcomes`` (PR1's read surface) for
     throughput + settle-path wedges/pauses, and the ``problems`` catalog for
     goal-tick-layer wedges (mechanical blocks, cognition/subprocess/delivery
@@ -215,8 +215,8 @@ def assemble_night_report(
         # else: task_fail / other → a genuine outcome, not a mechanism wedge.
 
     clean = len(wedges) == 0
-    report = NightReport(
-        night_date=night_date,
+    report = CycleReport(
+        cycle_key=cycle_key,
         window_start_ms=window_start_ms,
         window_end_ms=window_end_ms,
         clean=clean,
@@ -231,12 +231,12 @@ def assemble_night_report(
     return report
 
 
-def render_summary(r: NightReport) -> str:
+def render_summary(r: CycleReport) -> str:
     """The human-readable message body — the notifier payload + the persisted
     ``summary`` column. Concise, Telegram-friendly."""
     head = "✅ CLEAN — no mechanism-wedges." if r.clean else f"⚠️ {len(r.wedges)} wedge(s):"
     lines = [
-        f"🌙 Night report {r.night_date} ({NIGHT_WINDOW_START}–{NIGHT_WINDOW_END} {NIGHT_WINDOW_TZ})",
+        f"🔁 Cycle report {r.cycle_key} ({CYCLE_WINDOW_START}–{CYCLE_WINDOW_END} {CYCLE_WINDOW_TZ})",
         head,
     ]
     if r.wedges:
