@@ -261,8 +261,11 @@ async def get_status(task_id: str) -> str:
 
 @mcp.tool
 async def get_program(program_id: str) -> str:
-    """Return a program row and all its tasks in dependency order. Use to poll a
-    program submitted via start_program."""
+    """Return a program row and all its tasks in dependency order. Program-level
+    observability one layer below the goal: for a goal-dispatched program the goal
+    (get_goal / tail_goal) is the unit you own and steer — this is its internal
+    task DAG. Use to poll a program submitted via start_program, or to inspect a
+    goal's child program at per-task detail."""
     program = store.get_program(program_id)
     if not program:
         raise ToolError(f"unknown program_id: {program_id}")
@@ -274,11 +277,11 @@ async def get_program(program_id: str) -> str:
 
 @mcp.tool
 async def list_programs(limit: Annotated[int, Field(ge=1, le=1000)] = 50) -> str:
-    """List recent programs (parallel task DAGs — dispatched by goals; the
-    start_program alias now files a one-shot GOAL whose child program lands
-    here once dispatched), most-recent
-    first. Use to discover program_ids for get_program, get_events, or
-    /dashboard."""
+    """List recent programs (parallel task DAGs), most-recent first. Program-level
+    plumbing one layer below the goal: goals dispatch programs, and the
+    start_program alias files a one-shot GOAL whose child program lands here once
+    dispatched — steer and cancel via the goal, not the program. Use to discover
+    program_ids for get_program, get_events, or /dashboard."""
     programs = store.list_programs(limit=limit)
     return json.dumps([p.to_dict() for p in programs], indent=2)
 
@@ -386,14 +389,30 @@ async def cancel_task(task_id: str) -> str:
 
 @mcp.tool
 async def cancel_program(program_id: str) -> str:
-    """Abort a whole program (a start_program goal or an approved build): stop
-    scheduling new tasks, tear down every running task's sandbox, and mark the
-    program 'cancelled'. Use this as the kill switch for a long or runaway build.
-    No-op if the program already terminated. Returns whether an abort happened."""
+    """Abort a whole standalone program: stop scheduling new tasks, tear down
+    every running task's sandbox, and mark the program 'cancelled'. No-op if the
+    program already terminated. Returns whether an abort happened.
+
+    Program-level plumbing, not the operator's primary kill switch. A program
+    dispatched by a goal (``parent_goal_id`` set — every one_shot goal, every
+    start_program) is OWNED by that goal: cancel it with ``cancel_goal``, which
+    cascades DOWN and tears this program down as part of stopping the goal. This
+    tool therefore REJECTS a goal-owned program — cancelling it directly does not
+    cascade UP, and would leave the goal executing and desynced from its dead
+    program (the tick then has to reconcile a program it never chose to lose)."""
     if not program_id:
         raise ToolError("cancel_program requires program_id")
-    if not store.get_program(program_id):
+    program = store.get_program(program_id)
+    if not program:
         raise ToolError(f"unknown program_id: {program_id}")
+    if program.parent_goal_id:
+        raise ToolError(
+            f"program {program_id} is owned by goal '{program.parent_goal_id}' — "
+            f"cancel the goal instead: cancel_goal('{program.parent_goal_id}') "
+            f"stops the goal and cascades down to tear this program down. "
+            f"Cancelling the program directly does not cascade up and would leave "
+            f"the goal executing and desynced from its dead program."
+        )
     cancelled = queue.cancel_program(program_id)
     return json.dumps(
         {"program_id": program_id, "cancelled": cancelled, "status": "cancelled" if cancelled else None},
