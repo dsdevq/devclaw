@@ -13,6 +13,7 @@ binds devclaw's ``claude --print`` callers at the goal-planner / evaluator tiers
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import uuid
@@ -367,6 +368,14 @@ class GoalService:
                     self.poke()
             except Exception as exc:  # noqa: BLE001 — a tick crash must not kill the loop
                 sys.stderr.write(f"goal-layer: tick crashed: {exc}\n")
+            # The night-window close report (ADR 0006 decision 3) — a mechanical,
+            # ZERO-LLM scheduled edge, independent of any goal's activity. Placed
+            # AFTER tick_all so it never precedes the cheap idle gates; its own
+            # try so a hiccup (bad clock, notifier outage) never kills the loop.
+            try:
+                await self._maybe_emit_night_report()
+            except Exception as exc:  # noqa: BLE001 — never kill the heartbeat
+                sys.stderr.write(f"goal-layer: night-report edge crashed: {exc}\n")
 
     def _make_tracer(self, goal_id: str) -> "Optional[_trace.PersistentTracer]":
         """Per-goal-tick PersistentTracer that writes into the sqlite traces
@@ -420,6 +429,55 @@ class GoalService:
                 remote_checker=self._remote_checker(),
             )
         return outcome.value
+
+    async def _maybe_emit_night_report(self) -> Optional[str]:
+        """The scheduled-edge owner (ADR 0006 decision 3): once per nightly
+        run-window close, assemble the night's slice from existing rows and push
+        it through the notifier. Returns the ``night_date`` it emitted, or None
+        when the window hasn't closed / was already reported.
+
+        ZERO LLM — cheap SQL + timestamp math only:
+          1. compute the most-recent CLOSED window (pure clock math);
+          2. an existence check on ``night_reports`` (the PK is the once-per-night
+             idempotency guard) short-circuits every wakeup after the first;
+          3. only past that gate does it read eval_outcomes/problems and write.
+
+        The write goes THROUGH the store (single-writer: ``night_reports`` is
+        only ever written by ``record_night_report``). ``sent_at`` is NULL when
+        the notifier doesn't confirm the push (unconfigured / failed) — a
+        log-only report, never an error."""
+        from . import night_report as _nr
+
+        now = _now_ms()
+        win = _nr.most_recent_closed_window(now)
+        if win is None:  # unresolvable schedule (bad tz/time) — skip, never crash
+            return None
+        night_date, start_ms, end_ms = win
+        if self._store.night_report_exists(night_date):
+            return None  # already reported this night (idempotent)
+
+        report = _nr.assemble_night_report(self._store, night_date, start_ms, end_ms)
+        # Push best-effort; NullNotifier / a relay outage returns False → log-only.
+        sent = False
+        try:
+            sent = await self._notifier.send(report.summary)
+        except Exception as exc:  # noqa: BLE001 — a notifier hiccup is never fatal
+            sys.stderr.write(f"goal-layer: night-report notify failed: {exc}\n")
+        self._store.record_night_report(
+            night_date=night_date,
+            window_start_ms=start_ms,
+            window_end_ms=end_ms,
+            clean=report.clean,
+            wedges_json=json.dumps(report.wedges),
+            pauses_json=json.dumps(report.pauses),
+            summary=report.summary,
+            sent_at=(now if sent else None),
+        )
+        if not sent:
+            # Log-only path: the report still exists in the table; surface it so a
+            # notifier-less run still leaves a trace.
+            sys.stderr.write(f"goal-layer: night report {night_date} (log-only):\n{report.summary}\n")
+        return night_date
 
     # ---- steer / observe surface (wrapped by MCP tools) --------------------
 
