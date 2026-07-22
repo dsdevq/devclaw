@@ -275,7 +275,10 @@ async def test_settle_blocks_when_reachability_says_reachable(store, _frontend_s
         store, runner=_ok_frontend_runner(), reviewer=_approve,
         reachability_judge=_judge("yes"),
     )
-    tid = q.submit(kind="implement_feature", workspace_dir=ws, goal="wire tab-group into settings page", verify_cmd="ng build")
+    # strictness="strict": this asserts the browser gate FAILS CLOSED. The
+    # default is now "trust" (advisory, ADR 0007), under which a reachable-but-
+    # unrun UI change ships-with-advisory instead — covered separately.
+    tid = q.submit(kind="implement_feature", workspace_dir=ws, goal="wire tab-group into settings page", verify_cmd="ng build", strictness="strict")
     await q.drain()
     t = store.get_task(tid)
     assert t.status == "failed"

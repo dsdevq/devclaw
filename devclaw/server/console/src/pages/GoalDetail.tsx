@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { answerGoal, cancelGoal, fetchGoal, resumeGoal, steerGoal, tokenQueryString, type GoalDetail as GD } from "../api";
+import { answerGoal, cancelGoal, fetchGoal, resumeGoal, setGoalStrictness, steerGoal, tokenQueryString, type GoalDetail as GD } from "../api";
 import { EventFeed } from "../components/EventFeed";
 import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
@@ -32,7 +32,7 @@ export function GoalDetail() {
   const [data, setData] = useState<GD | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("timeline");
-  const [busy, setBusy] = useState<"cancel" | "steer" | "resume" | "answer" | null>(null);
+  const [busy, setBusy] = useState<"cancel" | "steer" | "resume" | "answer" | "strictness" | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [steerOpen, setSteerOpen] = useState(false);
   const [steerMsg, setSteerMsg] = useState("");
@@ -116,6 +116,25 @@ export function GoalDetail() {
     }
   };
 
+  const doToggleStrictness = async () => {
+    if (!id || !data) return;
+    const next = data.strictness === "strict" ? "trust" : "strict";
+    setBusy("strictness");
+    try {
+      await setGoalStrictness(id, next);
+      setFlash(
+        next === "strict"
+          ? "Gate: strict — dial-able gate failures now block"
+          : "Gate: trust — dial-able gate failures ship with a caveat in the PR",
+      );
+      reload();
+    } catch (e) {
+      setFlash(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const hasUnknowns = (data?.unknowns?.length ?? 0) > 0;
   const answersComplete =
     hasUnknowns && (data?.unknowns ?? []).every((u) => (answers[u.id] ?? "").trim());
@@ -166,6 +185,18 @@ export function GoalDetail() {
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 {flash && <span className="mono secondary" style={{ fontSize: 12 }}>{flash}</span>}
+                <button
+                  className="btn sm"
+                  disabled={busy !== null || terminal}
+                  title={
+                    data.strictness === "strict"
+                      ? "Strict — browser & review gate failures BLOCK this goal. Click to switch to Trust."
+                      : "Trust — browser & review gate failures ship with a caveat in the PR (the human merge is the backstop). Click to switch to Strict."
+                  }
+                  onClick={doToggleStrictness}
+                >
+                  {busy === "strictness" ? "…" : `Gate: ${data.strictness === "strict" ? "Strict" : "Trust"}`}
+                </button>
                 <button className="btn danger sm" disabled={busy !== null || terminal} onClick={() => setCancelOpen(true)}>
                   <IconStop size={14} /> Cancel
                 </button>

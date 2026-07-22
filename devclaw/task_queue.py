@@ -46,6 +46,7 @@ from .loom.test_integrity import present_test_names, scan_diff
 from .planner import PlannedTask, PlannerError, plan_program
 from .quality import format_feedback, review_panel
 from .quality.browser_gate import PLAYWRIGHT_CONFIG_NAMES, browser_run_verdict
+from .quality.gate_policy import Consequence, gate_consequence
 from .quality.reachability import judge_reachability
 from .engine.sandcastle import run_sandcastle, sandbox_owner_id, sweep_orphan_sandboxes
 from .dispatch_gate import operator_block
@@ -209,6 +210,17 @@ def _attach_diff_stats(result: dict, diff: str) -> None:
             result["diff_stats"] = stats
     except Exception as err:  # noqa: BLE001 — observability, not correctness
         sys.stderr.write(f"task-queue: diff-stats capture failed: {err}\n")
+
+
+def _attach_gate_advisory(result: dict, gate_id: str, reason: str) -> None:
+    """Stamp a `trust`-mode advisory (a dial-able gate that failed but shipped,
+    ADR 0007) onto the task result so it flows to delivery → the PR body. Never
+    raises — a shipped-with-caveat task must not fail over its own annotation."""
+    try:
+        advisories = result.setdefault("gate_advisories", [])
+        advisories.append({"gate": gate_id, "reason": reason})
+    except Exception as err:  # noqa: BLE001 — observability, not correctness
+        sys.stderr.write(f"task-queue: gate-advisory capture failed: {err}\n")
 
 
 async def _git_head(host_dir: str) -> str:
@@ -576,6 +588,7 @@ class TaskQueue(_NotifyMixin):
         title: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
         scaffold: bool = False,
+        strictness: str = "trust",
         pump: bool = True,
     ) -> str:
         """Create a task row (status 'pending') and, by default, immediately
@@ -603,6 +616,7 @@ class TaskQueue(_NotifyMixin):
             title=title,
             parent_goal_id=parent_goal_id,
             scaffold=scaffold,
+            strictness=strictness,
         )
         if pump:
             self._pump()
@@ -617,6 +631,7 @@ class TaskQueue(_NotifyMixin):
         open_pr: bool = False,
         verify_cmd: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        strictness: str = "trust",
         pump: bool = True,
     ) -> str:
         """Submit a program the decomposer will plan into child tasks.
@@ -643,7 +658,7 @@ class TaskQueue(_NotifyMixin):
         self._store.create_program(
             id=program_id, goal=goal, workspace_dir=workspace_dir,
             notify_url=notify_url, open_pr=open_pr, verify_cmd=verify_cmd,
-            parent_goal_id=parent_goal_id,
+            parent_goal_id=parent_goal_id, strictness=strictness,
         )
         if pump:
             self._planning.add(program_id)
@@ -909,6 +924,9 @@ class TaskQueue(_NotifyMixin):
             # the row. Pass the kind (→ conventional-commit title) + the gate
             # verdict (→ PR body) so the delivered PR describes itself.
             verify = success.get("verify") if isinstance(success, dict) else None
+            # ADR 0007: any trust-mode gate advisory rides into the PR body so the
+            # human sees it at the merge boundary (the backstop for advisory gates).
+            advisories = success.get("gate_advisories") if isinstance(success, dict) else None
             pr_url = None
             failure: Optional[str] = None
             delivery: dict = {}
@@ -917,6 +935,7 @@ class TaskQueue(_NotifyMixin):
                     workspace_dir=workspace_dir, task_id=task_id, goal=goal,
                     kind=kind, verify=verify,
                     title=(row.title if row else None),
+                    advisories=advisories,
                 )
                 pr_url = delivery.get("pr_url")
                 failure = delivery_failed(delivery)
@@ -969,6 +988,9 @@ class TaskQueue(_NotifyMixin):
         # behavior for any in-flight program at deploy time.
         program_open_pr = bool(program and program.open_pr)
         program_verify_cmd = program.verify_cmd if program else None
+        # Child tasks inherit the program's strictness dial (ADR 0007), same as
+        # open_pr / verify_cmd. Legacy programs (pre-column) load "trust".
+        program_strictness = program.strictness if program else "trust"
         key_to_uuid = {p.key: str(uuid.uuid4()) for p in planned}
         for idx, p in enumerate(planned):
             dep_uuids: list[str] = []
@@ -997,6 +1019,9 @@ class TaskQueue(_NotifyMixin):
                 # For a one-shot goal's program the key IS the checklist item
                 # id — the goal settle path's child→item join (ADR 0003 st. 2).
                 plan_key=p.key,
+                # Inherited dial (ADR 0007) — every child of a strict program
+                # blocks on a dial-able gate failure; a trust program advises.
+                strictness=program_strictness,
             )
 
     def start_planned_program(
@@ -1009,6 +1034,7 @@ class TaskQueue(_NotifyMixin):
         open_pr: bool = False,
         verify_cmd: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        strictness: str = "trust",
         pump: bool = True,
     ) -> str:
         """Submit an ALREADY-PLANNED program (the caller supplies the
@@ -1028,7 +1054,7 @@ class TaskQueue(_NotifyMixin):
         self._store.create_program(
             id=program_id, goal=goal, workspace_dir=workspace_dir,
             notify_url=notify_url, open_pr=open_pr, verify_cmd=verify_cmd,
-            parent_goal_id=parent_goal_id,
+            parent_goal_id=parent_goal_id, strictness=strictness,
         )
         self._persist_plan(program_id, workspace_dir, planned)
         self._store.mark_program_running(program_id)
@@ -1055,6 +1081,30 @@ class TaskQueue(_NotifyMixin):
 
     # ---- shared runner --------------------------------------------------
 
+    def _record_gate_advisory(
+        self, goal_id: Optional[str], task_id: str, gate_id: str, reason: str
+    ) -> None:
+        """Record a `trust`-mode dial-able-gate advisory loud (ADR 0007): the
+        change shipped past a browser/review finding rather than wedging. Goes
+        to the problems catalog as ``recovered`` (devclaw carried on past it) +
+        stderr, so lost quality stays visible without failing the night.
+        Best-effort — a recording hiccup must never fail an already-shipped task."""
+        try:
+            sys.stderr.write(
+                f"task-queue: gate advisory ({gate_id}) shipped under trust — "
+                f"task={task_id}: {reason[:200]}\n"
+            )
+            self._store.record_problem(
+                category="gate",
+                kind=f"{gate_id} advisory (trust)",
+                message=reason,
+                recovered=True,
+                goal_id=goal_id or "",
+                task_id=task_id,
+            )
+        except Exception as err:  # noqa: BLE001 — observability, not correctness
+            sys.stderr.write(f"task-queue: gate-advisory record failed: {err}\n")
+
     async def _run_and_settle(
         self, task_id: str, kind: TaskKind, workspace_dir: str, goal: str,
         *, defer_done: bool = False,
@@ -1073,6 +1123,12 @@ class TaskQueue(_NotifyMixin):
         # this flag — they run for scaffold and non-scaffold tasks alike, so an
         # over-tagged real code task still fails if it doesn't build or guts tests.
         scaffold = bool(row.scaffold) if row else False
+        # ADR 0007: the goal's gate strictness dial, snapshotted on the row at
+        # dispatch. Read here so the settle cascade below can decide whether a
+        # dial-able gate failure (browser / adversarial review) BLOCKS (strict)
+        # or advises-and-ships (trust). Always-hard gates ignore it.
+        strictness = row.strictness if row else "trust"
+        parent_goal_id = row.parent_goal_id if row else None
 
         # Resumed-after-interruption brief. ``pause_count > 0`` means a previous
         # attempt of THIS task was cut off by a usage limit and requeued — the
@@ -1149,7 +1205,15 @@ class TaskQueue(_NotifyMixin):
         # can't carry this instead: the retry-isolation reset above wipes
         # uncommitted files by design.
         attempt_failures: list[str] = []
+        # ADR 0007 — set on any attempt whose failure was a DIAL-ABLE gate
+        # finding (browser / adversarial review), with that attempt's result +
+        # diff captured alongside. Reset each attempt so it reflects only the
+        # FINAL attempt at exhaustion, where under `trust` it advises-and-ships.
+        dialable_finding: Optional[tuple[str, str]] = None
+        last_gate_result: Optional[dict] = None
+        last_gate_diff: str = ""
         for attempt in range(attempts):
+            dialable_finding = None
             if attempt > 0 and pre_run_sha:
                 # Retry isolation (#1): rewind the workspace to the clean
                 # per-item base captured above before re-running. Without this
@@ -1279,16 +1343,23 @@ class TaskQueue(_NotifyMixin):
                         if integrity is not None:
                             # gate passed but the change weakened the tests — treat as
                             # a gate failure so it retries with the tampering fed back.
+                            # Always-hard (ADR 0007): the dial never loosens this.
                             last_failure = integrity
                         elif review_fb is not None:
                             # gate + tests fine, but review found a real defect — feed
                             # the issues back through the SAME retry loop as a gate fail.
                             last_failure = review_fb
+                            # ADR 0007: remember this was a DIAL-ABLE gate finding, so
+                            # if it survives every retry the exhaustion path can
+                            # advise-and-ship under `trust` (crash/quota variants
+                            # return earlier and never reach exhaustion).
+                            dialable_finding = ("review", review_fb)
                         elif browser_fb is not None:
                             # gate + tests + review fine, but a UI change was never
                             # exercised in a browser — feed back so the agent adds the
                             # E2E spec and runs it (fail closed, same retry loop).
                             last_failure = browser_fb
+                            dialable_finding = ("browser", browser_fb)
                         elif defer_done:
                             # caller delivers, then settles 'done' WITH pr_url atomically
                             _attach_diff_stats(result, diff)
@@ -1297,6 +1368,11 @@ class TaskQueue(_NotifyMixin):
                             _attach_diff_stats(result, diff)
                             self._store.mark_done(task_id, json.dumps(result))
                             return None
+                        if dialable_finding is not None:
+                            # capture the last dial-able attempt's result+diff for a
+                            # possible trust-mode advise-and-ship at exhaustion below.
+                            last_gate_result = result
+                            last_gate_diff = diff
             # Worker honest-block: the engineer self-reported it cannot finish
             # (missing capability, contradictory/impossible instructions). Fail
             # FAST + CLOSED (never ship, never settle `done` — invariant #186) and
@@ -1397,6 +1473,28 @@ class TaskQueue(_NotifyMixin):
                     f"task-queue: task {task_id} attempt {attempt + 1}/{attempts} failed; "
                     f"retrying with all {len(attempt_failures)} prior failure(s) fed back\n"
                 )
+        # ADR 0007 — advise-and-ship under `trust`. The final attempt failed on a
+        # DIAL-ABLE gate finding (browser / adversarial review) that survived
+        # every retry. Crash / quota / worker-block variants already returned
+        # above, so a finding reaching HERE is a genuine reviewable one — under
+        # `trust` we deliver it with the finding surfaced in the PR body (the
+        # human merge is the backstop) instead of wedging. `strict` (and the
+        # always-hard gates, which never set dialable_finding) fall through to
+        # mark_failed unchanged. Uses the captured last-attempt result+diff.
+        if (
+            dialable_finding is not None
+            and last_gate_result is not None
+            and gate_consequence(dialable_finding[0], strictness) is Consequence.ADVISE
+        ):
+            gate_id, reason = dialable_finding
+            self._record_gate_advisory(parent_goal_id, task_id, gate_id, reason)
+            _attach_gate_advisory(last_gate_result, gate_id, reason)
+            _attach_diff_stats(last_gate_result, last_gate_diff)
+            if defer_done:
+                # caller (_execute) delivers, then settles 'done' with pr_url.
+                return last_gate_result
+            self._store.mark_done(task_id, json.dumps(last_gate_result))
+            return None
         # every attempt failed — escalate.
         suffix = f" (failed after {attempts} attempts)" if attempts > 1 else ""
         self._store.mark_failed(task_id, f"{last_failure}{suffix}")

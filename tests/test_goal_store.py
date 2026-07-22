@@ -56,6 +56,57 @@ def test_create_goal_rejects_unparseable_cadence_at_creation(tmp_path):
     assert not store.exists("badcad")
 
 
+def test_create_goal_persists_and_defaults_strictness(tmp_path):
+    # ADR 0007: strictness round-trips through goal.yaml; default is "trust".
+    store = GoalStore(tmp_path)
+    store.create_goal("g_strict", objective="x", workspace_dir="/ws", strictness="strict")
+    assert store.load_goal("g_strict").strictness == "strict"
+    store.create_goal("g_default", objective="x", workspace_dir="/ws")
+    assert store.load_goal("g_default").strictness == "trust"
+
+
+def test_set_strictness_mutates_one_field_and_preserves_the_rest(tmp_path):
+    # ADR 0007: the narrow single-field toggle rewrites strictness and nothing
+    # else — objective/cadence/backlog survive the atomic goal.yaml rewrite.
+    store = GoalStore(tmp_path)
+    store.create_goal(
+        "g", objective="keep me", workspace_dir="/ws", cadence="6h",
+        backlog=["a", "b"], done_when="dw",
+    )
+    g = store.set_strictness("g", "strict")
+    assert g.strictness == "strict"
+    reloaded = store.load_goal("g")
+    assert reloaded.strictness == "strict"
+    assert reloaded.objective == "keep me"
+    assert reloaded.cadence == "6h"
+    assert reloaded.backlog == ["a", "b"]
+    assert reloaded.done_when == "dw"
+    # and it flips back
+    assert store.set_strictness("g", "trust").strictness == "trust"
+
+
+def test_set_strictness_rejects_bad_value(tmp_path):
+    store = GoalStore(tmp_path)
+    store.create_goal("g", objective="x", workspace_dir="/ws")
+    with pytest.raises(ValueError, match="want 'trust' or 'strict'"):
+        store.set_strictness("g", "urgent")
+    # the goal is untouched (still the default)
+    assert store.load_goal("g").strictness == "trust"
+
+
+def test_load_goal_defaults_strictness_to_trust_when_absent(tmp_path):
+    # A legacy goal.yaml written before the field must load advisory ("trust"),
+    # never wedge — mirrors the mode/stub_acceptable legacy-load contract.
+    import yaml
+
+    d = tmp_path / "legacy-strict"
+    d.mkdir()
+    (d / "goal.yaml").write_text(
+        yaml.safe_dump({"objective": "x", "workspace_dir": "/ws", "cadence": "1d"})
+    )
+    assert GoalStore(tmp_path).load_goal("legacy-strict").strictness == "trust"
+
+
 def test_create_goal_persists_stub_acceptable(tmp_path):
     # The owner's explicit opt-in for which tools may ship as stubs must
     # survive a round-trip through yaml — the done-gate reads it on every

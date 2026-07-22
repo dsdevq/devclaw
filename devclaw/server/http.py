@@ -428,6 +428,34 @@ async def goal_resume(request: Request) -> Response:
     return JSONResponse(result)
 
 
+@mcp.custom_route("/goals/{goal_id}/strictness", methods=["POST"])
+async def goal_strictness(request: Request) -> Response:
+    """Console-facing strictness toggle (ADR 0007). Body is JSON
+    `{"strictness": "trust"|"strict"}`. Wraps goal_service.set_strictness — the
+    same entrypoint the MCP tool uses. `trust` = dial-able gate failures ship
+    with a caveat surfaced in the PR; `strict` = they block. A bad value or a
+    missing field returns 400 rather than a silent no-op."""
+    goal_id = request.path_params["goal_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    value = (body or {}).get("strictness")
+    if value not in ("trust", "strict"):
+        return JSONResponse(
+            {"error": "strictness_required",
+             "hint": "POST {\"strictness\": \"trust\"|\"strict\"}"},
+            status_code=400,
+        )
+    try:
+        result = goals.set_strictness(goal_id, value)
+    except KeyError:
+        return JSONResponse({"error": "not_found", "id": goal_id}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": "bad_strictness", "detail": str(exc)}, status_code=400)
+    return JSONResponse(result)
+
+
 @mcp.custom_route("/goals/{goal_id}/answer", methods=["POST"])
 async def goal_answer(request: Request) -> Response:
     """Console-facing Answer button for a goal blocked in firming. Body is JSON
@@ -970,6 +998,7 @@ async def goal_json(request: Request) -> Response:
             "phaseLabel": _phase_label(phase),
             "lifecycle": g.get("lifecycle"),
             "direction": g.get("direction"),
+            "strictness": g.get("strictness", "trust"),
             "actionsDispatched": g.get("actions_dispatched", 0),
             "dispatchCap": dispatch_cap,
             "inFlight": g.get("in_flight"),

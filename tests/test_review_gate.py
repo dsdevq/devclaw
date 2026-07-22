@@ -362,12 +362,41 @@ async def test_persistent_request_changes_escalates(store, monkeypatch):
         store, runner=_ok_gate_runner(calls),
         reviewer=_reviewer(["dead code", "dead code"]),  # never approves
     )
-    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest")
+    # strictness="strict": this asserts the review gate ESCALATES (fails) after
+    # exhausting retries. The default is now "trust" (advisory, ADR 0007), under
+    # which a persistent finding ships-with-advisory instead — covered separately.
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g", verify_cmd="pytest", strictness="strict")
     await q.drain()
     t = store.get_task(tid)
     assert t.status == "failed"
     assert len(calls) == 2  # 1 + 1 retry
     assert "dead code" in t.error and "failed after 2 attempts" in t.error
+
+
+async def test_trust_ships_persistent_review_finding_with_advisory(store, monkeypatch):
+    # ADR 0007: under the default "trust" dial, a review finding that survives
+    # every retry ADVISES-and-ships instead of escalating — the change delivers
+    # with the finding recorded loud (problems catalog, recovered) and carried
+    # into the result → PR body. The converse of the strict-escalates test.
+    import json
+    monkeypatch.setattr(task_queue, "TASK_MAX_RETRIES", 1)
+    calls: list = []
+    q = TaskQueue(
+        store, runner=_ok_gate_runner(calls),
+        reviewer=_reviewer(["dead code", "dead code"]),  # never approves
+    )
+    tid = q.submit(kind="implement_feature", workspace_dir="/ws", goal="g",
+                   verify_cmd="pytest", strictness="trust")
+    await q.drain()
+    t = store.get_task(tid)
+    assert t.status == "done"          # shipped, not failed
+    assert len(calls) == 2             # still retried once before advising
+    advisories = json.loads(t.result_json).get("gate_advisories") or []
+    assert advisories and advisories[0]["gate"] == "review"
+    assert "dead code" in advisories[0]["reason"]
+    # recorded loud + countable, as a recovered "gate" problem (carried on past it)
+    gate_rows = [p for p in store.list_problems() if p.get("category") == "gate"]
+    assert gate_rows and gate_rows[0]["count"] >= 1
 
 
 async def test_approve_ships_first_try(store, monkeypatch):

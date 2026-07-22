@@ -488,6 +488,7 @@ class GoalService:
         done_when: str = "", backlog: Optional[list[str]] = None,
         spec: str = "",
         mode: str = "long_lived",
+        strictness: str = "trust",
     ) -> dict:
         # Chef admission ("verified on all sides"). Goals that fail structural
         # checks are REJECTED with a structured condition list — the caller
@@ -497,6 +498,8 @@ class GoalService:
 
         if mode not in ("long_lived", "one_shot"):
             raise ValueError(f"unknown goal mode {mode!r} — expected 'long_lived' or 'one_shot'")
+        if strictness not in ("trust", "strict"):
+            raise ValueError(f"unknown strictness {strictness!r} — expected 'trust' or 'strict'")
 
         admission = _verify(
             objective=objective, workspace_dir=workspace_dir, done_when=done_when,
@@ -508,7 +511,7 @@ class GoalService:
         goal = self._goal_store.create_goal(
             goal_id, objective=objective, workspace_dir=workspace_dir, cadence=cadence,
             repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
-            done_when=done_when, backlog=backlog, mode=mode,
+            done_when=done_when, backlog=backlog, mode=mode, strictness=strictness,
         )
         # The waiter may have grilled scope before filing the order — persist the
         # spec it landed on so the evaluator judges done against the shared contract.
@@ -600,6 +603,7 @@ class GoalService:
             "workspace_dir": g.workspace_dir,
             "backlog": g.backlog,
             "mode": g.mode,
+            "strictness": g.strictness,
             "phase": s.phase,
             "lifecycle": s.lifecycle or "executing",
             "next": s.next,
@@ -738,6 +742,7 @@ class GoalService:
                 "progress": {"last_at": s.last_progress_at, "stalled": s.no_progress_notified},
                 "direction": s.last_eval_verdict,
                 "actions_dispatched": s.actions_dispatched,
+                "strictness": g.strictness,
                 "dispatch_hold": hold,
             })
         return out
@@ -771,6 +776,20 @@ class GoalService:
             )
         self.poke()
         return {"goal_id": goal_id, "steered": True, "message": message}
+
+    def set_strictness(self, goal_id: str, strictness: str) -> dict:
+        """Flip the goal's gate strictness dial (ADR 0007) — the verb behind the
+        console toggle, the HTTP API, and the MCP tool. A narrow single-field
+        mutation (not a contract patch): dial-able gate failures either block
+        (``strict``) or ship-with-a-caveat (``trust``). Applies to future
+        dispatches. Raises ValueError on a bad value, KeyError on unknown goal.
+        """
+        if not self._goal_store.exists(goal_id):
+            raise KeyError(goal_id)
+        g = self._goal_store.set_strictness(goal_id, strictness)
+        self._goal_store.append_log(goal_id, f"strictness set to {strictness}")
+        self.poke()
+        return {"goal_id": goal_id, "strictness": g.strictness}
 
     def resume_goal(self, goal_id: str) -> dict:
         """Recovery verb: "the blocker is cleared — re-attempt the SAME

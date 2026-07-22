@@ -36,11 +36,13 @@ def _req(path_params, body=None):
 class _FakeGoals:
     """Minimal GoalService stand-in — records calls, raises injected errors."""
 
-    def __init__(self, resume=None, answer=None):
+    def __init__(self, resume=None, answer=None, strictness=None):
         self._resume = resume
         self._answer = answer
+        self._strictness = strictness
         self.resume_calls: list = []
         self.answer_calls: list = []
+        self.strictness_calls: list = []
 
     def resume_goal(self, goal_id):
         self.resume_calls.append(goal_id)
@@ -53,6 +55,12 @@ class _FakeGoals:
         if isinstance(self._answer, Exception):
             raise self._answer
         return self._answer
+
+    def set_strictness(self, goal_id, strictness):
+        self.strictness_calls.append((goal_id, strictness))
+        if isinstance(self._strictness, Exception):
+            raise self._strictness
+        return self._strictness
 
 
 def _call(fn, req):
@@ -119,4 +127,31 @@ def test_answer_unknown_goal_is_404(monkeypatch):
     from devclaw.server import http as http_mod
     monkeypatch.setattr(http_mod, "goals", _FakeGoals(answer=KeyError("g")))
     status, body = _call(http_mod.goal_answer, _req({"goal_id": "g"}, {"answers": {"u1": "y"}}))
+    assert status == 404 and body["error"] == "not_found"
+
+
+# ── strictness (ADR 0007) ────────────────────────────────────────────────────
+
+def test_strictness_forwards_valid_value_to_service(monkeypatch):
+    from devclaw.server import http as http_mod
+    fake = _FakeGoals(strictness={"goal_id": "g", "strictness": "strict"})
+    monkeypatch.setattr(http_mod, "goals", fake)
+    status, body = _call(http_mod.goal_strictness, _req({"goal_id": "g"}, {"strictness": "strict"}))
+    assert status == 200 and body["strictness"] == "strict"
+    assert fake.strictness_calls == [("g", "strict")]
+
+
+def test_strictness_bad_value_is_400_without_calling_service(monkeypatch):
+    from devclaw.server import http as http_mod
+    fake = _FakeGoals(strictness={"goal_id": "g", "strictness": "trust"})
+    monkeypatch.setattr(http_mod, "goals", fake)
+    status, body = _call(http_mod.goal_strictness, _req({"goal_id": "g"}, {"strictness": "urgent"}))
+    assert status == 400 and body["error"] == "strictness_required"
+    assert fake.strictness_calls == []  # rejected before the service is touched
+
+
+def test_strictness_unknown_goal_is_404(monkeypatch):
+    from devclaw.server import http as http_mod
+    monkeypatch.setattr(http_mod, "goals", _FakeGoals(strictness=KeyError("g")))
+    status, body = _call(http_mod.goal_strictness, _req({"goal_id": "g"}, {"strictness": "strict"}))
     assert status == 404 and body["error"] == "not_found"

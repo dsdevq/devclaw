@@ -72,7 +72,13 @@ spawn containers itself — it goes through the engine).
 Recent work made the loop fail **loud, not silent**. Match it when you add code:
 
 - **Verification fails CLOSED.** A quality-gate crash is **not** an approval — an
-  exception in the gate settles the task failed (#186).
+  exception in the gate settles the task failed (#186). *Recalibrated by the gate
+  strictness dial (ADR 0007), not repealed:* the two review-shaped gates (browser-E2E,
+  adversarial review) are dial-able — under a goal's default `trust` a surviving
+  finding advises-and-ships (loud + surfaced in the PR, human merge is the backstop)
+  instead of wedging; under `strict` they fail closed. The verify/test-integrity/done
+  gates stay always-hard, and every *unreviewable* case (crash/quota) still fails closed
+  in both modes — the #186 line above is untouched.
 - **An unreviewable change fails closed *and fast*, not forever.** When the review gate
   can't produce a verdict at all (a crash / non-JSON response on an oversized diff), the
   task fails **closed** (never ships — #186 holds) but **without an agent retry**:

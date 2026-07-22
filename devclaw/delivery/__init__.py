@@ -144,12 +144,16 @@ async def _agent_commit_msg(workspace_dir: str, base: str | None) -> tuple[str, 
 
 def _pr_body(
     goal: str, task_id: str, verify: dict | None, files_stat: str | None,
-    *, changes: str | None = None,
+    *, changes: str | None = None, advisories: list | None = None,
 ) -> str:
     """A PR body a reviewer can actually use. When the engineer wrote its own commit
     (``changes``), lead with what CHANGED and keep the (long) task instruction as a
     collapsed Ticket; otherwise fall back to the instruction as What. Always carries
-    the gate verdict, diffstat, and the honest green-gate-≠-correct caveat."""
+    the gate verdict, diffstat, and the honest green-gate-≠-correct caveat.
+
+    ``advisories`` (ADR 0007): trust-mode dial-able gate findings this change
+    SHIPPED past rather than blocked on. Rendered as a loud section so the human
+    sees them at the merge boundary — the backstop for advisory gates."""
     if changes is not None:
         parts = ["## Changes", changes.strip() or "(see commit)", ""]
         parts += ["<details><summary>📋 Ticket (what was asked + why)</summary>", "",
@@ -164,6 +168,19 @@ def _pr_body(
         else:
             verdict = f"Gate `{cmd}` did **not** pass — see the task error."
         parts += ["## Verification", verdict, ""]
+    if advisories:
+        parts += ["## ⚠️ Advisory — shipped under `trust`, review before merging"]
+        parts += [
+            "These gates flagged an issue but did not block delivery (the goal's "
+            "strictness dial is `trust`, ADR 0007). The merge is the enforcement "
+            "point — read these before approving:",
+            "",
+        ]
+        for a in advisories:
+            gate = (a.get("gate") if isinstance(a, dict) else None) or "gate"
+            reason = (a.get("reason") if isinstance(a, dict) else str(a)) or ""
+            parts += [f"- **{gate}**: {reason.strip()}"]
+        parts += [""]
     if files_stat and files_stat.strip():
         parts += ["## Files changed", "```", files_stat.strip(), "```", ""]
     parts += [
@@ -267,6 +284,7 @@ async def deliver_change(
     kind: str | None = None,
     verify: dict | None = None,
     title: str | None = None,
+    advisories: list | None = None,
 ) -> dict:
     """Commit the workspace's change to a branch and (best-effort) push + open a PR.
     Returns a verdict dict; never raises. ``kind`` shapes the conventional-commit
@@ -419,7 +437,7 @@ async def deliver_change(
         rc, out = await _run(
             "gh", "pr", "create", "--head", branch,
             "--title", pr_title,
-            "--body", _pr_body(goal, task_id, verify, files_stat, changes=changes),
+            "--body", _pr_body(goal, task_id, verify, files_stat, changes=changes, advisories=advisories),
             cwd=workspace_dir,
         )
         url = _extract_pr_url(out)

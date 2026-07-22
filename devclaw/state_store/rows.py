@@ -94,6 +94,13 @@ class Task:
     #: leftovers (closeloop-bench b6d53bbd, 2026-07-19). None for rows that
     #: predate the column or tasks that haven't run.
     pre_run_sha: Optional[str] = None
+    #: the goal's gate strictness dial SNAPSHOTTED at dispatch (ADR 0007), set
+    #: from Goal.strictness via the goal dispatch path. The settle cascade reads
+    #: it to decide a dial-able gate failure's consequence: "strict" blocks,
+    #: "trust" advises-and-ships. Snapshotting on the row means a mid-flight
+    #: dial flip applies to the NEXT dispatch, not a task already running.
+    #: Defaulted so existing rows/tests read as advisory ("trust").
+    strictness: str = "trust"
 
     def to_dict(self) -> dict:
         return {
@@ -142,6 +149,10 @@ class Program:
     #: legacy behavior); when set, child tasks run this after the agent
     #: finishes and only succeed on exit 0.
     verify_cmd: Optional[str] = None
+    #: Gate strictness dial the decomposer's child tasks inherit (ADR 0007),
+    #: snapshotted from Goal.strictness at dispatch. Defaulted to advisory
+    #: ("trust") so legacy programs/tests are unaffected.
+    strictness: str = "trust"
     #: Durable goal-owner pointer (2026-07-10), mirroring tasks.parent_goal_id.
     #: Without it a goal whose STATUS.md in_flight ref is lost (crash mid-write)
     #: has NO way to rediscover its own running/failed program — the 2026-07-09
@@ -227,6 +238,9 @@ def _row_to_task(r: sqlite3.Row) -> Task:
         ),
         plan_key=r["plan_key"] if "plan_key" in r.keys() else None,
         pre_run_sha=r["pre_run_sha"] if "pre_run_sha" in r.keys() else None,
+        strictness=(
+            r["strictness"] if "strictness" in r.keys() and r["strictness"] else "trust"
+        ),
     )
 
 
@@ -244,6 +258,9 @@ def _row_to_program(r: sqlite3.Row) -> Program:
         verify_cmd=r["verify_cmd"] if "verify_cmd" in r.keys() else None,
         parent_goal_id=(
             r["parent_goal_id"] if "parent_goal_id" in r.keys() else None
+        ),
+        strictness=(
+            r["strictness"] if "strictness" in r.keys() and r["strictness"] else "trust"
         ),
     )
 
