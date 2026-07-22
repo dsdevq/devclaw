@@ -354,6 +354,26 @@ class GoalStore(GoalStatusMixin, GoalContentMixin):
             strictness=("strict" if raw.get("strictness") == "strict" else "trust"),
         )
 
+    def set_strictness(self, goal_id: str, strictness: str) -> Goal:
+        """Flip a goal's gate strictness dial (ADR 0007).
+
+        A narrow, single-field mutation — NOT a generic contract patch. Strictness
+        is a mode toggle (the *consequence* of a gate verdict), the one goal field
+        O1 blessed as steerable, so this does not violate goals-are-durable. Every
+        other key in goal.yaml is preserved (raw load → update one key → atomic
+        rewrite). Applies to FUTURE dispatches; anything already in flight keeps
+        the value it was dispatched with.
+        """
+        if strictness not in ("trust", "strict"):
+            raise ValueError(f"bad strictness {strictness!r}; want 'trust' or 'strict'")
+        path = self._dir(goal_id) / "goal.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"goal {goal_id!r} has no goal.yaml")
+        raw = yaml.safe_load(path.read_text()) or {}
+        raw["strictness"] = strictness
+        self._write_atomic(goal_id, "goal.yaml", yaml.safe_dump(raw, sort_keys=False))
+        return self.load_goal(goal_id)
+
     # ---- helpers -----------------------------------------------------------
 
     def cadence_due(self, goal: Goal, status: GoalStatus) -> bool:

@@ -161,6 +161,9 @@ export interface GoalDetail {
   phaseLabel: string;
   lifecycle: string | null;
   direction: { verdict: Verdict; at: string; note: string } | null;
+  /** Gate strictness dial (ADR 0007): "trust" ships dial-able gate failures
+   *  with a caveat; "strict" blocks them. */
+  strictness: "trust" | "strict";
   actionsDispatched: number;
   dispatchCap: number;
   inFlight: { tool: string; id: string; is_done_check: boolean } | null;
@@ -423,6 +426,23 @@ export async function steerGoal(id: string, message: string): Promise<{ steered:
   if (!r.ok) {
     const err = await r.text();
     throw new Error(`steer ${id}: ${r.status} ${err}`);
+  }
+  return r.json();
+}
+
+export async function setGoalStrictness(
+  id: string,
+  strictness: "trust" | "strict",
+): Promise<{ goal_id: string; strictness: string }> {
+  const r = await fetch(`/goals/${encodeURIComponent(id)}/strictness${tokenQS()}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ strictness }),
+  });
+  if (r.status === 404) throw new Error(`goal not found: ${id}`);
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`strictness ${id}: ${r.status} ${err}`);
   }
   return r.json();
 }

@@ -631,6 +631,7 @@ async def create_goal(
     open_pr: bool = True,
     spec: str = "",
     mode: str = "long_lived",
+    strictness: str = "trust",
 ) -> str:
     """Register a goal that DevClaw drives: on each heartbeat it plans, dispatches
     to the engine, records what shipped, and only closes when a grounded review
@@ -655,6 +656,8 @@ async def create_goal(
         raise ToolError("create_goal requires goal_id")
     if mode not in ("long_lived", "one_shot"):
         raise ToolError("create_goal mode must be 'long_lived' or 'one_shot'")
+    if strictness not in ("trust", "strict"):
+        raise ToolError("create_goal strictness must be 'trust' or 'strict'")
     # objective + workspace_dir are checked inside admission and surfaced as
     # structured conditions — don't duplicate them here.
     from ..goal.admission import GoalAdmissionRejected
@@ -665,7 +668,7 @@ async def create_goal(
                 goal_id, objective=objective, workspace_dir=workspace_dir,
                 done_when=done_when, backlog=backlog, cadence=cadence,
                 repo_url=repo_url, verify_cmd=verify_cmd, open_pr=open_pr,
-                spec=spec, mode=mode,
+                spec=spec, mode=mode, strictness=strictness,
             ),
             indent=2,
         )
@@ -791,6 +794,29 @@ async def resume_goal(goal_id: str) -> str:
         return json.dumps(goals.resume_goal(goal_id), indent=2)
     except KeyError:
         raise ToolError(f"unknown goal_id: {goal_id}")
+
+
+@mcp.tool
+async def set_goal_strictness(goal_id: str, strictness: str) -> str:
+    """Set a goal's gate strictness dial (ADR 0007). ``strict`` = a dial-able gate
+    that fails BLOCKS the goal (fail closed). ``trust`` (the default) = a dial-able
+    gate that fails is recorded loud + surfaced in the PR body, but the change
+    SHIPS — the human merge is the backstop. Only the two review-shaped gates
+    (browser-E2E, adversarial review) obey the dial; the evidence-integrity gates
+    (test-integrity, delivery-trust, done-gate) stay hard in BOTH modes.
+
+    A narrow single-field toggle, NOT a contract patch — objective/done_when/
+    backlog are untouched. Applies to future dispatches; in-flight work keeps the
+    value it was dispatched with. Reserve ``strict`` for goals whose output you
+    actually depend on."""
+    if not goal_id or not strictness:
+        raise ToolError("set_goal_strictness requires goal_id and strictness")
+    try:
+        return json.dumps(goals.set_strictness(goal_id, strictness), indent=2)
+    except KeyError:
+        raise ToolError(f"unknown goal_id: {goal_id}")
+    except ValueError as e:
+        raise ToolError(str(e))
 
 
 @mcp.tool
