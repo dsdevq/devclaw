@@ -1,14 +1,28 @@
 # Proposal — Ops-agent ⇄ continuous-eval: one problem record, demarcated roles
 
-- **Status:** **DRAFT** — written 2026-07-22, right after the ADR 0006
-  cycle-report shipped and Denys asked whether the ops-agent overlaps it.
-  Direction NOT locked; the `[OPEN]` clarify step (§4) is mandatory before LOCKED.
-- **Date opened:** 2026-07-22 · **Authors:** Denys + Claude
+- **Status:** **ABANDONED (2026-07-22)** — the core direction below (route the
+  ops-agent's incidents INTO devclaw's `problems` catalog) is **backwards** and
+  Denys rejected it the same day. The ops-agent was designed to be a **generic,
+  cross-project watchdog**; consolidating it into devclaw subordinates a
+  fleet-level tool to one of its targets (violates *"software development is the
+  first domain, not the definition"*). The overlap analysis in §1–§2 is kept as
+  the useful part; the prescription in §3 is the mistake.
+  **The real cut — recorded as the north star, NOT built:** there are two *types*
+  of watchdog, and they must stay separate — **infra-ops** (the ops-agent's true
+  job: disk / memory / containers / deploys / auth — generic across projects and
+  machines) vs the **product / dev-loop** (devclaw: problem → goal → fix →
+  evaluate, incl. the mission-control "issue → fix → evaluate" pattern). Today the
+  ops-agent has *drifted* into the dev-loop — its live detectors O1 (no-progress)
+  and O3 (verifying-stall) watch **goal progress**, not infra, and its only action
+  (`evaluate_goal`) pokes a devclaw goal; O2/O4 never fire. The fix is a
+  **subtraction**: pull the ops-agent back to pure infra (its goal-poking collapses
+  into devclaw's own no-progress auto-heal), and generalize it as an *infra*
+  watchdog only when a second target lands. No code now. Superseded by that
+  understanding; no replacement proposal is scheduled.
+- **Date opened:** 2026-07-22 · **Abandoned:** 2026-07-22 · **Authors:** Denys + Claude
 - **Relates to:** [ADR 0006](../decisions/0006-continuous-eval-projection.md)
-  (the cycle report + `eval_outcomes`/`problems` read path) and
-  [ADR 0004](../decisions/0004-eval-workbench.md) (the workbench). Does NOT
-  reopen either; it consolidates a record that now spans both plus an external
-  agent.
+  (the cycle report — devclaw's own self-report, unaffected) and
+  [ADR 0004](../decisions/0004-eval-workbench.md) (the workbench). Neither reopened.
 
 ## 1. Context — two things that look like one
 
