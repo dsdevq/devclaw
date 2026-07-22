@@ -195,3 +195,76 @@ class ProblemsMixin:
         with self._lock:
             row = self._db.execute("SELECT COUNT(*) AS n FROM problems").fetchone()
         return int(row["n"])
+
+    # ---- self-issue-filing Stage 1 accessors --------------------------------
+    # Thin reads/writes over `problems` + `problem_cycles`; all the recurrence /
+    # age-out / label decisions live as pure functions in goal/self_issue.py so
+    # they unit-test without a DB. Every write rides the SAME single-writer lock
+    # as record_problem — no second connection.
+
+    _PROBLEM_COLS = (
+        "fingerprint, category, kind, summary, sample_message, count, "
+        "recovered_count, terminal_count, first_seen_ms, last_seen_ms, "
+        "last_goal_id, last_task_id, issue_number, issue_state"
+    )
+
+    def mark_problem_cycle(self, fingerprint: str, cycle_key: str) -> None:
+        """Record that ``fingerprint`` was active in run-cycle ``cycle_key``.
+        Idempotent (PK ``(fingerprint, cycle_key)`` + ``OR IGNORE``): a burst of
+        occurrences in one cycle adds exactly one membership row, so
+        :meth:`problem_cycle_count` measures cross-cycle SURVIVAL, not volume."""
+        with self._lock:
+            self._db.execute(
+                "INSERT OR IGNORE INTO problem_cycles (fingerprint, cycle_key) "
+                "VALUES (?, ?)",
+                (fingerprint, cycle_key),
+            )
+            self._commit()
+
+    def problem_cycle_count(self, fingerprint: str) -> int:
+        """Distinct run-cycles this problem has been active in — the recurrence
+        signal that gates filing (O1: ``>= 3``)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(DISTINCT cycle_key) AS n FROM problem_cycles "
+                "WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+        return int(row["n"])
+
+    def problems_active_in_window(self, start_ms: int, end_ms: int) -> list[dict]:
+        """Problems whose LAST occurrence falls in ``[start_ms, end_ms]`` — i.e.
+        the ones seen during the just-closed cycle window. Read-only SELECT."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._PROBLEM_COLS} FROM problems "
+                "WHERE last_seen_ms BETWEEN ? AND ? "
+                "ORDER BY count DESC, last_seen_ms DESC",
+                (start_ms, end_ms),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def open_issue_problems(self) -> list[dict]:
+        """Problems that currently have an OPEN self-filed issue — the age-out
+        pass's candidate set (close the ones gone quiet)."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._PROBLEM_COLS} FROM problems "
+                "WHERE issue_state = 'open'"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_problem_issue(
+        self, fingerprint: str, *, issue_number: Optional[int], issue_state: Optional[str]
+    ) -> None:
+        """Persist the GitHub issue linkage/state for a problem (single writer).
+        ``issue_number`` NULL only before first file; ``issue_state`` tracks the
+        last known GitHub state ('open'/'closed') so recurrence reopens and
+        age-out closes idempotently."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE problems SET issue_number = ?, issue_state = ? "
+                "WHERE fingerprint = ?",
+                (issue_number, issue_state, fingerprint),
+            )
+            self._commit()

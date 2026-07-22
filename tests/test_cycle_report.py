@@ -272,6 +272,38 @@ async def test_cycle_report_fires_once_at_window_close_and_is_clean_when_no_wedg
 
 
 @pytest.mark.asyncio
+async def test_self_issue_filing_fires_once_per_cycle_past_the_idempotency_gate(
+    tmp_path, db, monkeypatch
+):
+    """Placement guard: self-issue filing rides the SAME cycle-close edge — it
+    must fire ONCE per cycle and only PAST the ``cycle_report_exists``
+    short-circuit, never per tick (the zero-token guard). Pins the call site so a
+    future refactor can't hoist it above the idempotency gate unnoticed."""
+    from devclaw.goal import self_issue as _si
+
+    fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
+    monkeypatch.setattr("devclaw.goal.service._now_ms", lambda: fixed_now)
+
+    calls: list[str] = []
+
+    async def _spy(store, **kw):
+        calls.append(kw["cycle_key"])
+        return _si.SelfIssueResult()
+
+    monkeypatch.setattr("devclaw.goal.self_issue.run_self_issue_filing", _spy)
+
+    svc, planner, evaluator = _svc(tmp_path, db, RecordingNotifier())
+
+    await svc._maybe_emit_cycle_report()
+    assert len(calls) == 1                              # fired once, at the close edge
+    assert planner.calls == 0 and evaluator.calls == 0  # zero-token edge
+
+    # Second wakeup same cycle: cycle_report_exists short-circuits BEFORE filing.
+    await svc._maybe_emit_cycle_report()
+    assert len(calls) == 1                              # not re-run — past the gate
+
+
+@pytest.mark.asyncio
 async def test_cycle_report_wedge_marks_night_unclean(tmp_path, db, monkeypatch):
     fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
     monkeypatch.setattr("devclaw.goal.service._now_ms", lambda: fixed_now)

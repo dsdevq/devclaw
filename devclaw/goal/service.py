@@ -477,6 +477,26 @@ class GoalService:
             # Log-only path: the report still exists in the table; surface it so a
             # notifier-less run still leaves a trace.
             sys.stderr.write(f"goal-layer: cycle report {cycle_key} (log-only):\n{report.summary}\n")
+
+        # Self-issue-filing Stage 1 (docs/proposals/self-issue-filing.md): at this
+        # SAME once-per-cycle edge (past the cycle_report_exists idempotency gate,
+        # so it fires once per cycle, never per tick), turn recurring problems into
+        # GitHub issues on the devclaw repo and age out stale ones. ZERO LLM.
+        # Env-gated (DEVCLAW_SELF_REPO unset ⇒ no-op, shells nothing — the default
+        # and every test path), and best-effort: a GitHub hiccup logs and is
+        # swallowed here, it never wedges the cycle edge (fail-loud-not-fatal).
+        try:
+            from . import self_issue as _si
+
+            si = await _si.run_self_issue_filing(
+                self._store, cycle_key=cycle_key,
+                start_ms=start_ms, end_ms=end_ms, now_ms=now,
+            )
+            line = si.report_line()
+            if line:
+                sys.stderr.write(f"goal-layer: cycle {cycle_key} {line}\n")
+        except Exception as exc:  # noqa: BLE001 — filing never fails the cycle edge
+            sys.stderr.write(f"goal-layer: self-issue filing failed: {exc}\n")
         return cycle_key
 
     # ---- steer / observe surface (wrapped by MCP tools) --------------------
