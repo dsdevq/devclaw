@@ -4,17 +4,19 @@
     (params: limit, source). Pins that it returns the store's rows newest-first,
     honours the source filter, and 400s (never silently mis-filters) on bad
     input.
-  * ``GET /evals/nights.json`` — read-only ``night_reports`` list. Pins the
-    DEFENSIVE contract: PR3 may ship ahead of the night-report tranche (PR2),
-    so a missing ``night_reports`` table degrades to ``[]``, never a 500; and
-    when the table IS present the rows come back.
+  * ``GET /evals/nights.json`` — read-only ``night_reports`` list. Pins that an
+    empty table returns ``[]`` (never a 500) and that recorded nights come back;
+    the store read re-raises a real ``OperationalError`` (locked/corrupt DB)
+    rather than masking it as an empty clean-night list.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 
+import pytest
 from starlette.requests import Request
 
 from devclaw.state_store import StateStore
@@ -92,9 +94,10 @@ def test_evals_outcomes_endpoint_rejects_bad_limit(tmp_path, monkeypatch):
 
 # ── /evals/nights.json ──────────────────────────────────────────────────────
 
-def test_evals_nights_endpoint_empty_when_table_absent(tmp_path, monkeypatch):
+def test_evals_nights_endpoint_empty_when_no_reports(tmp_path, monkeypatch):
     from devclaw.server import http as http_mod
-    # A fresh StateStore does NOT create night_reports (PR2 owns that DDL).
+    # night_reports is bootstrapped by StateStore (PR2) but empty until a
+    # window closes; the endpoint returns [] rather than 500ing.
     store = _store(tmp_path)
     monkeypatch.setattr(http_mod, "store", store)
     status, body = _get(http_mod.evals_nights_json)
@@ -104,29 +107,30 @@ def test_evals_nights_endpoint_empty_when_table_absent(tmp_path, monkeypatch):
 def test_evals_nights_endpoint_returns_rows_when_table_present(tmp_path, monkeypatch):
     from devclaw.server import http as http_mod
     store = _store(tmp_path)
-    # Simulate the PR2 migration having landed: create the table + one row.
-    store._db.execute(
-        """
-        CREATE TABLE night_reports (
-            night_date      TEXT PRIMARY KEY,
-            window_start_ms INTEGER NOT NULL,
-            window_end_ms   INTEGER NOT NULL,
-            clean           INTEGER NOT NULL,
-            wedges_json     TEXT NOT NULL,
-            pauses_json     TEXT NOT NULL,
-            summary         TEXT NOT NULL,
-            sent_at         INTEGER,
-            created_at      INTEGER NOT NULL
-        )
-        """
+    # Record a night via PR2's single-writer API (not a hand-rolled CREATE —
+    # StateStore already owns the DDL).
+    store.record_night_report(
+        night_date="2026-07-21", window_start_ms=1, window_end_ms=2,
+        clean=True, wedges_json="[]", pauses_json="[]", summary="clean night",
+        sent_at=3,
     )
-    store._db.execute(
-        "INSERT INTO night_reports (night_date, window_start_ms, window_end_ms, "
-        " clean, wedges_json, pauses_json, summary, sent_at, created_at) "
-        "VALUES ('2026-07-21', 1, 2, 1, '[]', '[]', 'clean night', 3, 4)",
-    )
-    store._db.commit()
     monkeypatch.setattr(http_mod, "store", store)
     status, body = _get(http_mod.evals_nights_json)
     assert status == 200 and len(body) == 1
     assert body[0]["night_date"] == "2026-07-21" and body[0]["clean"] == 1
+
+
+def test_list_night_reports_reraises_real_operational_error_not_missing_table(tmp_path):
+    """The defensive catch degrades to [] ONLY for a genuinely-absent table —
+    a real fault (locked/corrupt DB, an OperationalError that is NOT
+    ``no such table``) must surface loudly, never read as an empty clean-night
+    list (loud-failure-over-silent-degradation)."""
+    store = _store(tmp_path)
+
+    class _Boom:
+        def execute(self, *a, **k):
+            raise sqlite3.OperationalError("database is locked")
+
+    store._db = _Boom()
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        store.list_night_reports(limit=10)
