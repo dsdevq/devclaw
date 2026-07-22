@@ -535,6 +535,51 @@ def _env_var_catalog() -> list[dict]:
     return rows
 
 
+# ---- Evals projection (ADR 0006) ------------------------------------------
+# Read-only JSON over the eval_outcomes projection + the cycle_reports table.
+# Un-prefixed `.json` data-endpoint convention (like /config/env.json,
+# /projects.json, /control.json) — NOT the contract's illustrative
+# `/api/evals/...`. The console Evals tab reads these.
+
+_EVALS_JSON_DEFAULT_LIMIT = 100
+_EVALS_JSON_MAX_LIMIT = 1000
+
+
+def _evals_limit(request: Request) -> tuple[int, Response | None]:
+    try:
+        limit = int(request.query_params.get("limit", _EVALS_JSON_DEFAULT_LIMIT))
+    except (TypeError, ValueError):
+        return 0, JSONResponse({"error": "bad_limit"}, status_code=400)
+    if limit <= 0:
+        return 0, JSONResponse({"error": "bad_limit"}, status_code=400)
+    return min(limit, _EVALS_JSON_MAX_LIMIT), None
+
+
+@mcp.custom_route("/evals/outcomes.json", methods=["GET"])
+async def evals_outcomes_json(request: Request) -> Response:
+    """Recent ``eval_outcomes`` projection rows (ADR 0006), newest settle first.
+    Params: ``limit`` (default 100, max 1000), ``source`` (``live``|``basket``).
+    Read-only; delegates the SELECT to the store (PR1's read method)."""
+    limit, err = _evals_limit(request)
+    if err is not None:
+        return err
+    source = request.query_params.get("source") or None
+    if source not in (None, "live", "basket"):
+        return JSONResponse({"error": "bad_source"}, status_code=400)
+    return JSONResponse(store.list_eval_outcomes(source=source, limit=limit))
+
+
+@mcp.custom_route("/evals/cycles.json", methods=["GET"])
+async def evals_cycles_json(request: Request) -> Response:
+    """Recent ``cycle_reports`` rows (ADR 0006), newest window first. Param:
+    ``limit`` (default 100, max 1000). The table is bootstrapped by StateStore,
+    so an empty table returns [] (never a 500); a real DB fault surfaces loudly."""
+    limit, err = _evals_limit(request)
+    if err is not None:
+        return err
+    return JSONResponse(store.list_cycle_reports(limit=limit))
+
+
 @mcp.custom_route("/config/env.json", methods=["GET"])
 async def config_env_json(_request: Request) -> Response:
     """Read-only catalog of every runtime env var + its current value (secrets

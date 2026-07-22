@@ -356,17 +356,17 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                     settled_at   INTEGER NOT NULL   -- epoch ms
                 );
 
-                -- Continuous-eval NIGHT REPORT (ADR 0006, tranche PR2): one row
-                -- per nightly run-window that closed. Written from the layer-2
-                -- heartbeat via record_night_report (the scheduled-edge owner),
-                -- exactly-once per night_date (the PRIMARY KEY is the idempotency
+                -- Continuous-eval CYCLE REPORT (ADR 0006, tranche PR2): one row
+                -- per per-cycle run-window that closed. Written from the layer-2
+                -- heartbeat via record_cycle_report (the scheduled-edge owner),
+                -- exactly-once per cycle_key (the PRIMARY KEY is the idempotency
                 -- guard — INSERT OR IGNORE). `clean` is 1 iff zero mechanism-
                 -- wedges fired in the window; wedges_json/pauses_json are the
                 -- mechanical slice (never an LLM call). `sent_at` NULL = the
                 -- notifier was unconfigured / the push didn't land (log-only,
                 -- never an error). Read by the console Evals tab (PR3).
-                CREATE TABLE IF NOT EXISTS night_reports (
-                    night_date      TEXT PRIMARY KEY,  -- YYYY-MM-DD of window OPEN, schedule tz
+                CREATE TABLE IF NOT EXISTS cycle_reports (
+                    cycle_key      TEXT PRIMARY KEY,  -- YYYY-MM-DD of window OPEN, schedule tz
                     window_start_ms INTEGER NOT NULL,
                     window_end_ms   INTEGER NOT NULL,
                     clean           INTEGER NOT NULL,  -- 1 iff zero mechanism-wedges
@@ -476,8 +476,8 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                     ON eval_outcomes(task_id) WHERE source = 'live';
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_eval_outcomes_basket
                     ON eval_outcomes(source, report_ref, ticket) WHERE source = 'basket';
-                CREATE INDEX IF NOT EXISTS idx_night_reports_created
-                    ON night_reports(created_at);
+                CREATE INDEX IF NOT EXISTS idx_cycle_reports_created
+                    ON cycle_reports(created_at);
                 """
             )
             self._commit()
@@ -839,7 +839,7 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         self, *, source: Optional[str] = None, limit: int = 100
     ) -> list[dict]:
         """Recent eval_outcomes rows, newest settle first — the read surface
-        the console/night-report layers (PR2/PR3) and tests project from.
+        the console/cycle-report layers (PR2/PR3) and tests project from.
         Plain dicts, pure SELECT."""
         where = "WHERE source = ?" if source else ""
         args: tuple = (source, limit) if source else (limit,)
@@ -851,25 +851,25 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
             ).fetchall()
         return [dict(r) for r in rows]
 
-    # ---- night reports (continuous-eval PR2, ADR 0006) ------------------
+    # ---- cycle reports (continuous-eval PR2, ADR 0006) ------------------
 
-    def night_report_exists(self, night_date: str) -> bool:
-        """Whether a night_reports row already exists for ``night_date`` (the
+    def cycle_report_exists(self, cycle_key: str) -> bool:
+        """Whether a cycle_reports row already exists for ``cycle_key`` (the
         YYYY-MM-DD of the window OPEN). The heartbeat's idempotency guard: the
         window-close edge checks this before assembling anything, so the report
-        fires exactly once per night no matter how many wakeups land after the
+        fires exactly once per cycle no matter how many wakeups land after the
         window closes. Pure SELECT — zero LLM, cheap enough for the idle path."""
         with self._lock:
             row = self._db.execute(
-                "SELECT 1 FROM night_reports WHERE night_date = ? LIMIT 1",
-                (night_date,),
+                "SELECT 1 FROM cycle_reports WHERE cycle_key = ? LIMIT 1",
+                (cycle_key,),
             ).fetchone()
         return row is not None
 
-    def record_night_report(
+    def record_cycle_report(
         self,
         *,
-        night_date: str,
+        cycle_key: str,
         window_start_ms: int,
         window_end_ms: int,
         clean: bool,
@@ -878,21 +878,21 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         summary: str,
         sent_at: Optional[int] = None,
     ) -> bool:
-        """Persist ONE night-window report (the layer-2 heartbeat calls this —
-        single-writer: night_reports is only ever written here). Idempotent on
-        ``night_date`` (PRIMARY KEY) via INSERT OR IGNORE — a second write for
-        the same night is a no-op, so a racing/duplicate window-close edge can't
+        """Persist ONE cycle-window report (the layer-2 heartbeat calls this —
+        single-writer: cycle_reports is only ever written here). Idempotent on
+        ``cycle_key`` (PRIMARY KEY) via INSERT OR IGNORE — a second write for
+        the same cycle is a no-op, so a racing/duplicate window-close edge can't
         double-report. Returns True iff a NEW row was inserted. ``sent_at`` NULL
         means the notifier didn't confirm the push (unconfigured / failed) — a
         log-only report, never an error."""
         with self._lock:
             cur = self._db.execute(
-                "INSERT OR IGNORE INTO night_reports "
-                "(night_date, window_start_ms, window_end_ms, clean, "
+                "INSERT OR IGNORE INTO cycle_reports "
+                "(cycle_key, window_start_ms, window_end_ms, clean, "
                 " wedges_json, pauses_json, summary, sent_at, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    night_date,
+                    cycle_key,
                     window_start_ms,
                     window_end_ms,
                     1 if clean else 0,
@@ -906,13 +906,13 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
             self._commit()
             return cur.rowcount == 1
 
-    def list_night_reports(self, *, limit: int = 30) -> list[dict]:
-        """Recent night_reports rows, newest window first — the read surface the
-        console Evals tab (PR3) projects the clean-night headline + history from.
+    def list_cycle_reports(self, *, limit: int = 30) -> list[dict]:
+        """Recent cycle_reports rows, newest window first — the read surface the
+        console Evals tab (PR3) projects the clean-cycle headline + history from.
         Plain dicts, pure SELECT."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM night_reports "
+                "SELECT * FROM cycle_reports "
                 "ORDER BY window_end_ms DESC, created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()

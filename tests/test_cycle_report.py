@@ -1,9 +1,9 @@
-"""Night-window close report (ADR 0006, continuous-eval PR2).
+"""Cycle-window close report (ADR 0006, continuous-eval PR2).
 
-When the nightly run window (22:00–05:00 Europe/London) closes, the goal
-heartbeat assembles the night's slice from rows devclaw already writes
+When the per-cycle run window (22:00–05:00 Europe/London) closes, the goal
+heartbeat assembles the cycle's slice from rows devclaw already writes
 (``eval_outcomes`` + the ``problems`` catalog) and pushes a report through the
-existing notifier. It fires EXACTLY once per night (night_date PK), is CLEAN iff
+existing notifier. It fires EXACTLY once per cycle (cycle_key PK), is CLEAN iff
 zero mechanism-wedges fired, and costs ZERO cognition calls. All stubbed — no
 docker, no claude.
 """
@@ -14,8 +14,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from devclaw.goal.night_report import (
-    assemble_night_report,
+from devclaw.goal.cycle_report import (
+    assemble_cycle_report,
     most_recent_closed_window,
 )
 from devclaw.goal.service import GoalConfig, GoalService
@@ -34,9 +34,9 @@ def _ms(dt: datetime) -> int:
 # ---- window math (pure) ----------------------------------------------------
 
 
-def test_most_recent_closed_window_after_close_reports_last_night():
+def test_most_recent_closed_window_after_close_reports_last_cycle():
     # 10:00 London on the 22nd: the window that opened 22:00 on the 21st and
-    # closed 05:00 on the 22nd is the most-recent CLOSED one → night_date=21st.
+    # closed 05:00 on the 22nd is the most-recent CLOSED one → cycle_key=21st.
     now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
     nd, start_ms, end_ms = most_recent_closed_window(now)
     assert nd == "2026-07-21"
@@ -47,9 +47,9 @@ def test_most_recent_closed_window_after_close_reports_last_night():
     assert _ms(datetime(2026, 7, 21, 21, 0, tzinfo=_LON)) < start_ms
 
 
-def test_most_recent_closed_window_inside_current_window_reports_prior_night():
+def test_most_recent_closed_window_inside_current_window_reports_prior_cycle():
     # 03:00 London on the 22nd: still INSIDE the window that opened 22:00 on the
-    # 21st (not yet closed), so the most-recent CLOSED window is night_date=20th.
+    # 21st (not yet closed), so the most-recent CLOSED window is cycle_key=20th.
     now = _ms(datetime(2026, 7, 22, 3, 0, tzinfo=_LON))
     nd, _s, _e = most_recent_closed_window(now)
     assert nd == "2026-07-20"
@@ -60,7 +60,7 @@ def test_most_recent_closed_window_unknown_tz_fails_safe():
     assert most_recent_closed_window(now, tz="Not/AZone") is None
 
 
-# ---- assembly / clean-night boundary (pure, over a fake store) -------------
+# ---- assembly / clean-cycle boundary (pure, over a fake store) -------------
 
 
 class _FakeStore:
@@ -83,20 +83,20 @@ def _window():
     return "2026-07-21", start, end, (start + end) // 2
 
 
-def test_night_report_is_clean_when_no_wedges():
+def test_cycle_report_is_clean_when_no_wedges():
     nd, s, e, mid = _window()
     store = _FakeStore(outcomes=[
         {"status": "done", "settled_at": mid, "failure_class": None, "task_id": "t1"},
         {"status": "done", "settled_at": mid, "failure_class": None, "task_id": "t2"},
     ])
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is True
     assert r.wedges == []
     assert r.settled == 2 and r.done == 2 and r.failed == 0
     assert "CLEAN" in r.summary
 
 
-def test_night_report_classifies_selfhealed_pause_as_clean_not_wedge():
+def test_cycle_report_classifies_selfhealed_pause_as_clean_not_wedge():
     # A self-healed quota/auth pause (problems category='limit', recovered) is the
     # pause machinery working unattended — reported in `pauses`, NEVER a wedge.
     nd, s, e, mid = _window()
@@ -108,26 +108,26 @@ def test_night_report_classifies_selfhealed_pause_as_clean_not_wedge():
             "last_seen_ms": mid, "last_goal_id": "g1", "fingerprint": "limit|rate_limit|x",
         }],
     )
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is True
     assert r.wedges == []
     assert len(r.pauses) == 1 and r.pauses[0]["class"] == "rate_limit"
     assert "self-healed pauses" in r.summary
 
 
-def test_night_report_mechanical_block_is_a_wedge_not_clean():
+def test_cycle_report_mechanical_block_is_a_wedge_not_clean():
     nd, s, e, mid = _window()
     store = _FakeStore(problems=[{
         "category": "block", "kind": "mechanical:corrupt_doc",
         "sample_message": "firmed-draft.yaml torn",
         "last_seen_ms": mid, "last_goal_id": "g1", "fingerprint": "block|mech|x",
     }])
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is False
     assert len(r.wedges) == 1 and r.wedges[0]["class"] == "mechanical:corrupt_doc"
 
 
-def test_night_report_engine_and_timeout_classes_are_wedges():
+def test_cycle_report_engine_and_timeout_classes_are_wedges():
     nd, s, e, mid = _window()
     store = _FakeStore(outcomes=[
         {"status": "failed", "settled_at": mid, "failure_class": "timeout",
@@ -135,15 +135,15 @@ def test_night_report_engine_and_timeout_classes_are_wedges():
         {"status": "failed", "settled_at": mid, "failure_class": "review_crash",
          "error": "review gate crashed", "task_id": "t2"},
     ])
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is False
     assert {w["class"] for w in r.wedges} == {"timeout", "review_crash"}
     assert r.failed == 2
 
 
-def test_night_report_gate_rejection_is_a_quality_outcome_not_a_wedge():
+def test_cycle_report_gate_rejection_is_a_quality_outcome_not_a_wedge():
     # review_rejected / verify_failed are the gate DOING ITS JOB — a genuine
-    # quality verdict, not a mechanism wedge. The night stays clean.
+    # quality verdict, not a mechanism wedge. The cycle stays clean.
     nd, s, e, mid = _window()
     store = _FakeStore(outcomes=[
         {"status": "failed", "settled_at": mid, "failure_class": "review_rejected",
@@ -151,27 +151,27 @@ def test_night_report_gate_rejection_is_a_quality_outcome_not_a_wedge():
         {"status": "failed", "settled_at": mid, "failure_class": "verify_failed",
          "error": "verify gate failed", "task_id": "t2"},
     ])
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is True
     assert r.wedges == []
     assert r.failed == 2
 
 
-def test_night_report_genuine_needs_answer_is_clean_but_surfaced():
+def test_cycle_report_genuine_needs_answer_is_clean_but_surfaced():
     nd, s, e, mid = _window()
     store = _FakeStore(problems=[{
         "category": "block", "kind": "needs_answer",
         "sample_message": "which auth provider?",
         "last_seen_ms": mid, "last_goal_id": "g1", "fingerprint": "block|na|x",
     }])
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is True
     assert r.wedges == []
     assert len(r.needs_operator) == 1 and r.needs_operator[0]["class"] == "needs_answer"
     assert "needs operator" in r.summary
 
 
-def test_night_report_ignores_rows_outside_the_window():
+def test_cycle_report_ignores_rows_outside_the_window():
     nd, s, e, _mid = _window()
     before = s - 60_000
     after = e + 60_000
@@ -187,7 +187,7 @@ def test_night_report_ignores_rows_outside_the_window():
             "last_seen_ms": before, "fingerprint": "cog|x",
         }],
     )
-    r = assemble_night_report(store, nd, s, e)
+    r = assemble_cycle_report(store, nd, s, e)
     assert r.clean is True
     assert r.settled == 0 and r.wedges == []
 
@@ -240,7 +240,7 @@ def _seed_problem(db, *, category, kind, message, last_seen_ms, goal_id=""):
 
 
 @pytest.mark.asyncio
-async def test_night_report_fires_once_at_window_close_and_is_clean_when_no_wedges(
+async def test_cycle_report_fires_once_at_window_close_and_is_clean_when_no_wedges(
     tmp_path, db, monkeypatch
 ):
     fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
@@ -252,27 +252,27 @@ async def test_night_report_fires_once_at_window_close_and_is_clean_when_no_wedg
     notifier = RecordingNotifier()
     svc, planner, evaluator = _svc(tmp_path, db, notifier)
 
-    emitted = await svc._maybe_emit_night_report()
+    emitted = await svc._maybe_emit_cycle_report()
     assert emitted == nd
-    # zero-token guard: the night-report edge makes NO cognition call.
+    # zero-token guard: the cycle-report edge makes NO cognition call.
     assert planner.calls == 0 and evaluator.calls == 0
     # pushed once through the notifier, and persisted CLEAN with sent_at set.
     assert len(notifier.sent) == 1 and "CLEAN" in notifier.sent[0]
-    (row,) = db.list_night_reports()
-    assert row["night_date"] == nd
+    (row,) = db.list_cycle_reports()
+    assert row["cycle_key"] == nd
     assert row["clean"] == 1
     assert row["wedges_json"] == "[]"
     assert row["sent_at"] is not None
 
     # A second wakeup the same day is an idempotent no-op — no second push/row.
-    again = await svc._maybe_emit_night_report()
+    again = await svc._maybe_emit_cycle_report()
     assert again is None
     assert len(notifier.sent) == 1
-    assert len(db.list_night_reports()) == 1
+    assert len(db.list_cycle_reports()) == 1
 
 
 @pytest.mark.asyncio
-async def test_night_report_wedge_marks_night_unclean(tmp_path, db, monkeypatch):
+async def test_cycle_report_wedge_marks_night_unclean(tmp_path, db, monkeypatch):
     fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
     monkeypatch.setattr("devclaw.goal.service._now_ms", lambda: fixed_now)
     nd, start_ms, end_ms = most_recent_closed_window(fixed_now)
@@ -287,17 +287,17 @@ async def test_night_report_wedge_marks_night_unclean(tmp_path, db, monkeypatch)
     notifier = RecordingNotifier()
     svc, planner, evaluator = _svc(tmp_path, db, notifier)
 
-    emitted = await svc._maybe_emit_night_report()
+    emitted = await svc._maybe_emit_cycle_report()
     assert emitted == nd
     assert planner.calls == 0 and evaluator.calls == 0
-    (row,) = db.list_night_reports()
+    (row,) = db.list_cycle_reports()
     assert row["clean"] == 0
     assert "engine_error" in row["wedges_json"] and "mechanical:prep" in row["wedges_json"]
     assert "⚠️" in notifier.sent[0]
 
 
 @pytest.mark.asyncio
-async def test_night_report_selfhealed_pause_keeps_night_clean_over_real_store(
+async def test_cycle_report_selfhealed_pause_keeps_night_clean_over_real_store(
     tmp_path, db, monkeypatch
 ):
     fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
@@ -311,15 +311,15 @@ async def test_night_report_selfhealed_pause_keeps_night_clean_over_real_store(
     notifier = RecordingNotifier()
     svc, planner, evaluator = _svc(tmp_path, db, notifier)
 
-    await svc._maybe_emit_night_report()
-    (row,) = db.list_night_reports()
+    await svc._maybe_emit_cycle_report()
+    (row,) = db.list_cycle_reports()
     assert row["clean"] == 1
     assert "quota" in row["pauses_json"]
     assert row["wedges_json"] == "[]"
 
 
 @pytest.mark.asyncio
-async def test_night_report_log_only_when_notifier_unconfigured_sets_sent_at_null(
+async def test_cycle_report_log_only_when_notifier_unconfigured_sets_sent_at_null(
     tmp_path, db, monkeypatch
 ):
     from devclaw.goal.notify import NullNotifier
@@ -331,8 +331,8 @@ async def test_night_report_log_only_when_notifier_unconfigured_sets_sent_at_nul
     _seed_live_outcome(db, task_id="t1", status="done", settled_at=mid)
 
     svc, planner, evaluator = _svc(tmp_path, db, NullNotifier())
-    emitted = await svc._maybe_emit_night_report()
+    emitted = await svc._maybe_emit_cycle_report()
     assert emitted == nd  # log-only is NOT an error — the report still lands.
-    (row,) = db.list_night_reports()
+    (row,) = db.list_cycle_reports()
     assert row["sent_at"] is None
     assert row["clean"] == 1
