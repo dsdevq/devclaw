@@ -70,7 +70,7 @@ TIME │  ACTOR / NODE                      │  WHAT HAPPENS                   
      │  │         -v devclaw-toolchains-<proj>:            │   │                             │ if Node 2 lacks GID 990
      │  │            /home/agent/.local/share/mise         │   │  per-project toolchain      │
      │  │         -v ~/.claude/.credentials.json:RO        │   │  cache (ADR 0005)           │
-     │  │         -v ~/.claude/.claude.json:RO             │   │
+     │  │         -v <pre-trusted .claude.json>:RO         │   │
      │  │         --tmpfs /home/agent/.claude/session-env  │   │
      │  │         --network host                           │   │
      │  │         devclaw-sandbox:local                    │   │

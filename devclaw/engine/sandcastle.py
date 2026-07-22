@@ -39,6 +39,7 @@ from pathlib import Path
 
 from . import EngineRequest, EngineResult
 from .runner_io import STREAM_LINE_LIMIT, consume_runner_output
+from ..claude_trust import write_trusted_copy
 
 SANDBOX_IMAGE = os.environ.get("DEVCLAW_SANDBOX_IMAGE", "devclaw-sandbox:latest")
 DOCKER_BIN = os.environ.get("DEVCLAW_DOCKER_BIN", "docker")
@@ -112,7 +113,9 @@ CONTAINER_MISE_DATA = "/home/agent/.local/share/mise"
 # loop hangs after init without `.claude.json` (it needs the account identity to
 # act, not just the token — auth != agency; this was a live-found regression when
 # the default was credential-only). `.claude.json` here carries identity + caches,
-# NOT the leak (no mcpServers, projects empty). We still deliberately do NOT mount
+# NOT the leak (no mcpServers; the only `projects` entry is the one benign
+# `/workspace` trust flag we inject via claude_trust.write_trusted_copy — no
+# host history). We still deliberately do NOT mount
 # the whole host ~/.claude: that dir also holds skills/, plugins/ (+ their MCP
 # servers that need absent network/auth), the global CLAUDE.md (which points at the
 # unmounted ~/memory, so its instructions are dead in here), and projects/ +
@@ -329,16 +332,28 @@ def _toolchain_volume_name(host_bind_path: str) -> str:
     return f"devclaw-toolchains-{slug or 'workspace'}-{digest}"
 
 
-def _build_claude_mounts(claude_dir: str, allowlist: tuple[str, ...]) -> list[str]:
+def _build_claude_mounts(
+    claude_dir: str,
+    allowlist: tuple[str, ...],
+    claude_json_src: str | None = None,
+) -> list[str]:
     """``-v`` args binding ONLY the allowlisted entries under the host ~/.claude
     into the sandbox config dir, each read-only. The curated boundary: auth in,
     the rest of the host's personal Claude setup out. See ``SANDBOX_CLAUDE_ALLOWLIST``
-    for the rationale."""
+    for the rationale.
+
+    ``claude_json_src`` overrides the host source for the ``.claude.json`` entry
+    only: a pre-trusted copy (host identity + ``projects["/workspace"]`` marked
+    trusted) so the in-sandbox ``claude`` honors the workspace's permissions
+    instead of dead-stopping on the untrusted-workspace guard. None → bind the
+    raw host file (the pre-trust behavior, e.g. when the host config is
+    unreadable)."""
     base = claude_dir.rstrip("/")
     args: list[str] = []
     for rel in allowlist:
         rel = rel.strip("/")
-        args += ["-v", f"{base}/{rel}:{CONTAINER_CLAUDE_DIR}/{rel}:ro"]
+        src = claude_json_src if (rel == ".claude.json" and claude_json_src) else f"{base}/{rel}"
+        args += ["-v", f"{src}:{CONTAINER_CLAUDE_DIR}/{rel}:ro"]
     return args
 
 
@@ -351,6 +366,7 @@ def _build_docker_args(
     allowlist: tuple[str, ...] = SANDBOX_CLAUDE_ALLOWLIST,
     sandbox_image: str | None = None,
     owner_id: str | None = None,
+    claude_json_src: str | None = None,
 ) -> list[str]:
     """Assemble the full ``docker run`` argv for one task. Pure (no I/O) so the
     mount posture — curated claude allowlist, writable scratch tmpfs, no API-key
@@ -384,8 +400,10 @@ def _build_docker_args(
         "-v",
         f"{_toolchain_volume_name(host_bind_path)}:{CONTAINER_MISE_DATA}",
         # Curated claude config: only the allowlisted auth, read-only (NOT the whole
-        # host ~/.claude — see SANDBOX_CLAUDE_ALLOWLIST).
-        *_build_claude_mounts(claude_dir, allowlist),
+        # host ~/.claude — see SANDBOX_CLAUDE_ALLOWLIST). `.claude.json` binds a
+        # pre-trusted copy so /workspace is a trusted Claude workspace (see
+        # claude_trust.write_trusted_copy).
+        *_build_claude_mounts(claude_dir, allowlist, claude_json_src),
         # The config dir is non-writable (RO binds), but the claude CLI must write
         # per-session scratch *under* it — `session-env/<uuid>` (a working dir per
         # shell session) + `shell-snapshots/`. On the RO mount those mkdirs hit
@@ -443,6 +461,16 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
 
     payload = json.dumps(_build_payload(req))
 
+    # Bind a pre-trusted copy of .claude.json so the in-sandbox claude treats
+    # /workspace as a trusted workspace (honors its .claude/settings.json
+    # permissions instead of dead-stopping on the untrusted-workspace guard —
+    # the #1 terminal-failure class as of 2026-07). None when the host config is
+    # unreadable → the mount falls back to the raw read-only bind (pre-trust
+    # behavior). Deleted after the container exits.
+    trusted_claude_json = write_trusted_copy(
+        os.path.join(claude_dir.rstrip("/"), ".claude.json"), CONTAINER_WORKSPACE
+    )
+
     docker_args = _build_docker_args(
         container_name=container_name,
         host_bind_path=host_bind_path,
@@ -450,34 +478,44 @@ async def run_sandcastle(req: EngineRequest) -> EngineResult:
         payload=payload,
         sandbox_image=req.sandbox_image,
         owner_id=req.owner_id,
+        claude_json_src=trusted_claude_json,
     )
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            DOCKER_BIN,
-            *docker_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            # large per-line buffer — a single event can exceed the 64 KiB default
-            # (big diffs / file observations); see STREAM_LINE_LIMIT.
-            limit=STREAM_LINE_LIMIT,
-            env=_strip_api_keys(dict(os.environ)),
-        )
-    except OSError as exc:
-        return {
-            "status": "error",
-            "error": (
-                f"failed to spawn {DOCKER_BIN}: {exc}. "
-                "Is docker installed and the socket reachable from this process?"
-            ),
-        }
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                DOCKER_BIN,
+                *docker_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                # large per-line buffer — a single event can exceed the 64 KiB default
+                # (big diffs / file observations); see STREAM_LINE_LIMIT.
+                limit=STREAM_LINE_LIMIT,
+                env=_strip_api_keys(dict(os.environ)),
+            )
+        except OSError as exc:
+            return {
+                "status": "error",
+                "error": (
+                    f"failed to spawn {DOCKER_BIN}: {exc}. "
+                    "Is docker installed and the socket reachable from this process?"
+                ),
+            }
 
-    try:
-        return await consume_runner_output(proc, req.on_event, label="sandbox")
+        try:
+            return await consume_runner_output(proc, req.on_event, label="sandbox")
+        finally:
+            # On cancellation the read above raises CancelledError straight into
+            # here with the container still alive — tear it down (docker-specific,
+            # so it can't live in the engine-agnostic reader). On a clean exit proc
+            # has already returned, so teardown is a cheap no-op.
+            if proc.returncode is None:
+                await _teardown(proc, container_name)
     finally:
-        # On cancellation the read above raises CancelledError straight into
-        # here with the container still alive — tear it down (docker-specific,
-        # so it can't live in the engine-agnostic reader). On a clean exit proc
-        # has already returned, so teardown is a cheap no-op.
-        if proc.returncode is None:
-            await _teardown(proc, container_name)
+        # The trusted-copy temp file is only needed while docker binds it (at
+        # container start); safe to remove once the container has exited.
+        if trusted_claude_json:
+            try:
+                os.unlink(trusted_claude_json)
+            except OSError:
+                pass
