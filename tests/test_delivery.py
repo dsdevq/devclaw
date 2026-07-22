@@ -76,6 +76,18 @@ def test_pr_body_carries_ticket_gate_and_caveat():
     assert "## Verification" not in nogate and "## Files changed" not in nogate
 
 
+def test_pr_body_renders_trust_advisory_section():
+    # ADR 0007: a trust-mode gate advisory rides into the PR body so the human
+    # sees it at the merge boundary. Absent when there are no advisories.
+    advisories = [{"gate": "review", "reason": "dead code left in DealService"}]
+    body = _pr_body("Add X", "id", None, None, advisories=advisories)
+    assert "Advisory" in body and "shipped under `trust`" in body
+    assert "review" in body and "dead code left in DealService" in body
+    assert "review before merging" in body.lower()
+    # no advisory section when the list is empty/None
+    assert "Advisory" not in _pr_body("Add X", "id", None, None)
+
+
 def test_scope_suffix_empty_or_missing():
     # No files_stat → no suffix. Graceful on the None/"" edges.
     assert _scope_suffix(None) == ""
@@ -373,7 +385,7 @@ async def test_done_is_not_observable_before_delivery(store, tmp_path, monkeypat
     seen = {}
     pr = "https://github.com/dsdevq/lifekit-dashboard/pull/99"
 
-    async def fake_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None):
+    async def fake_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None, advisories=None):
         # While delivery runs, the task must still be 'running' (not yet 'done').
         seen["status_during_delivery"] = store.get_task(task_id).status
         seen["pr_url_during_delivery"] = store.get_task(task_id).pr_url
@@ -429,7 +441,7 @@ async def test_broken_delivery_settles_failed_not_done(store, tmp_path, monkeypa
     os.makedirs(repo)
     _init_repo(repo)
 
-    async def broken_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None):
+    async def broken_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None, advisories=None):
         return {"delivered": True, "branch": "devclaw/x", "committed": True,
                 "pushed": False, "pr_url": None,
                 "error": "push failed (check repo push auth): remote rejected"}
@@ -453,7 +465,7 @@ async def test_delivery_exception_settles_failed_not_done(store, tmp_path, monke
     os.makedirs(repo)
     _init_repo(repo)
 
-    async def raising_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None):
+    async def raising_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None, advisories=None):
         raise RuntimeError("gh exploded")
 
     monkeypatch.setattr("devclaw.task_queue.deliver_change", raising_deliver)

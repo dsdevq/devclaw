@@ -80,6 +80,7 @@ class InProcessEngine:
                 open_pr=action.open_pr,
                 verify_cmd=action.verify_cmd or goal.verify_cmd,
                 parent_goal_id=goal.id,
+                strictness=goal.strictness,
                 pump=False,
             )
             return InFlight("devclaw", "start_program", program_id, "program", action.goal)
@@ -96,6 +97,7 @@ class InProcessEngine:
                 open_pr=action.open_pr,
                 verify_cmd=action.verify_cmd or goal.verify_cmd,
                 parent_goal_id=goal.id,
+                strictness=goal.strictness,
                 pump=False,
             )
             return InFlight("devclaw", "start_program", program_id, "program", action.goal)
@@ -116,6 +118,7 @@ class InProcessEngine:
                 # gate (verified structurally by the build gate instead). Never
                 # for a read-only review_repository — it has no diff to review.
                 scaffold=False if is_review else action.scaffold,
+                strictness=goal.strictness,
                 pump=False,
             )
             return InFlight("devclaw", action.tool, task_id, "task", action.goal)

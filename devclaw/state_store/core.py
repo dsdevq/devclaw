@@ -275,7 +275,8 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                   completed_at    INTEGER,
                   open_pr         INTEGER NOT NULL DEFAULT 0,
                   verify_cmd      TEXT,
-                  parent_goal_id  TEXT
+                  parent_goal_id  TEXT,
+                  strictness      TEXT NOT NULL DEFAULT 'trust'
                 );
 
                 -- Raw runner SDK events (one row per agent action inside every
@@ -441,6 +442,14 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                 # (closeloop-bench b6d53bbd). Null for rows that predate the
                 # column or never ran.
                 "ALTER TABLE tasks ADD COLUMN pre_run_sha TEXT",
+                # Gate strictness dial snapshotted at dispatch (ADR 0007) — the
+                # settle cascade reads it to decide a dial-able gate failure's
+                # consequence (strict blocks / trust advises-and-ships).
+                # Defaulted so pre-existing rows read as advisory ("trust").
+                "ALTER TABLE tasks ADD COLUMN strictness TEXT NOT NULL DEFAULT 'trust'",
+                # Same dial on PROGRAMS — child tasks inherit it (ADR 0007),
+                # mirroring open_pr / verify_cmd inheritance.
+                "ALTER TABLE programs ADD COLUMN strictness TEXT NOT NULL DEFAULT 'trust'",
             ):
                 try:
                     self._db.execute(sql)
@@ -502,14 +511,15 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         parent_goal_id: Optional[str] = None,
         scaffold: bool = False,
         plan_key: Optional[str] = None,
+        strictness: str = "trust",
     ) -> None:
         with self._lock:
             self._db.execute(
                 """INSERT INTO tasks
                      (id, kind, status, workspace_dir, goal, notify_url, created_at,
                       program_id, depends_on, order_idx, milestone, verify_cmd, deliver,
-                      title, parent_goal_id, scaffold, plan_key)
-                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                      title, parent_goal_id, scaffold, plan_key, strictness)
+                   VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     id,
                     kind,
@@ -527,6 +537,7 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
                     parent_goal_id,
                     1 if scaffold else 0,
                     plan_key,
+                    strictness if strictness in ("trust", "strict") else "trust",
                 ),
             )
             self._commit()
@@ -930,16 +941,18 @@ class StateStore(ControlPlaneMixin, ProblemsMixin):
         open_pr: bool = False,
         verify_cmd: Optional[str] = None,
         parent_goal_id: Optional[str] = None,
+        strictness: str = "trust",
     ) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT INTO programs "
                 "(id, goal, workspace_dir, notify_url, status, created_at, open_pr, "
-                " verify_cmd, parent_goal_id) "
-                "VALUES (?, ?, ?, ?, 'planning', ?, ?, ?, ?)",
+                " verify_cmd, parent_goal_id, strictness) "
+                "VALUES (?, ?, ?, ?, 'planning', ?, ?, ?, ?, ?)",
                 (
                     id, goal, workspace_dir, notify_url, _now_ms(),
                     1 if open_pr else 0, verify_cmd, parent_goal_id,
+                    strictness if strictness in ("trust", "strict") else "trust",
                 ),
             )
             self._commit()
