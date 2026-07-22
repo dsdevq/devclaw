@@ -135,6 +135,9 @@ three precedence layers with divergent defaults was a debugging trap.
 | `DEVCLAW_GOAL_PLAIN_SUMMARY` | `1` | One-line plain-prose summary per delivery for `deliveries.md` (quota lever — one `claude` call per delivery). |
 | `DEVCLAW_NOTIFY_ALTITUDE` | `owner` | Floor for goal-layer notifications: `owner` (only real blockers / direction questions / completions) or `task` (also includes per-task chatter). |
 | `DEVCLAW_SELF_TRIAGE` | `1` | Propose-only self-triage interceptor: before an **eligible** owner ping fires (slice 1 allowlist = the DB-size alarm), a bounded triage cognition step dedupes it against the `problems` catalog and drafts a proposed fix, delivering "problem + proposed fix + how to approve" instead of a bare alert. Runs ONLY when a real ping fires (never idle — zero-token guard intact); any triage failure falls back to the raw ping (loud, not silent). `0`/`false` reverts every eligible ping to the raw path. |
+| `DEVCLAW_NIGHT_WINDOW_START` | `22:00` | Open time (`HH:MM`, in `DEVCLAW_NIGHT_WINDOW_TZ`) of the nightly run window whose close fires the continuous-eval **night report** (ADR 0006): a mechanical, zero-LLM heartbeat edge that pushes the night's clean/wedge/pause slice through the notifier once per night. |
+| `DEVCLAW_NIGHT_WINDOW_END` | `05:00` | Close time (`HH:MM`) of the night window — the heartbeat emits the report on the first wakeup after this instant (once per `night_date`; the `night_reports` PK dedupes). |
+| `DEVCLAW_NIGHT_WINDOW_TZ` | `Europe/London` | Timezone the night-window `start`/`end` are read in, and the tz of the report's `night_date`. An unresolvable tz fails safe — the report is skipped, never crashes the heartbeat. |
 
 ## Deploy hosting
 

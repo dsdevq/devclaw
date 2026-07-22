@@ -155,6 +155,22 @@ tokens per settle. Basket runs (`evals/measure_passrate.py`) land in the SAME
 table as `source='basket'` rows via `devclaw evals ingest <file-or-dir>`,
 idempotent on (source, report_ref, ticket). See `tests/test_eval_outcomes.py`.
 
+**Continuous-eval — the night-window close report (ADR 0006 decision 3).** When
+the nightly run window (22:00–05:00 `Europe/London` by default) closes, the goal
+heartbeat — the *scheduled-edge owner* — fires a mechanical, **zero-LLM** report:
+`GoalService._maybe_emit_night_report` computes the most-recent closed window
+(pure clock math), checks a `night_reports` row doesn't already exist for that
+`night_date` (the PK is the once-per-night idempotency guard — it fires on the
+first wakeup after close and is a no-op the rest of the day), then assembles the
+night's slice from existing rows (`eval_outcomes` + the `problems` catalog,
+`goal/night_report.py`) and pushes it through the existing notifier. A night is
+**clean** iff **zero mechanism-wedges** fired: wedge = `mechanical:*` blocks,
+cognition-timeout-terminal, and engine/gate **crash** classes; a genuine
+`needs_answer` and a **self-healed quota/auth pause** are surfaced but stay
+clean (a gate *verdict* is the gate doing its job, not a wedge). The write goes
+through the store (`StateStore.record_night_report`, single writer); no notifier
+→ `sent_at` NULL (log-only, never an error). See `tests/test_night_report.py`.
+
 **Self-observability — the `problems` catalog (capture/dedup layer).** Beside
 `traces`, a `problems` table turns "devclaw fails/stalls N times a day" into a
 ranked, countable set. `StateStore.record_problem(...)` — the **single writer**
