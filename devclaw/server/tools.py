@@ -346,21 +346,33 @@ async def list_problems(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=1000)] = 100,
 ) -> str:
-    """The deduplicated problems catalog (#260): distinct failures devclaw has
-    hit, most-frequent first — a ranked, countable table, not a scrolling log.
+    """The deduplicated problems catalog — a **gatherer-signal readout**, NOT a
+    backlog (issue-driven-pipelines, N1/#371). The single canonical store of
+    *intent* ("what to do about a failure") is **GitHub Issues**; this catalog is
+    the mechanical feeder upstream of it. Each recurring root cause is filed there
+    by the self-improving loop, and every row here points back at that Issue via
+    ``issue_number``/``issue_state`` and a derived ``lifecycle``
+    (``identified`` → ``filed`` → ``resolved``). Read this to see *what devclaw is
+    hitting and where it is in the pipeline* — act on it in the Issue, not here.
 
     Each row is ONE root cause (fingerprinted on ``category | kind |
     normalize(message)``), so N recurrences collapse to a single row with
-    ``count`` incremented rather than N rows. ``recovered_count`` is how often
-    devclaw carried on past it (a usage-limit pause that auto-resumes, a
-    mechanical block that self-heals); ``terminal_count`` is how often it was a
+    ``count`` incremented rather than N rows, most-frequent first. ``recovered_count``
+    is how often devclaw carried on past it (a usage-limit pause that auto-resumes,
+    a mechanical block that self-heals); ``terminal_count`` is how often it was a
     dead stop (a failed task, a human-gated block). ``sample_message`` keeps one
     un-normalized example for context.
 
     Pass ``category`` to filter to one class of failure (block / task_fail /
     gate / delivery / limit / cognition / subprocess / other). Pure SELECT over
     state_store — cheap, read-only, never wakes the goal loop."""
-    problems = store.list_problems(category=category, limit=int(limit))
+    from ..state_store.problems import problem_lifecycle
+
+    problems = store.list_problems(
+        category=category, limit=int(limit), include_issue=True
+    )
+    for p in problems:
+        p["lifecycle"] = problem_lifecycle(p)
     return json.dumps(
         {"count": len(problems), "problems": problems}, indent=2
     )

@@ -615,16 +615,10 @@ async def evals_cycles_json(request: Request) -> Response:
     return JSONResponse(store.list_cycle_reports(limit=limit))
 
 
-def _problem_lifecycle(p: dict) -> str:
-    """Derive a problem's self-improving-cycle stage (ADR 0009) from its
-    self-issue-filing Stage-1 fields. HONEST (§5.5): there is no "auto-fixing"
-    stage — filing is live, *fixing* is propose-only/human-merges, so a filed &
-    open issue reads as ``filed`` (in the backlog), never "being auto-fixed"."""
-    if p.get("issue_state") == "closed":
-        return "resolved"
-    if p.get("issue_number"):
-        return "filed"
-    return "identified"
+# Lifecycle derivation lives in state_store.problems (the single home shared with
+# the MCP `list_problems` tool, N1/#371); re-exported here under the original name
+# so this route + its test keep importing it from this module.
+from ..state_store.problems import problem_lifecycle as _problem_lifecycle  # noqa: E402
 
 
 @mcp.custom_route("/problems.json", methods=["GET"])

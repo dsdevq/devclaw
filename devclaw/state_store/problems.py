@@ -1,7 +1,17 @@
-"""Self-observability — the deduplicated problems catalog (the ACCUMULATION
-layer: capture + dedup + count).
+"""Self-observability — the deduplicated problems catalog: the GATHERER that
+feeds GitHub-Issue filing (capture + dedup + count).
 
-The blindness problem this closes: devclaw hits failures all day — a goal
+**Source of truth (issue-driven-pipelines proposal, N1 / #371).** This catalog is
+*not* a second backlog. GitHub Issues are the **single canonical store of intent**
+— "what to do about a failure" lives there, triaged into the ``P0/P1/P2 + area:*``
+taxonomy. This table is the mechanical GATHERER upstream of that: it counts the
+DISTINCT root causes so the self-improving loop (``goal/self_issue.py``) can file a
+*recurring* one as an Issue and link it back (``issue_number``/``issue_state``).
+SQLite stays canonical for execution *state*; Issues canonical for *intent*; the
+catalog is the feeder between them, never a competing to-do list a human triages
+independently. Reads of this table are gatherer signals, not a backlog.
+
+The blindness problem it closes: devclaw hits failures all day — a goal
 blocks, a task settles ``failed``, a usage limit pauses the account, a cognition
 call crashes — and today each one is a line in a log that scrolls away. "It
 fails/stalls N times a day" is unanswerable because nothing counts the DISTINCT
@@ -21,8 +31,11 @@ program 3f9a…" and "lost ref for program 88bc…" fingerprint identically. The
 fingerprint is ``category | kind | normalize(message)`` and the write is an
 UPSERT keyed on it.
 
-This is the CAPTURE layer only. A ranked report over the table, and any
-dreaming / auto-approval on top of it, are deliberate follow-ups — not here.
+This module is the capture + dedup + count mechanism plus the Stage-1 accessors
+that link a problem to its filed Issue. The recurrence/age-out/label *decisions*
+live as pure functions in ``goal/self_issue.py``; the lifecycle *derivation*
+(identified → filed → resolved) is :func:`problem_lifecycle` below — the single
+home shared by the MCP ``list_problems`` tool and the console ``/problems.json``.
 """
 
 from __future__ import annotations
@@ -93,6 +106,26 @@ PROBLEM_CATEGORIES = (
     "subprocess",
     "other",
 )
+
+
+def problem_lifecycle(p: dict) -> str:
+    """A problem's stage in the self-improving cycle, derived from its
+    self-issue-filing Stage-1 fields (``issue_number``/``issue_state``). The
+    single home for this mapping — shared by the MCP ``list_problems`` tool and
+    the console ``/problems.json`` so both point at the SAME canonical Issue.
+
+    HONEST (ADR 0009 §5.5): there is no "auto-fixing" stage — filing is live,
+    *fixing* is propose-only/human-merges, so a filed & open issue reads as
+    ``filed`` (in the backlog), never "being auto-fixed":
+
+    - ``identified`` — gathered here, not (yet) filed (``issue_number`` NULL).
+    - ``filed`` — a recurring problem promoted to an open GitHub Issue.
+    - ``resolved`` — that Issue is closed (fixed or aged-out)."""
+    if p.get("issue_state") == "closed":
+        return "resolved"
+    if p.get("issue_number"):
+        return "filed"
+    return "identified"
 
 
 class ProblemsMixin:

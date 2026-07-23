@@ -202,9 +202,16 @@ error-bearing trace events centralized in `PersistentTracer`
 auto-heals do **not** re-record — the original block entry already counted it.
 This is the **capture + dedup + count** layer; the `list_problems` MCP tool
 (reading `StateStore.list_problems`, most-frequent first, optional `category`
-filter) is the read surface over it. Any dreaming / auto-approval on top remains
-a deliberate follow-up. See `devclaw/state_store/problems.py` and the tool in
-`devclaw/server/tools.py`.
+filter) is the read surface over it. **The catalog is a GATHERER, not a backlog
+(N1/#371).** The single canonical store of *intent* — "what to do about a
+failure" — is **GitHub Issues**; SQLite stays canonical for execution *state*;
+this table is the mechanical feeder between them. The self-improving loop
+(`goal/self_issue.py`) files a *recurring* problem as an Issue and links it back
+(`issue_number`/`issue_state`); every problem read surface — the `list_problems`
+tool and the console `/problems.json` — carries that linkage plus a derived
+`lifecycle` (`identified → filed → resolved`, one home: `problems.problem_lifecycle`)
+so it points at the canonical Issue rather than inviting independent triage. See
+`devclaw/state_store/problems.py` and the tool in `devclaw/server/tools.py`.
 
 **Self-triage — the propose-only interceptor (slice 1, 2026-07-18).** The first
 consumer of that catalog. Before an **eligible** owner ping fires (an allowlist,

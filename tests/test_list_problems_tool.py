@@ -67,3 +67,25 @@ async def test_list_problems_respects_limit(store):
 async def test_list_problems_empty_catalog_returns_empty(store):
     out = json.loads(await _tools.list_problems())
     assert out == {"count": 0, "problems": []}
+
+
+async def test_list_problems_tool_points_each_row_at_its_canonical_issue(store):
+    # N1/#371: the catalog is a gatherer that FEEDS GitHub Issues, not a
+    # standalone backlog. The MCP readout must carry each row's Issue linkage +
+    # lifecycle so it points at the canonical Issue instead of standing alone.
+    store.record_problem(category="task_fail", kind="timeout", message="a", recovered=False)
+    store.record_problem(category="gate", kind="crash", message="b", recovered=False)
+    store.record_problem(category="block", kind="lost_ref", message="c", recovered=False)
+    fp = {p["kind"]: p["fingerprint"] for p in store.list_problems()}
+    # one filed & open, one filed & closed, one never filed
+    store.set_problem_issue(fp["timeout"], issue_number=42, issue_state="open")
+    store.set_problem_issue(fp["crash"], issue_number=7, issue_state="closed")
+
+    rows = {p["kind"]: p for p in json.loads(await _tools.list_problems())["problems"]}
+
+    assert rows["timeout"]["issue_number"] == 42
+    assert rows["timeout"]["lifecycle"] == "filed"
+    assert rows["crash"]["issue_number"] == 7
+    assert rows["crash"]["lifecycle"] == "resolved"
+    assert rows["lost_ref"]["issue_number"] is None
+    assert rows["lost_ref"]["lifecycle"] == "identified"
