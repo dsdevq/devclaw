@@ -219,16 +219,17 @@ the devclaw repo; §4–§5 generalize it to any owned repo behind the manifest.
 
 ### NOW slice (the only live work — small, real, CV-positive)
 
-Two bounded pieces, filed as GitHub Issues on the devclaw repo. Neither is a
-multi-PR direction tranche; both are the kind of single bounded change the
-spec-lifecycle rule explicitly leaves *out* of the lock requirement.
+Two bounded pieces, filed as GitHub Issues on the devclaw repo (**N1 = #371**,
+**N2 = #372**). Neither is a multi-PR direction tranche; both are the kind of single
+bounded change the spec-lifecycle rule explicitly leaves *out* of the lock
+requirement.
 
-- **N1 — collapse the source of truth.** GitHub Issues become canonical for
+- **N1 (#371) — collapse the source of truth.** GitHub Issues become canonical for
   *intent* (Issues for backlog, SQLite for execution state — §1). Demote the internal
   `problems` catalog to the **gatherer that feeds Issues** (the existing FILE edge),
   not a `list_problems`-read second backlog. Hygiene finishing an already-made
   decision (#329).
-- **N2 — make the loop we already have legible.** The self-issue-filing FILE→FIX
+- **N2 (#372) — make the loop we already have legible.** The self-issue-filing FILE→FIX
   loop is live but invisible; surface it as the CV artifact in the console (it feeds
   the console P2 problem-lifecycle tracker: identified→filed→fixing→resolved). No new
   engine work — expose what exists.
