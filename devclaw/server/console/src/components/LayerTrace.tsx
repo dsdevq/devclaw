@@ -94,7 +94,7 @@ function TickBlock({ t }: { t: Tick }) {
   return (
     <div className="card" style={{ overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 16px", borderBottom: "1px solid var(--border)" }}>
-        <StatusDot color={t.hasError ? "var(--red, #e5484d)" : "var(--green)"} />
+        <StatusDot color={t.hasError ? "var(--red)" : "var(--green)"} />
         <span className="mono truncate muted" style={{ fontSize: 11.5 }} title={t.traceId}>tick {t.traceId.slice(0, 8)}</span>
         <span className="mono muted" style={{ fontSize: 11 }}>{t.hops.length} hop{t.hops.length === 1 ? "" : "s"}</span>
         <span className="mono secondary" style={{ marginLeft: "auto", fontSize: 11 }}>{relativeTime(t.latestTs)}</span>
@@ -117,7 +117,8 @@ function Hop({ h }: { h: TraceEvent }) {
         alignItems: "baseline",
         padding: "9px 16px",
         borderBottom: "1px solid var(--border)",
-        borderLeft: error ? "2px solid var(--red, #e5484d)" : "2px solid transparent",
+        borderLeft: error ? "2px solid var(--red)" : "2px solid transparent",
+        background: error ? "var(--red-soft)" : undefined,
       }}
     >
       <span className="mono muted" style={{ fontSize: 11.5 }}>{layer.n ? `L${layer.n}` : "—"}</span>
@@ -126,7 +127,7 @@ function Hop({ h }: { h: TraceEvent }) {
         <span className="mono secondary">{h.kind}</span>
         {role && <span className="muted"> · {role}</span>}
         {error && (
-          <div className="mono" style={{ color: "var(--red, #e5484d)", fontSize: 11.5, marginTop: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+          <div className="mono" style={{ color: "var(--red)", fontSize: 11.5, marginTop: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
             {error}
           </div>
         )}
