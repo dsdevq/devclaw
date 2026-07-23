@@ -321,6 +321,28 @@ export async function fetchNode(): Promise<NodeVitals> {
   return r.json();
 }
 
+// ---- layer trace (ADR 0008 P1: one tick rendered hop-by-hop) --------------
+
+/** One trace event over the `traces` table. This endpoint predates the console
+ *  camelCase convention (it was built for the CLI/scripts), so keys stay as the
+ *  server returns them (`trace_id`, `goal_id`). `payload` shape varies by kind. */
+export interface TraceEvent {
+  id: number;
+  trace_id: string;
+  goal_id: string | null;
+  kind: string;
+  ts: number;
+  payload: Record<string, unknown>;
+}
+
+export async function fetchTraces(goalId: string, limit = 200): Promise<TraceEvent[]> {
+  const t = tokenQS();
+  const auth = t ? `&${t.slice(1)}` : "";
+  const r = await fetch(`/traces.json?goal=${encodeURIComponent(goalId)}&limit=${limit}${auth}`);
+  if (!r.ok) throw new Error(`traces.json ${r.status}`);
+  return (await r.json()).traces;
+}
+
 export async function pauseDispatch(reason?: string): Promise<{ operatorHold: OperatorHold }> {
   const r = await fetch(`/control/pause${tokenQS()}`, {
     method: "POST",
