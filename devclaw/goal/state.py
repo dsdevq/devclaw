@@ -756,7 +756,7 @@ class GoalState:
     #: file view (up to ~200KB of machine-read ground truth for the
     #: decomposer, not a human-skimmable artifact). spec/discovery stay plain
     #: files (display/prompt inputs, not consumed-state).
-    DOC_KINDS = frozenset({"checklist", "firmed_draft", "repo_analysis"})
+    DOC_KINDS = frozenset({"checklist", "firmed_draft", "repo_analysis", "block_options"})
 
     def has_doc(self, goal_id: str, kind: str) -> bool:
         """Whether a ``goal_docs`` row exists for ``(goal_id, kind)`` — the

@@ -1106,6 +1106,18 @@ async def goal_json(request: Request) -> Response:
                 ]
         except Exception:
             unknowns = []
+    # §6 structured decision blocks (ADR 0010): the planner's options for a
+    # needs_answer block, so the console renders click-to-steer buttons. Only
+    # read for needs_answer — a mechanical re-block must NEVER surface a stale
+    # menu. Best-effort: any hiccup degrades to {} (plain Steer box), never 500s.
+    block_options: dict = {}
+    if phase == "blocked" and g.get("blocked_kind", "") == "needs_answer":
+        try:
+            stored = goals._goal_store.read_block_options(goal_id)
+            if stored:
+                block_options = stored
+        except Exception:
+            block_options = {}
     # Usage rollup — cognition from the goal's trace totals, worker from the
     # per-task "usage" blocks the runner records into result_json. Pure reads;
     # best-effort: a torn trace/row degrades to null, never 500s the view.
@@ -1145,6 +1157,7 @@ async def goal_json(request: Request) -> Response:
             "blockedOn": g.get("blocked_on"),
             "blockedKind": g.get("blocked_kind", ""),
             "unknowns": unknowns,
+            "blockOptions": block_options,
             "usage": usage,
             "tasks": dispatched_tasks,
         }

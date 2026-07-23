@@ -449,6 +449,42 @@ class GoalContentMixin:
         self._goal_state.write_doc(goal_id, "firmed_draft", text, _now_ms())  # migrate
         return parsed
 
+    # ---- block options (§6 structured decision blocks, ADR 0010) -----------
+    # DB-only (no file view): transient state that lives only while a goal is
+    # needs_answer-blocked, not a rollback-readable contract like the checklist.
+
+    def write_block_options(self, goal_id: str, options, recommended: str) -> None:
+        """Persist a ``needs_answer`` block's structured §6 options + the
+        recommended key. Called on EVERY needs_answer block (even with an empty
+        list) so a re-block overwrites any stale prior options — get_goal only
+        reads this for a needs_answer block, so a mechanical re-block never shows
+        a menu. ``options`` is an iterable of BlockOption (duck-typed)."""
+        import json
+
+        content = json.dumps({
+            "options": [
+                {"key": o.key, "label": o.label, "detail": o.detail, "steer": o.steer}
+                for o in options
+            ],
+            "recommended": recommended,
+        })
+        self._goal_state.write_doc(goal_id, "block_options", content, _now_ms())
+
+    def read_block_options(self, goal_id: str) -> "dict | None":
+        """The current block's §6 options ``{options: [...], recommended}``, or
+        None if none stored. Display-grade: a garbled row degrades to None and
+        never raises — options are a convenience surface, not a gating contract."""
+        import json
+
+        content = self._goal_state.read_doc(goal_id, "block_options")
+        if not content:
+            return None
+        try:
+            parsed = json.loads(content)
+        except (ValueError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def load_effective_goal(self, goal_id: str, *, on_corrupt: str = "raise") -> Goal:
         """The goal as it currently is, with firming's outputs overlaid on the
         original ``goal.yaml`` facts. Use this everywhere cognition + gating
