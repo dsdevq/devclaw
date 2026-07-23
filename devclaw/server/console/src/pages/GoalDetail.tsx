@@ -5,11 +5,12 @@ import { EventFeed } from "../components/EventFeed";
 import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
 import { MilestoneTasks } from "../components/MilestoneTasks";
+import { LayerTrace } from "../components/LayerTrace";
 import { IconAlert, IconSteer, IconStop } from "../icons";
 import { phaseColor, VERDICT_LABEL, verdictColor } from "../status";
 import { Badge, ErrorNote, Loading, Modal, StatusDot, Tabs } from "../ui";
 
-type Tab = "timeline" | "tasks" | "prs" | "activity" | "schedule";
+type Tab = "timeline" | "tasks" | "prs" | "activity" | "trace" | "schedule";
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -144,6 +145,7 @@ export function GoalDetail() {
     { id: "tasks", label: "Tasks", count: data?.tasks?.length },
     { id: "prs", label: "Pull requests" },
     { id: "activity", label: "Activity" },
+    { id: "trace", label: "Trace" },
     { id: "schedule", label: "Schedule" },
   ];
 
@@ -226,6 +228,7 @@ export function GoalDetail() {
             )}
             {tab === "prs" && <PRList goalId={data.id} />}
             {tab === "activity" && <EventFeed goalId={data.id} />}
+            {tab === "trace" && <LayerTrace goalId={data.id} />}
             {tab === "schedule" && <GoalRunWindow goalId={data.id} />}
           </div>
         </>
