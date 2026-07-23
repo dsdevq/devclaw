@@ -1,6 +1,6 @@
 // Thin primitives over the index.css design system. Components stay tiny — the
 // styling lives in CSS classes + variables, not inline objects.
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 export function StatusDot({ color, live }: { color: string; live?: boolean }) {
   return (
@@ -59,6 +59,42 @@ export function SectionLabel({
       </div>
       {right}
     </div>
+  );
+}
+
+// TieredDisclosure — the P1 spine's "settled, folded, openable" section (ADR
+// 0008). Every tier shows its active items in full and folds the settled ones
+// behind a Show/Hide toggle that keeps the count visible. Extracted from the
+// ad-hoc archived-goals block in ProjectDetail so every drill-down tier reuses
+// one disclosure, not a hand-rolled useState each time. The settled content is
+// dimmed to read as secondary. Uncontrolled by default; pass defaultOpen to
+// start expanded.
+export function TieredDisclosure({
+  label,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  label: ReactNode;
+  count?: number;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <>
+      <SectionLabel
+        count={count}
+        right={
+          <button className="btn ghost sm" onClick={() => setOpen((o) => !o)}>
+            {open ? "Hide" : "Show"}
+          </button>
+        }
+      >
+        {label}
+      </SectionLabel>
+      {open && <div style={{ opacity: 0.75 }}>{children}</div>}
+    </>
   );
 }
 

@@ -291,6 +291,13 @@ def _task_row(t) -> dict:
         "createdAt": t.created_at,
         "completedAt": t.completed_at,
         "prUrl": t.pr_url,
+        # ADR 0008 P1: the milestone tier is a *view* — tasks grouped by their
+        # existing plan_key (the PlannedTask key a program-child was persisted
+        # from). ``milestone`` is the spec-milestone label when plan-from-spec
+        # set one. Both are surfaced here so the console can group without a new
+        # table; either is None for standalone tasks / pre-column rows.
+        "planKey": t.plan_key,
+        "milestone": t.milestone,
     }
 
 
