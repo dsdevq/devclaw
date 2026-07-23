@@ -90,3 +90,13 @@ read-only, over existing projections) is what's locked.
 - Per-project / per-milestone health *grouping* and true time-series *charts*
   (the P2 health enrichment is breakdown + totals; richer charting can follow if
   the numbers warrant it).
+- **Node-wide estimated token spend — DEFERRED (amended 2026-07-23, P2-B).** The
+  ADR named token spend as part of the health enrichment, but on build it proved
+  ungrounded to ship cheaply/honestly: `eval_outcomes` carries no token/cost
+  columns, and the only token data lives per-goal in `traces` (`trace_totals`) —
+  a node-wide rollup means an expensive `json_extract` scan over the 200k-row
+  traces table on every poll. Per-goal token usage is **already surfaced** (the
+  GoalDetail "Usage" badge), so P2-B shipped the **error-class breakdown** (the
+  high-value reliability-legibility half) and deferred the node-wide token figure
+  rather than fabricate one or add fragile plumbing blind. Revisit with a bounded
+  aggregation if a node-wide total is actually wanted.
