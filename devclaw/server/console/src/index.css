@@ -67,6 +67,7 @@
   --green: #3dd68c;
   --amber: #e7b23e;
   --red: #f26157;
+  --violet: #9b8cff; /* the `fixing` lifecycle stage (N2) */
   --green-soft: rgba(61, 214, 140, 0.13);
   --amber-soft: rgba(231, 178, 62, 0.13);
   --red-soft: rgba(242, 97, 87, 0.13);
@@ -110,6 +111,7 @@
   --green: #17915b;
   --amber: #b0740e;
   --red: #ce3b31;
+  --violet: #6b5bd6; /* the `fixing` lifecycle stage (N2) */
   --green-soft: rgba(23, 145, 91, 0.1);
   --amber-soft: rgba(176, 116, 14, 0.1);
   --red-soft: rgba(206, 59, 49, 0.1);

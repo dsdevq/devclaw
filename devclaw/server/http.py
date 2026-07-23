@@ -624,12 +624,18 @@ from ..state_store.problems import problem_lifecycle as _problem_lifecycle  # no
 @mcp.custom_route("/problems.json", methods=["GET"])
 async def problems_json(request: Request) -> Response:
     """The deduplicated problems catalog for the console problem-lifecycle
-    tracker (ADR 0009 P2). Each row carries its self-issue-filing Stage-1 fields
-    (``issue_number``/``issue_state``) plus a derived ``lifecycle`` stage
-    (identified → filed → resolved). Params: ``category`` filter, ``limit``
-    (default 100, max 1000). Pure SELECT over ``problems`` — read-only, never
-    wakes the goal loop."""
-    from ..goal.self_issue import self_repo
+    tracker (ADR 0009 P2 + N2/#372). Each row carries its self-issue-filing
+    Stage-1 fields (``issue_number``/``issue_state``) plus a derived
+    ``lifecycle`` stage: identified → filed → **fixing** → resolved. ``fixing``
+    is the restored §5.5 "being-worked" stage — a *filed & open* issue whose
+    deterministic self-fix goal (``self-fix-issue-<n>``) exists; the row then
+    carries ``fix_goal_id`` so the console deep-links to that goal (its PR +
+    human-merge surface). HONEST: ``fixing`` means "a fix goal is running / a PR
+    opens for your review", never autonomous auto-fix (fixing is propose-only).
+    Params: ``category`` filter, ``limit`` (default 100, max 1000). Read-only —
+    a SELECT over ``problems`` plus one cheap goal-existence check per filed
+    row; never wakes the goal loop."""
+    from ..goal.self_issue import self_repo, self_fix_goal_id
 
     limit, err = _evals_limit(request)
     if err is not None:
@@ -640,7 +646,15 @@ async def problems_json(request: Request) -> Response:
         include_issue=True,
     )
     for p in rows:
-        p["lifecycle"] = _problem_lifecycle(p)
+        stage = _problem_lifecycle(p)
+        # Restore the §5.5 "being-worked" stage the P2 impl folded away: a filed
+        # & open issue with a live self-fix goal reads `fixing`, linking to it.
+        if stage == "filed" and p.get("issue_number"):
+            gid = self_fix_goal_id(int(p["issue_number"]))
+            if goals.has_goal(gid):
+                stage = "fixing"
+                p["fix_goal_id"] = gid
+        p["lifecycle"] = stage
     # `selfRepo` (owner/name, or null when self-issue-filing is off) lets the
     # console build issue links without hardcoding the repo.
     return JSONResponse({"problems": rows, "count": len(rows), "selfRepo": self_repo()})
