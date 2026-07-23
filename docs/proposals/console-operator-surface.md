@@ -1,12 +1,14 @@
 # Console as a live operator surface — the node you watch AND command
 
-**Status: LOCKED (P1 direction)** — 2026-07-23. The P1 slice (read hierarchy +
-layer trace) is firm and clear to build; **P2 and P3 stay named-but-unsized**
-until P1 lands. All eight §5 `[OPEN]`s are resolved or explicitly deferred-to-slice
-with an owner (below). Locking is direction, not schedule — sequencing stays
-Denys's call. Reference artifact: a clickable mockup built 2026-07-22 (link in the
-vault note `console-live-operator-vision-2026-07-22`); per `[OPEN] #8` the mockup
-is a demo-of-everything, **not** the target IA.
+**Status: P1 GRADUATED → [ADR 0008](../decisions/0008-console-operator-surface-p1.md)**
+— 2026-07-23. The P1 slice (read hierarchy + layer trace, read-only) is scheduled
+and its decision + sizing are frozen in ADR 0008, which is now canonical for P1.
+**P2 and P3 remain LOCKED-direction but unsized** (this proposal stays their home
+until each is scheduled and graduates its own ADR). All eight §5 `[OPEN]`s are
+resolved or explicitly deferred-to-slice with an owner (below). Reference artifact:
+a clickable mockup built 2026-07-22 (link in the vault note
+`console-live-operator-vision-2026-07-22`); per `[OPEN] #8` the mockup is a
+demo-of-everything, **not** the target IA.
 
 > This proposal references, does not restate, the invariants in
 > [`../../CLAUDE.md`](../../CLAUDE.md) and [`../architecture.md`](../architecture.md).
