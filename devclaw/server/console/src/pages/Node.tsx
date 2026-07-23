@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { fetchNode, type NodeLayer, type NodeVitals } from "../api";
 import { relativeTime } from "../util/time";
 import { ErrorNote, Loading, SectionLabel, StatusDot } from "../ui";
+import { Fleet } from "../components/Fleet";
 
 // The NODE view (ADR 0008 P1) — the top of the console drill-down spine. All
 // read-only over /node.json: dispatch/heartbeat, goal population, the
@@ -76,6 +77,9 @@ export function Node() {
             <Stat label="Done" value={v.goals.done} color="var(--green)" />
             <Stat label="Running tasks" value={v.runningTasks} color={v.runningTasks ? "var(--accent)" : "var(--text-muted)"} live={v.runningTasks > 0} />
           </div>
+
+          {/* The NODE→PROJECT→GOAL drill-down spine */}
+          <Fleet />
 
           {/* Clean-cycle headline */}
           <section style={{ marginBottom: 30 }}>
