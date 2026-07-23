@@ -343,6 +343,43 @@ export async function fetchTraces(goalId: string, limit = 200): Promise<TraceEve
   return (await r.json()).traces;
 }
 
+// ---- problems catalog / lifecycle (ADR 0009 P2) ---------------------------
+
+export type ProblemStage = "identified" | "filed" | "resolved";
+
+/** A deduplicated problem + its self-issue-filing lifecycle. `issue_number` is
+ *  set once filed; `lifecycle` is derived server-side (honest: a filed & open
+ *  issue is `filed`, never "auto-fixing" — fixing is human-gated). */
+export interface ProblemRow {
+  fingerprint: string;
+  category: string;
+  kind: string;
+  summary: string;
+  sample_message: string;
+  count: number;
+  recovered_count: number;
+  terminal_count: number;
+  first_seen_ms: number;
+  last_seen_ms: number;
+  last_goal_id: string;
+  last_task_id: string;
+  issue_number: number | null;
+  issue_state: string | null;
+  lifecycle: ProblemStage;
+}
+
+export interface ProblemsResponse {
+  problems: ProblemRow[];
+  count: number;
+  selfRepo: string | null; // owner/name, or null when self-issue-filing is off
+}
+
+export async function fetchProblems(): Promise<ProblemsResponse> {
+  const r = await fetch(`/problems.json${tokenQS()}`);
+  if (!r.ok) throw new Error(`problems.json ${r.status}`);
+  return r.json();
+}
+
 export async function pauseDispatch(reason?: string): Promise<{ operatorHold: OperatorHold }> {
   const r = await fetch(`/control/pause${tokenQS()}`, {
     method: "POST",

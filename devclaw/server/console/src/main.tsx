@@ -10,6 +10,7 @@ import { ProjectDetail } from "./pages/ProjectDetail";
 import { Goals } from "./pages/Goals";
 import { GoalDetail } from "./pages/GoalDetail";
 import { Evals } from "./pages/Evals";
+import { Problems } from "./pages/Problems";
 import { Settings } from "./pages/Settings";
 
 createRoot(document.getElementById("root")!).render(
@@ -24,6 +25,7 @@ createRoot(document.getElementById("root")!).render(
           <Route path="goals" element={<Goals />} />
           <Route path="goals/:id" element={<GoalDetail />} />
           <Route path="evals" element={<Evals />} />
+          <Route path="problems" element={<Problems />} />
           <Route path="settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

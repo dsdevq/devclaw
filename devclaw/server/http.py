@@ -615,6 +615,43 @@ async def evals_cycles_json(request: Request) -> Response:
     return JSONResponse(store.list_cycle_reports(limit=limit))
 
 
+def _problem_lifecycle(p: dict) -> str:
+    """Derive a problem's self-improving-cycle stage (ADR 0009) from its
+    self-issue-filing Stage-1 fields. HONEST (§5.5): there is no "auto-fixing"
+    stage — filing is live, *fixing* is propose-only/human-merges, so a filed &
+    open issue reads as ``filed`` (in the backlog), never "being auto-fixed"."""
+    if p.get("issue_state") == "closed":
+        return "resolved"
+    if p.get("issue_number"):
+        return "filed"
+    return "identified"
+
+
+@mcp.custom_route("/problems.json", methods=["GET"])
+async def problems_json(request: Request) -> Response:
+    """The deduplicated problems catalog for the console problem-lifecycle
+    tracker (ADR 0009 P2). Each row carries its self-issue-filing Stage-1 fields
+    (``issue_number``/``issue_state``) plus a derived ``lifecycle`` stage
+    (identified → filed → resolved). Params: ``category`` filter, ``limit``
+    (default 100, max 1000). Pure SELECT over ``problems`` — read-only, never
+    wakes the goal loop."""
+    from ..goal.self_issue import self_repo
+
+    limit, err = _evals_limit(request)
+    if err is not None:
+        return err
+    rows = store.list_problems(
+        category=request.query_params.get("category") or None,
+        limit=limit,
+        include_issue=True,
+    )
+    for p in rows:
+        p["lifecycle"] = _problem_lifecycle(p)
+    # `selfRepo` (owner/name, or null when self-issue-filing is off) lets the
+    # console build issue links without hardcoding the repo.
+    return JSONResponse({"problems": rows, "count": len(rows), "selfRepo": self_repo()})
+
+
 @mcp.custom_route("/config/env.json", methods=["GET"])
 async def config_env_json(_request: Request) -> Response:
     """Read-only catalog of every runtime env var + its current value (secrets

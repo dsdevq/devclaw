@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { fetchControl, tokenQueryString, type ControlState } from "../api";
 import {
+  IconAlert,
   IconEvals,
   IconGoals,
   IconMoon,
@@ -20,6 +21,7 @@ const NAV = [
   { to: "/projects", label: "Projects", Icon: IconProjects, end: false },
   { to: "/goals", label: "Goals", Icon: IconGoals, end: false },
   { to: "/evals", label: "Evals", Icon: IconEvals, end: false },
+  { to: "/problems", label: "Problems", Icon: IconAlert, end: false },
   { to: "/settings", label: "Settings", Icon: IconSettings, end: false },
 ];
 

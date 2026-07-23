@@ -170,14 +170,21 @@ class ProblemsMixin:
         *,
         category: Optional[str] = None,
         limit: int = 100,
+        include_issue: bool = False,
     ) -> list[dict]:
         """Distinct problems, most-frequent first (rides ``idx_problems_count``).
         The read side the future ranked report is built on; also the assertion
-        surface for the dedup/bounded tests. Pure SELECT — no LLM."""
+        surface for the dedup/bounded tests. Pure SELECT — no LLM.
+
+        ``include_issue`` adds ``issue_number``/``issue_state`` (the
+        self-issue-filing Stage-1 fields) so the console problem-lifecycle
+        tracker (ADR 0009) can render *identified → filed → open → resolved*.
+        Default False keeps the existing MCP/test output byte-identical."""
+        issue_cols = ", issue_number, issue_state" if include_issue else ""
         sql = (
             "SELECT fingerprint, category, kind, summary, sample_message, count, "
             "recovered_count, terminal_count, first_seen_ms, last_seen_ms, "
-            "last_goal_id, last_task_id FROM problems"
+            f"last_goal_id, last_task_id{issue_cols} FROM problems"
         )
         args: list[object] = []
         if category:
