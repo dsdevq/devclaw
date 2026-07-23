@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { answerGoal, cancelGoal, fetchGoal, resumeGoal, setGoalStrictness, steerGoal, tokenQueryString, type GoalDetail as GD } from "../api";
+import { answerGoal, cancelGoal, fetchGoal, resumeGoal, setGoalStrictness, steerGoal, tokenQueryString, type BlockOption, type GoalDetail as GD } from "../api";
 import { EventFeed } from "../components/EventFeed";
 import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
@@ -56,20 +56,24 @@ export function GoalDetail() {
     };
   }, [id]);
 
-  const doSteer = async () => {
-    if (!id || !steerMsg.trim()) return;
+  const doSteerMessage = async (msg: string) => {
+    if (!id || !msg.trim()) return;
     setBusy("steer");
-    setSteerOpen(false);
     try {
-      await steerGoal(id, steerMsg.trim());
+      await steerGoal(id, msg.trim());
       setFlash("Steer sent");
-      setSteerMsg("");
       reload();
     } catch (e) {
       setFlash(String(e));
     } finally {
       setBusy(null);
     }
+  };
+
+  const doSteer = async () => {
+    setSteerOpen(false);
+    setSteerMsg("");
+    await doSteerMessage(steerMsg);
   };
 
   const doCancel = async () => {
@@ -213,9 +217,13 @@ export function GoalDetail() {
             <BlockedBanner
               blockedOn={data.blockedOn}
               hasUnknowns={hasUnknowns}
+              options={data.blockOptions?.options ?? []}
+              recommended={data.blockOptions?.recommended ?? ""}
               busy={busy}
               onResume={doResume}
               onAnswer={() => setAnswerOpen(true)}
+              onPickOption={doSteerMessage}
+              onCustom={() => setSteerOpen(true)}
             />
           )}
 
@@ -333,36 +341,83 @@ export function GoalDetail() {
 function BlockedBanner({
   blockedOn,
   hasUnknowns,
+  options,
+  recommended,
   busy,
   onResume,
   onAnswer,
+  onPickOption,
+  onCustom,
 }: {
   blockedOn: string | null;
   hasUnknowns: boolean;
+  options: BlockOption[];
+  recommended: string;
   busy: string | null;
   onResume: () => void;
   onAnswer: () => void;
+  onPickOption: (steer: string) => void;
+  onCustom: () => void;
 }) {
   const isDispatchCap = (blockedOn ?? "").toLowerCase().includes("dispatch cap");
+  // §6 (ADR 0010): a needs_answer block whose planner emitted structured options
+  // renders them as click-to-steer buttons (+ the loop's recommendation) instead
+  // of just a "reason + Resume". Firming unknowns still route to Answer; a plain
+  // block still routes to Resume.
+  const hasOptions = options.length > 0 && !hasUnknowns;
   return (
     <div
       className="card"
-      style={{ display: "flex", gap: 12, padding: "13px 15px", margin: "0 0 20px", alignItems: "center", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", background: "var(--amber-soft)" }}
+      style={{ padding: "13px 15px", margin: "0 0 20px", borderColor: "color-mix(in srgb, var(--amber) 45%, var(--border))", background: "var(--amber-soft)" }}
     >
-      <span style={{ color: "var(--amber)", flexShrink: 0 }}><IconAlert size={17} /></span>
-      <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.5 }}>
-        <span style={{ fontWeight: 600 }}>Blocked — waiting on you.</span>{" "}
-        <span className="secondary">{blockedOn ?? "Reason unknown — check the activity log."}</span>
-        {isDispatchCap && <span className="muted"> Merge an open PR under Pull requests to unblock the loop.</span>}
+      <div style={{ display: "flex", gap: 12, alignItems: hasOptions ? "flex-start" : "center" }}>
+        <span style={{ color: "var(--amber)", flexShrink: 0, marginTop: hasOptions ? 1 : 0 }}><IconAlert size={17} /></span>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.5 }}>
+          <span style={{ fontWeight: 600 }}>Blocked — waiting on you.</span>{" "}
+          <span className="secondary">{blockedOn ?? "Reason unknown — check the activity log."}</span>
+          {isDispatchCap && <span className="muted"> Merge an open PR under Pull requests to unblock the loop.</span>}
+        </div>
+        {!hasOptions && (hasUnknowns ? (
+          <button className="btn primary sm" disabled={busy !== null} onClick={onAnswer} style={{ flexShrink: 0 }}>
+            Answer
+          </button>
+        ) : (
+          <button className="btn primary sm" disabled={busy !== null} onClick={onResume} style={{ flexShrink: 0 }}>
+            {busy === "resume" ? "…" : "Resume"}
+          </button>
+        ))}
       </div>
-      {hasUnknowns ? (
-        <button className="btn primary sm" disabled={busy !== null} onClick={onAnswer} style={{ flexShrink: 0 }}>
-          Answer
-        </button>
-      ) : (
-        <button className="btn primary sm" disabled={busy !== null} onClick={onResume} style={{ flexShrink: 0 }}>
-          {busy === "resume" ? "…" : "Resume"}
-        </button>
+
+      {hasOptions && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12, paddingLeft: 29 }}>
+          {options.map((o) => {
+            const isRec = o.key === recommended;
+            return (
+              <button
+                key={o.key}
+                className="card"
+                disabled={busy !== null}
+                onClick={() => onPickOption(o.steer)}
+                style={{
+                  textAlign: "left", padding: "10px 13px", cursor: busy ? "default" : "pointer",
+                  borderColor: isRec ? "var(--accent)" : "var(--border)",
+                  background: "var(--surface, transparent)",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 600 }}>{o.label}</span>
+                  {isRec && (
+                    <span className="badge" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>recommended</span>
+                  )}
+                </div>
+                {o.detail && <div className="secondary" style={{ fontSize: 12, marginTop: 3 }}>{o.detail}</div>}
+              </button>
+            );
+          })}
+          <button className="btn ghost sm" disabled={busy !== null} onClick={onCustom} style={{ alignSelf: "flex-start", marginTop: 2 }}>
+            Write your own answer…
+          </button>
+        </div>
       )}
     </div>
   );
