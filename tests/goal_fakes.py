@@ -59,7 +59,9 @@ class FakeEngine:
     def check_db_size_alert(self) -> str | None:
         return self.db_size_alert_msg
 
-    def list_problems(self, *, category: str | None = None, limit: int = 100) -> list[dict]:
+    def list_problems(
+        self, *, category: str | None = None, limit: int = 100, include_issue: bool = False
+    ) -> list[dict]:
         return self.problems
 
     def db_size_bytes(self) -> int:
