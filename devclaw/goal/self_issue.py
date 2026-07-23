@@ -25,10 +25,11 @@ there is no self-modification here, and no cognition call: it is pure wiring.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from ..state_store.problems import PROBLEM_CATEGORIES
 
@@ -49,6 +50,19 @@ MAX_NEW_ISSUES_PER_CYCLE = int(os.environ.get("DEVCLAW_SELF_ISSUE_MAX_PER_CYCLE"
 #: ``problems.category`` (NOT eval_outcomes.failure_class — distinct taxonomies).
 SELF_FILED_LABEL = "devclaw:self-filed"
 _CLASS_PREFIX = "class:"
+
+#: Stage 2 (P2 — FIX pickup) labels + concurrency. A human opt-in ``accepted``
+#: label (O5) on a self-filed issue is the ONLY thing devclaw picks up — it never
+#: starts modifying itself unprompted. ``devclaw:fixing`` marks an issue already
+#: claimed by a self-fix goal: a visible, restart-safe concurrency signal. There is
+#: NO auto-merge in P2 — the goal opens a PR a HUMAN merges (proposal §5A; the tiered
+#: blast-radius classifier is deferred to P2.1/P2.2).
+ACCEPTED_LABEL = "accepted"
+FIXING_LABEL = "devclaw:fixing"
+#: how many self-fix goals may be in flight at once. Concurrency 1 = serialize
+#: self-modification: parallel self-fixes multiply the self-brick surface and muddy
+#: failure attribution (proposal §5A). Tunable via env.
+SELF_FIX_CONCURRENCY = int(os.environ.get("DEVCLAW_SELF_FIX_CONCURRENCY", "1"))
 
 
 # ---- pure decisions (no DB, no clock, no network) ---------------------------
@@ -125,6 +139,9 @@ class GhAdapter(Protocol):
     async def create_issue(self, repo: str, *, title: str, body: str, labels: list[str]) -> Optional[int]: ...
     async def reopen_issue(self, repo: str, number: int, *, comment: str) -> bool: ...
     async def close_issue(self, repo: str, number: int, *, comment: str) -> bool: ...
+    # Stage 2 (P2 — FIX pickup):
+    async def list_issues(self, repo: str, *, labels: list[str], state: str = "open") -> list[dict]: ...
+    async def mark_fixing(self, repo: str, number: int, *, label: str, comment: str) -> bool: ...
 
 
 async def _run(*args: str) -> tuple[int, str]:
@@ -178,6 +195,36 @@ class GhCli:
         if rc != 0:
             sys.stderr.write(f"self-issue: close #{number} failed on {repo}: {out}\n")
             return False
+        return True
+
+    # ---- Stage 2 (P2 — FIX pickup) --------------------------------------------
+
+    async def list_issues(self, repo: str, *, labels: list[str], state: str = "open") -> list[dict]:
+        # ``--label`` repeated is AND semantics — the issue must carry ALL of them.
+        args = ["gh", "issue", "list", "--repo", repo, "--state", state,
+                "--json", "number,title,body,labels"]
+        for lbl in labels:
+            args += ["--label", lbl]
+        rc, out = await _run(*args)
+        if rc != 0:
+            sys.stderr.write(f"self-fix: list issues failed on {repo}: {out}\n")
+            return []
+        try:
+            data = json.loads(out or "[]")
+        except ValueError:
+            sys.stderr.write(f"self-fix: unparseable issue list on {repo}: {out[:200]}\n")
+            return []
+        return data if isinstance(data, list) else []
+
+    async def mark_fixing(self, repo: str, number: int, *, label: str, comment: str) -> bool:
+        # ``--add-label`` is idempotent (re-adding an existing label is a no-op).
+        rc, out = await _run(
+            "gh", "issue", "edit", str(number), "--repo", repo, "--add-label", label
+        )
+        if rc != 0:
+            sys.stderr.write(f"self-fix: add-label #{number} failed on {repo}: {out}\n")
+            return False
+        await _run("gh", "issue", "comment", str(number), "--repo", repo, "--body", comment)
         return True
 
 
@@ -299,5 +346,159 @@ async def run_self_issue_filing(
                 result.closed.append(number)
         except Exception as exc:  # noqa: BLE001
             sys.stderr.write(f"self-issue: closing #{number} ({fp}) failed: {exc}\n")
+
+    return result
+
+
+# ============================================================================
+# Stage 2 — FIX pickup (P2). Proposal §5A: at the SAME once-per-cycle edge, turn a
+# human-``accepted`` self-filed issue into ONE ``one_shot`` self-fix goal that opens
+# a PR for HUMAN review. NO auto-merge here (deferred to P2.1/P2.2). The decisions
+# are pure functions over primitives; goal creation stays in ``GoalService`` (passed
+# in as ``create_goal``, mirroring the injectable ``gh``) so this module never
+# reaches into the goal store itself.
+# ============================================================================
+
+def _label_names(issue: dict) -> list[str]:
+    """``gh issue list --json labels`` yields ``[{"name": ...}, ...]``; normalise to
+    plain names so the selection logic works over primitives (also tolerates a fake
+    that passes bare strings)."""
+    out = []
+    for lbl in issue.get("labels") or []:
+        out.append(lbl.get("name", "") if isinstance(lbl, dict) else str(lbl))
+    return out
+
+
+def select_for_pickup(
+    issues: list[dict],
+    *,
+    fixing_label: str = FIXING_LABEL,
+    concurrency: int = SELF_FIX_CONCURRENCY,
+) -> list[dict]:
+    """Which accepted issues to spawn a self-fix goal for THIS cycle. Issues already
+    carrying ``fixing_label`` are counted as in-flight; the remaining concurrency
+    budget is filled from the fresh ones in list order. Pure — no DB, no network."""
+    in_flight = sum(1 for i in issues if fixing_label in _label_names(i))
+    fresh = [i for i in issues if fixing_label not in _label_names(i)]
+    budget = max(0, concurrency - in_flight)
+    return fresh[:budget]
+
+
+def self_fix_goal_id(number: int) -> str:
+    """Deterministic per-issue goal id → idempotent: a re-pick raises
+    ``FileExistsError`` in the store instead of double-spawning (proposal §5A)."""
+    return f"self-fix-issue-{number}"
+
+
+def self_repo_url(slug: str) -> str:
+    """Slug (``owner/name``, from ``DEVCLAW_SELF_REPO``) → the clone URL the engine
+    needs (``git clone`` wants a real URL, not a slug; cf. ``delivery/repo.py``)."""
+    return f"https://github.com/{slug}.git"
+
+
+def self_fix_workspace(goal_id: str) -> str:
+    """Where the self-fix goal's clone lands. In prod the sandbox only binds paths
+    under ``DEVCLAW_CONTAINER_PATH_PREFIX`` (``engine/sandcastle.py``), so derive from
+    it; unset (dev/host/tests) ⇒ the ``/repos/<id>`` convention the tests use."""
+    base = (os.environ.get("DEVCLAW_CONTAINER_PATH_PREFIX") or "").rstrip("/") or "/repos"
+    return f"{base}/{goal_id}"
+
+
+def self_fix_objective(issue: dict, slug: str) -> str:
+    number = issue.get("number")
+    title = (issue.get("title") or "").strip()
+    head = f"Fix {slug} issue #{number}: {title}".rstrip()
+    body = (issue.get("body") or "").strip()
+    if body:
+        return f"{head}\n\nIssue body:\n{body[:1500]}"
+    return head
+
+
+def self_fix_done_when(number: int, slug: str) -> str:
+    # ≥20 chars (admission's ``vague_done_when`` gate) and grounds the goal on a PR,
+    # never an auto-merge — a human reviews and merges (proposal §5A).
+    return (
+        f"The root cause behind {slug} issue #{number} is fixed and a pull request is "
+        f"open against {slug} with the full test suite and all quality gates passing; a "
+        f"human reviews and merges it (no auto-merge)."
+    )
+
+
+@dataclass
+class SelfFixResult:
+    #: (issue_number, goal_id) claimed this cycle — new spawns AND re-claims of an
+    #: already-existing goal whose label was missing (self-heal).
+    picked: list = field(default_factory=list)
+
+    def report_line(self) -> str:
+        """One line for the cycle-report body (mirrors ``SelfIssueResult``)."""
+        if not self.picked:
+            return ""
+        return "self-fix: picked up " + ", ".join(f"#{n}→{g}" for n, g in self.picked)
+
+
+async def run_self_fix_pickup(
+    create_goal: Callable[..., dict],
+    *,
+    repo: Optional[str] = None,
+    gh: Optional[GhAdapter] = None,
+    concurrency: int = SELF_FIX_CONCURRENCY,
+) -> SelfFixResult:
+    """Pick up human-``accepted`` self-filed issues → open ONE ``one_shot`` self-fix
+    goal each (up to ``concurrency``), and claim them with ``FIXING_LABEL``. ZERO LLM
+    to detect (a ``gh issue list`` + pure selection); env-gated on ``DEVCLAW_SELF_REPO``
+    (unset ⇒ no-op, shells nothing — the default + every test path); best-effort —
+    a GitHub or admission failure logs and is skipped, never wedges the cycle edge.
+
+    ``create_goal`` is ``GoalService.create_goal`` (injected, so this module never
+    touches the goal store): a re-pick of an issue whose goal already exists raises
+    ``FileExistsError`` and is treated as an idempotent re-claim, not an error."""
+    result = SelfFixResult()
+    repo = repo or self_repo()
+    if not repo:  # feature off — no-op, no subprocess
+        return result
+    gh = gh or GhCli()
+
+    try:
+        issues = await gh.list_issues(
+            repo, labels=[ACCEPTED_LABEL, SELF_FILED_LABEL], state="open"
+        )
+    except Exception as exc:  # noqa: BLE001 — a list hiccup never wedges the edge
+        sys.stderr.write(f"self-fix: list issues failed on {repo}: {exc}\n")
+        return result
+
+    for issue in select_for_pickup(issues, concurrency=concurrency):
+        number = issue.get("number")
+        if not isinstance(number, int):
+            continue
+        goal_id = self_fix_goal_id(number)
+        try:
+            create_goal(
+                goal_id,
+                objective=self_fix_objective(issue, repo),
+                workspace_dir=self_fix_workspace(goal_id),
+                repo_url=self_repo_url(repo),
+                done_when=self_fix_done_when(number, repo),
+                mode="one_shot",
+                open_pr=True,
+            )
+        except FileExistsError:
+            # Goal already exists (a prior cycle spawned it but the claim label
+            # didn't stick) — fall through to re-apply the label. Self-heal, not error.
+            pass
+        except Exception as exc:  # noqa: BLE001 — one bad issue never wedges the rest
+            sys.stderr.write(f"self-fix: create_goal for #{number} failed: {exc}\n")
+            continue
+        try:
+            await gh.mark_fixing(
+                repo, number, label=FIXING_LABEL,
+                comment=(
+                    f"devclaw picked this up as goal `{goal_id}` (one-shot self-fix). "
+                    "It will open a PR for human review — no auto-merge."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"self-fix: claim label on #{number} failed: {exc}\n")
+        result.picked.append((number, goal_id))
 
     return result
