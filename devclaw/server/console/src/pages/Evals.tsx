@@ -85,6 +85,8 @@ export function Evals() {
             <Metric label="Outcomes" value={String(settled)} sub="recent settles" />
           </div>
 
+          <FailureClasses rows={rows} />
+
           <section style={{ marginBottom: 34 }}>
             <SectionLabel
               count={shown.length}
@@ -137,6 +139,48 @@ export function Evals() {
         </>
       )}
     </div>
+  );
+}
+
+// Error-class breakdown (ADR 0009 P2) — which mechanical failure classes
+// dominate the settled outcomes, ranked. Client-side over failure_class, which
+// is already on every eval_outcomes row; the reliability-legibility payoff is
+// "where is the loop failing", so effort lands where the bars are longest.
+function FailureClasses({ rows }: { rows: EvalOutcome[] }) {
+  const counts = new Map<string, number>();
+  for (const o of rows) {
+    if (o.failure_class) counts.set(o.failure_class, (counts.get(o.failure_class) ?? 0) + 1);
+  }
+  const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const total = ranked.reduce((s, [, n]) => s + n, 0);
+  const max = ranked.length ? ranked[0][1] : 0;
+
+  return (
+    <section style={{ marginBottom: 34 }}>
+      <SectionLabel count={ranked.length}>Failure classes</SectionLabel>
+      {ranked.length === 0 ? (
+        <div className="card">
+          <EmptyState title="No failures in view" hint="Every settled outcome here either passed or carries no mechanical class." />
+        </div>
+      ) : (
+        <div className="card" style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+          {ranked.map(([cls, n]) => (
+            <div key={cls} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 44px", gap: 12, alignItems: "center" }}>
+              <div>
+                <div className="mono" style={{ fontSize: 12, color: "var(--red)", marginBottom: 4 }}>{cls}</div>
+                <div style={{ height: 6, background: "var(--red-soft)", borderRadius: 3, overflow: "hidden" }}>
+                  <div style={{ height: "100%", width: `${max ? (n / max) * 100 : 0}%`, background: "var(--red)" }} />
+                </div>
+              </div>
+              <span className="mono secondary" style={{ fontSize: 12.5, textAlign: "right" }}>{n}</span>
+            </div>
+          ))}
+          <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+            {total} failed outcome{total === 1 ? "" : "s"} across {ranked.length} class{ranked.length === 1 ? "" : "es"} · token spend is per-goal (see a goal's Usage badge); a node-wide rollup is not surfaced here.
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
