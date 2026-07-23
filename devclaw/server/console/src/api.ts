@@ -159,6 +159,15 @@ export interface GoalUsage {
   totalCostUsd: number;
 }
 
+/** One selectable answer for a §6 needs_answer block (ADR 0010). `steer` is the
+ *  pre-baked steer message applied when the owner clicks this option. */
+export interface BlockOption {
+  key: string;
+  label: string;
+  detail: string;
+  steer: string;
+}
+
 export interface GoalDetail {
   id: string;
   objective: string;
@@ -177,6 +186,11 @@ export interface GoalDetail {
   blockedKind: string;
   /** Firming questions to answer when blocked awaiting owner input; else []. */
   unknowns: Unknown[];
+  /** §6 structured decision blocks (ADR 0010): the planner's options for a
+   *  needs_answer block, each carrying a pre-baked steer. `{}` (no options) when
+   *  the block is open-ended or mechanical — the banner falls back to Answer/
+   *  Resume/custom-steer. `recommended` is the loop's suggestion, not a decision. */
+  blockOptions: { options?: BlockOption[]; recommended?: string };
   usage: GoalUsage | null;
   projectId?: string;
   /** Every task the goal heartbeat dispatched (parent_goal_id = this goal). */
