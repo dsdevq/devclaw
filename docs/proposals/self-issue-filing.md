@@ -1,12 +1,13 @@
 # Proposal — the self-improving cycle: devclaw files (and later fixes) its own issues
 
-- **Status:** **Stage 1 (FILE + CLOSE) — LOCKED 2026-07-22.** Stage 2 (FIX) —
-  **DRAFT**, and §3 is **REOPENED** (see below): Denys chose *full-auto-if-green*
-  on 2026-07-22, which overrides the written "never auto-merge to self" invariant;
-  that decision is deferred to the **Stage-2 lock** and must not be treated as
-  settled. Stage 1 carries no self-merge, so it locks independently.
+- **Status:** **Stage 1 (FILE + CLOSE) — LOCKED 2026-07-22. Stage 2 (FIX) — LOCKED
+  2026-07-23.** §3 self-merge autonomy RESOLVED = **tiered by blast radius** (§3;
+  reversed the 2026-07-22 full-auto lean "with fresh eyes" exactly as that clause
+  required); P2 boundary firmed in §5A with **shadow-first** tiered auto-merge chosen.
+  LOCKED = direction, not schedule — the tranche is Denys's to sequence; no Stage-2
+  code lands outside it. Stage 1 carries no self-merge, so it locked independently.
 - **Date opened:** 2026-07-22 · **Revived + partially locked:** 2026-07-22 ·
-  **Authors:** Denys + Claude
+  **Stage 2 locked:** 2026-07-23 · **Authors:** Denys + Claude
 - **Relates to:** [ADR 0006](../decisions/0006-continuous-eval-projection.md)
   (the cycle report + `problems`/`eval_outcomes` this reads from), the ABANDONED
   `ops-agent-problems-consolidation.md` (this is the **dev-loop** half of that cut),
@@ -84,7 +85,7 @@ recurrence gating, a label map, and stale age-out.
 durable goal -> fix -> the review / eval / browser gates run. Self-referential
 autonomy = §3 (reopened).
 
-## 3. Self-modification autonomy — REOPENED (was: PROPOSE-ONLY)
+## 3. Self-modification autonomy — RESOLVED 2026-07-23 = (b) TIERED BY BLAST RADIUS
 
 The originally-locked invariant:
 
@@ -93,21 +94,38 @@ The originally-locked invariant:
 > the very gate meant to catch it, and the orchestrator cannot recover its own
 > bricked loop.
 
-**Reopened 2026-07-22:** Denys chose **full-auto-if-green** (auto-merge any self-fix
-that passes all gates, including orchestration core). This is a genuine
-direction-level disagreement with the written invariant, so it is **not settled
-here** — it is the load-bearing decision of the **Stage-2 lock**, to be resolved
-with fresh eyes when P2 is scheduled. Options on the table:
+**History.** Reopened 2026-07-22 when Denys leaned **full-auto-if-green**; that
+choice was recorded as explicitly *not settled*, to be re-decided with fresh eyes at
+the Stage-2 lock.
 
-- **(a) Propose-only on self** — original invariant; human merges. Safest.
-- **(b) Tiered** — auto-merge self-changes to *peripheral* code (docs, tests,
-  non-core) when green; human-gate changes to **orchestration core**
-  (`goal/tick*`, `task_queue`, `engine/`, `goal/transitions`). *Claude's
-  recommendation:* keeps ~all the autonomy, guards the one path that can self-brick.
-- **(c) Full auto if green** — Denys's stated current preference; maximum autonomy,
-  but a bad merge to core can take the loop down with no self-recovery.
+**Resolved 2026-07-23 — Denys chose (b) TIERED**, over his own prior full-auto lean,
+after two arguments landed: (1) the **self-referential hazard** — on its *own* repo a
+self-fix can modify the very gate meant to catch it, so "all gates green" can mean
+"good fix" *or* "the fix weakened its own gate"; this failure mode is unique to
+self-modification and full-auto cannot guard it; (2) **current reliability** — with
+devclaw's live #1 complaint being "hits a stupid error and just fails," a green-but-
+wrong auto-merge to the orchestration core can brick the very loop that would recover
+it (the healer is what broke). Tiered keeps ~all the autonomy and human-gates only the
+paths that can self-brick or self-weaken a gate.
 
-Stage 1 is unaffected (it never merges). On *other* repos the full auto-loop stays.
+**The blast-radius partition (fail-closed on the classifier):**
+
+- **AUTO-MERGE if green** — peripheral surface: `docs/**`, `tests/**`, `evals/**`,
+  `delivery/**`, `server/**` (non-core), and peripheral `goal/` helpers.
+- **HUMAN-GATE (draft PR, always), even if green** — the self-brick / self-referential
+  set: `goal/tick*`, `goal/transitions*`, `task_queue*`, `engine/**`, **`quality/**`
+  and the gate prompts** (added at resolution — the single most dangerous
+  self-modification target, per the hazard above), and `loom/` limits/test_integrity.
+- **Unclassifiable / mixed / new top-level path ⇒ treat as core ⇒ HUMAN-GATE.** The
+  classifier defaults CLOSED: an unknown path never auto-merges. A PR that touches
+  *both* tiers is human-gated as a whole (no partial auto-merge of a mixed diff).
+
+Rejected: **(a) propose-only** (safest but throttles even a docs typo behind a human)
+and **(c) full-auto-if-green** (maximum autonomy, but ships a gate-weakening fix
+unattended and can brick core with no self-recovery).
+
+Stage 1 is unaffected (it never merges). On *other* repos the full auto-loop stays —
+this tiering is **self-repo only**, keyed on `DEVCLAW_SELF_REPO` (O6).
 
 ## 4. Why this is the right home for recurrence (rescuing O4)
 
@@ -146,6 +164,61 @@ dev-loop where it belongs.
 - **O8 — Egress / auth. RESOLVED.** Service-side `gh` via `GITHUB_TOKEN` / `GH_TOKEN`
   (a GitHub credential); **no `ANTHROPIC_*`** involved — the OAuth-only invariant is
   untouched. Fail-loud on API error.
+
+## 5A. Stage-2 (P2) boundary — firmed 2026-07-23 (the slice to lock)
+
+Per `spec-lifecycle.md` "Sizing novel work", this firms the **P2 slice boundary**
+only; P3 stays named-but-unsized. The end-to-end FIX flow and what's in vs out:
+
+- **Start (O5, resolved).** A human applies the `accepted` label to a
+  `devclaw:self-filed` issue. Nothing self-modifying starts without it.
+- **Pickup mechanism (firmed).** On the **same once-per-cycle mechanical edge** that
+  files/closes (`cycle_report.py` / `_maybe_emit_cycle_report`), scan for
+  `accepted` + `devclaw:self-filed` issues with **no active goal**, and open **one
+  durable goal per issue** targeting `DEVCLAW_SELF_REPO`. Zero-LLM to *detect* (a
+  `gh` list + a state check); the goal loop does the reasoning. No new heartbeat
+  path — reuses the existing edge, so the zero-token idle guard is untouched.
+- **Goal mode = `one_shot` (firmed).** A single issue is a bounded deliverable →
+  plan-once-run-the-checklist (ADR 0003 dial), not long_lived re-planning.
+- **Concurrency = 1 self-fix goal at a time (firmed, tunable).** Serialize
+  self-modification: parallel self-fixes multiply the self-brick surface and muddy
+  failure attribution. One in flight; a queued `accepted` issue waits.
+- **Fix → DRAFT PR → gates (existing loop).** On the self-repo, delivery opens a
+  **draft** PR so the merge seam decides; the review / eval / browser gates run as
+  today under the goal's `trust` dial.
+- **Merge seam = the §3 tiered classifier (firmed mechanism).** In `goal/merge.py`
+  (O6): classify the PR's changed paths against the §3 blast-radius allowlist.
+  Peripheral+green → the auto-merge tier; core / mixed / unknown-path → stays a
+  human-gated draft PR + one owner ping. **Fail-closed** — unclassifiable ⇒ core.
+- **Close.** Stage-1 CLOSE already retires the issue when recurrence stops; a merged
+  auto-tier fix additionally closes it as `fixed` and comments the PR link.
+
+**How the tiered auto-merge turns on — RESOLVED 2026-07-23 = SHADOW-FIRST.**
+
+Build the full tiered classifier in P2, but ship it with auto-merge **defaulted OFF**
+behind a flag: on every self-PR the classifier *logs* its verdict ("would auto-merge:
+yes/no, tier=…") while a human still merges everything. Flip the flag to live (P2.1)
+once a handful of shadow verdicts look right. This builds the whole §3 mechanism yet
+fires **zero unattended self-merges until there's evidence** — maximally de-risks the
+self-brick concern the §3 decision was about, and P2 still ships a complete, demoable
+self-fix loop (issue → PR → gates) as a standalone increment. *Rejected:
+live-immediately* (faster to full autonomy, but no evidence buffer before the first
+unattended self-merge). The live-flip is its own tiny slice **P2.1**, gated on shadow
+evidence.
+
+**Sizing P2 (shadow-first path), in devclaw units — end-of-week cap:**
+
+1. Pickup: `accepted`-scan + one_shot goal spawn at the cycle edge (+ concurrency
+   cap). **~1 PR.**
+2. Draft-PR-on-self + the tiered classifier in `goal/merge.py`, **shadow mode**
+   (log verdict, human merges). **~1–2 PRs.**
+3. Named regression tests (accepted→goal spawn, classifier partition incl.
+   fail-closed on unknown path, mixed-diff human-gate, shadow logs-but-never-merges,
+   zero-token guard on the scan) + `invariant-guard`. **folded into the above.**
+
+→ **P2 ≈ 2–3 PRs**, capped end-of-week. The live-flip flip (P2.1) is a later, tiny
+slice once shadow evidence accrues. P3 (recurrence-trigger tuning, dedup, cost caps)
+stays unsized until P2 lands.
 
 ## 6. Invariants — referenced, not restated
 
