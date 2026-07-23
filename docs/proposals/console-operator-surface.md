@@ -79,8 +79,13 @@ Plus two cross-cutting surfaces and one control surface:
   PRs; end-of-week cap), not estimated here.
 - **P2 — health + problem-lifecycle dashboard**. The charts + the problem tracker.
   Named, unsized until P1 lands.
-- **P3 — the co-pilot chat**. The conversational control surface. Named, unsized;
-  carries the §4 constraint and the largest `[OPEN]` set.
+- **P3 — the co-pilot chat + structured decision blocks**. The conversational
+  control surface, plus the **structured "answer-a-blocked-goal" surface** (§6):
+  when a goal is `needs_answer`-blocked, present the operator selectable options +
+  a recommendation + a free-text box, click → `steer_goal`. Named, unsized; carries
+  the §4 constraint and the largest `[OPEN]` set. The cognition/data-model half of
+  §6 is separable and can ship ahead of any console screen (renders in Telegram
+  first).
 
 ## §4 — The load-bearing constraint: the chat is the *waiter*, over OAuth
 
@@ -138,6 +143,73 @@ remain open, so the P1 direction is clear to lock.
    *show* the whole vision at once; the shipped console must decompose into real
    screens (overview vs goal-detail vs health/problems). The mockup's single-page
    layout is **not** the target IA — the layout is rethought at build time.
+
+## §6 — P3 payload: structured decision blocks (Denys, 2026-07-23)
+
+**The problem.** When a goal is genuinely blocked on the owner — a `needs_answer`
+block that *cannot* be resolved without a human decision — today it emits a
+**free-text `blocked_on` string**. The owner reads the prose, mentally extracts the
+choices, and hand-writes a `steer_goal` message. But the cognition *already reasons
+in branches*: the live ng-zorro block literally wrote "(a) migrate+rename … or (b)
+drop the clause …" in prose. The options exist; they're just buried in a string and
+the owner has to reconstruct + retype them.
+
+**The move.** Promote a human-gated block from a `string` to a small **structured
+decision object** the owner answers by *clicking* (or typing a custom answer):
+
+```
+{ question, options: [ {label, what_it_means, steer_message} ], recommended, allow_custom }
+```
+
+The planner emits this **at block time** (it already did the branch reasoning);
+each option carries the **pre-baked `steer_message`** it would apply. Clicking
+option N fires `steer_goal(goal_id, options[N].steer_message)`; a typed custom
+answer fires `steer_goal` with that free text. No new state machine — it reuses the
+existing steering/unblock plumbing entirely; the change is *structuring the block +
+a nicer input*.
+
+**This is the concrete form of P3's "answer from the browser"** (§5.4's deferred
+mutation reach) and the visible payoff of the whole operator surface: the console
+(and the Telegram notify ping) renders a blocked goal as *"here's the fork, here's
+my recommendation, one click."* It is essentially devclaw doing to its own human
+blocks what `AskUserQuestion` does in a Claude session.
+
+**Precedent — this is a generalization, not a new concept.** Firming-phase blocks
+already work this way: a goal blocked in FIRMING carries structured `unknowns` and
+is cleared via `answer_unknowns`, not free text. §6 extends that same
+structured-Q&A discipline from firming to **execution-phase `needs_answer`
+blocks** — systemic-over-specific (`CLAUDE.md` design doctrine), one consistent
+"structured decision" pattern across phases rather than two block idioms.
+
+**Scope discipline.** Only `blocked_kind == needs_answer` blocks get options — the
+genuine "only the owner can decide" class. `mechanical:*` (self-heal),
+`lost_ref`, `dispatch_cap`, and `bug` blocks are **not** menu choices and stay as
+they are; options on them would be noise.
+
+**Honest framing.** §6 is **legibility/UX, not reliability.** It makes the
+*legitimate* human blocks fast and pleasant to clear; it does **not** reduce how
+*often* devclaw blocks, nor touch the amnesiac-retry / planner-local-optimum walls
+(those are separate reliability work). It scores high on the CV/packaging
+scoreboard and is what makes the operator surface feel alive — prioritize it as
+"packaging that delights," not "fixes the failing."
+
+### §6 `[OPEN]` — resolve at P3 firm (NOT P1 clarify items; P1 lock is unaffected)
+
+- **`[OPEN]` 6a — Answer authority / auth.** Clicking an option mutates a goal from
+  the browser; this rides §5.4's unresolved console-auth story (tailnet today).
+  Pinned when P3 firms.
+- **`[OPEN]` 6b — Split the ship.** The cognition/data-model half (planner emits the
+  structured object; `steer_goal` mapping) is separable from the console render and
+  useful in Telegram first. Ship it ahead of any console screen, or hold it for the
+  console? Recommendation: **ship the cognition/data half early** (value without a
+  console), render in console at P3.
+- **`[OPEN]` 6c — Persistence shape.** Where the options object lives (a new
+  `goal_docs`-style projection vs a field on the block record) and whether it
+  survives replan/rollback — the single-writer + append-only-log invariants apply.
+- **`[OPEN]` 6d — Recommendation honesty.** The planner marks one option
+  `recommended`; the UI must show it as *the loop's* recommendation, not a
+  pre-made decision, and must never hide the custom-answer path. Confirm the
+  labeling contract (sibling to §5.5's honesty rule).
 
 ## Out of scope / non-goals
 
