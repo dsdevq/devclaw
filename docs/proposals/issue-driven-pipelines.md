@@ -1,8 +1,11 @@
 # Proposal — issue-driven continuous development: GitHub Issues as the control plane, devclaw as the engine
 
-- **Status:** **DRAFT** — 2026-07-23. No `[OPEN]` resolved yet; the clarify step
-  (§7) is mandatory before any slice flips to LOCKED. LOCKED will mean the **P1
-  boundary only** (per `spec-lifecycle.md` "Sizing novel work"), not the whole arc.
+- **Status:** **DRAFT — deliberately split (2026-07-23).** After an honest scope
+  review (§0.5) the grand "control plane" vision (§0–§5) is **recorded but
+  DEFERRED** — a good direction that is *early*, kept intact for a future return.
+  Only a small **NOW slice** (§6) is live work: collapse the source of truth + make
+  the loop we already have legible. No `[OPEN]` resolved yet; the clarify step (§7)
+  is only needed if/when the deferred vision is revived.
 - **Date opened:** 2026-07-23 · **Authors:** Denys + Claude (captured from a
   four-message design conversation)
 - **Relates to:**
@@ -52,6 +55,45 @@ discipline the ops-agent north star already demands.
 repo, an autonomous engine ships you a reviewed PR.* That is a strong legibility /
 CV artifact (scores well on the learning+portfolio scoreboard) — far more legible
 than invisible reliability work.
+
+---
+
+## 0.5 Reality check — what's NOW vs DEFERRED (honest scope review, 2026-07-23)
+
+Denys asked for a blunt verdict before committing time. Verdict: **the thinking is
+sound, but building the full vision now is priority-inverted.** The grand version is
+a *distribution layer for an engine that isn't reliable enough to distribute yet.*
+Four reasons it's early:
+
+1. **Front door on a cracked foundation.** devclaw's own #1 problem is "hits a stupid
+   error and just fails" (`reliability-trust-regression`). A per-repo pipeline just
+   feeds work into a loop that still wedges — faster failures, not fewer. Intake is
+   not the bottleneck; the engine is.
+2. **P2 would industrialize the worst recent failure.** finance-sentry-ui was
+   *cancelled* 2026-07-23 as a tar-pit (gate-passable-but-subtly-wrong PRs, worker
+   routing around constraints — #358). Auto-piping issues into finance-sentry now
+   mass-produces exactly those PRs, unattended.
+3. **The interface isn't even used.** Denys doesn't drive devclaw through Telegram
+   ("fine for now"). A control plane is architecture for a fleet of one; nobody feels
+   the intake-ergonomics problem it solves.
+4. **Against the scoreboard.** Most of the vision is invisible plumbing
+   (reconciliation, webhooks, manifest schemas) dressed as legibility. The *actually*
+   legible artifact — "file an issue → reviewed PR" — already exists ~80% as
+   self-issue-filing on the devclaw repo; it's just not surfaced.
+
+**The split:**
+
+- **NOW (small, real, CV-positive)** — §6 "NOW slice": collapse the source of truth
+  (`problems` → Issues) + make the existing self-issue-filing loop *legible* in the
+  console. Days, not a tranche.
+- **DEFERRED (recorded, unscheduled)** — the full control plane: per-repo pipelines,
+  the `.devclaw/` manifest (§4), webhook discovery, multi-repo, intake unification.
+  Good direction, kept intact below for a future return. **Precondition for reviving
+  it: the reliability wall is down** (amnesiac-retry etc.) — that's what would make an
+  automated multi-repo pipeline *safe*, and it comes first regardless.
+
+Everything from §1 onward is the **full vision as recorded** — read it as the deferred
+target, not the immediate build. The immediate build is §6 "NOW slice" only.
 
 ---
 
@@ -173,27 +215,48 @@ the devclaw repo; §4–§5 generalize it to any owned repo behind the manifest.
 
 ---
 
-## 6. Sizing — slice, don't estimate (per `spec-lifecycle.md`)
+## 6. Sizing — the NOW slice vs the DEFERRED arc
 
-Each `Pn` is a **standalone, independently-shippable increment**. Firm P1 only;
-leave P2/P3 named-but-unsized until P1 lands and the fog clears.
+### NOW slice (the only live work — small, real, CV-positive)
 
-- **P1 — collapse source-of-truth + generalize pickup on the devclaw repo *itself*.**
-  Retire/mirror the internal `problems` catalog into GitHub Issues (Issues canonical
-  for intent; SQLite canonical for state). Generalize the *existing* self-filing
-  pickup so **any** `accepted`-labeled issue (not only self-filed) dispatches. No
-  manifest needed yet — devclaw is its own known repo. Mostly already built.
-  *Rough shape (firm at lock): ≈2–3 PRs, end-of-week cap.*
-- **P2 — the per-repo pipeline (named, unsized).** Defined by the `.devclaw/`
-  **manifest** (§4) + webhook/subscription discovery; first external instance =
-  **finance-sentry**. This is the "continuous development" moment.
-- **P3 — intake unification + analytics projection (named, unsized).** Firm the
-  issue→one-shot vs issue→goal dispatch shape (§2); build the projection/read-layer
-  over Issues (§3) so the console isn't capped by GitHub's surface.
+Two bounded pieces, filed as GitHub Issues on the devclaw repo. Neither is a
+multi-PR direction tranche; both are the kind of single bounded change the
+spec-lifecycle rule explicitly leaves *out* of the lock requirement.
+
+- **N1 — collapse the source of truth.** GitHub Issues become canonical for
+  *intent* (Issues for backlog, SQLite for execution state — §1). Demote the internal
+  `problems` catalog to the **gatherer that feeds Issues** (the existing FILE edge),
+  not a `list_problems`-read second backlog. Hygiene finishing an already-made
+  decision (#329).
+- **N2 — make the loop we already have legible.** The self-issue-filing FILE→FIX
+  loop is live but invisible; surface it as the CV artifact in the console (it feeds
+  the console P2 problem-lifecycle tracker: identified→filed→fixing→resolved). No new
+  engine work — expose what exists.
+
+*Everything else about the manifest, per-repo pipelines, and webhooks is NOT in the
+NOW slice.*
+
+### DEFERRED arc (recorded, unscheduled — revive only after the reliability wall is down)
+
+Kept intact in §1–§5 as the target direction. **Do not schedule until amnesiac-retry
+/ worker-integrity reliability work has landed** — that is the precondition that makes
+an automated multi-repo pipeline safe, and it comes first regardless.
+
+- **D1 — the per-repo pipeline**, defined by the `.devclaw/` **manifest** (§4) +
+  webhook/subscription discovery; first external instance = finance-sentry. The
+  "continuous development" moment — and the one that, done early, would mass-produce
+  the subtly-wrong PRs that got finance-sentry-ui cancelled (§0.5).
+- **D2 — intake unification + analytics projection.** Firm issue→one-shot vs
+  issue→goal (§2, `[OPEN]` O1); build the projection/read-layer over Issues (§3).
+
+When D1/D2 are revived, the §7 clarify step becomes mandatory again.
 
 ---
 
-## 7. Clarify step — `[OPEN]` (mandatory before any slice LOCKs; each decides its slice's boundary)
+## 7. Clarify step — `[OPEN]` (applies to the DEFERRED arc only; mandatory before D1/D2 revive)
+
+*The NOW slice (§6 N1/N2) is bounded single changes, out of the lock requirement.
+These `[OPEN]`s gate the deferred control-plane arc when it's picked back up.*
 
 - **[OPEN] O1 (decides the P1 boundary).** Does an issue dispatch as a **bounded
   one-shot task** or always spawn a **durable goal**? *Claude's recommendation:
