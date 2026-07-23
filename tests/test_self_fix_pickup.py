@@ -87,14 +87,14 @@ def test_self_fix_workspace_honours_container_prefix(monkeypatch):
 def test_pickup_spawns_one_shot_goal_and_claims_the_issue():
     gh = FakeGh([_issue(42, title="gate crashes on big diff", body="stack trace here")])
     spy = SpyCreate()
-    res = asyncio.run(si.run_self_fix_pickup(spy, repo="dsdevq/devclaw", gh=gh))
+    res = asyncio.run(si.run_self_fix_pickup(spy, repo="lifekit-hq/devclaw", gh=gh))
 
     assert len(spy.calls) == 1
     gid, kw = spy.calls[0]
     assert gid == "self-fix-issue-42"
     assert kw["mode"] == "one_shot"            # bounded single-issue fix (ADR 0003 dial)
     assert kw["open_pr"] is True               # opens a PR — a human merges it
-    assert kw["repo_url"] == "https://github.com/dsdevq/devclaw.git"  # URL, not slug
+    assert kw["repo_url"] == "https://github.com/lifekit-hq/devclaw.git"  # URL, not slug
     assert kw["workspace_dir"].endswith("/self-fix-issue-42")
     assert "#42" in kw["objective"]
     # claimed on GitHub so concurrency accounting + visibility hold across restarts.
@@ -110,10 +110,10 @@ def test_generated_self_fix_params_pass_goal_admission():
 
     issue = _issue(99, title="planner drops repo context", body="")
     adm = verify_goal(
-        objective=si.self_fix_objective(issue, "dsdevq/devclaw"),
+        objective=si.self_fix_objective(issue, "lifekit-hq/devclaw"),
         workspace_dir=si.self_fix_workspace("self-fix-issue-99"),
-        done_when=si.self_fix_done_when(99, "dsdevq/devclaw"),
-        repo_url=si.self_repo_url("dsdevq/devclaw"),
+        done_when=si.self_fix_done_when(99, "lifekit-hq/devclaw"),
+        repo_url=si.self_repo_url("lifekit-hq/devclaw"),
         backlog=None, verify_cmd=None, spec="",
     )
     assert adm.admitted
@@ -122,7 +122,7 @@ def test_generated_self_fix_params_pass_goal_admission():
 def test_pickup_concurrency_one_blocks_when_one_already_fixing():
     gh = FakeGh([_issue(1, fixing=True), _issue(2)])
     spy = SpyCreate()
-    res = asyncio.run(si.run_self_fix_pickup(spy, repo="dsdevq/devclaw", gh=gh, concurrency=1))
+    res = asyncio.run(si.run_self_fix_pickup(spy, repo="lifekit-hq/devclaw", gh=gh, concurrency=1))
     assert spy.calls == []                     # budget full — nothing new spawned
     assert res.picked == []
 
@@ -130,7 +130,7 @@ def test_pickup_concurrency_one_blocks_when_one_already_fixing():
 def test_pickup_reclaims_existing_goal_on_filexists_without_error():
     gh = FakeGh([_issue(7)])
     spy = SpyCreate(raise_exists={"self-fix-issue-7"})
-    res = asyncio.run(si.run_self_fix_pickup(spy, repo="dsdevq/devclaw", gh=gh))
+    res = asyncio.run(si.run_self_fix_pickup(spy, repo="lifekit-hq/devclaw", gh=gh))
     assert len(spy.calls) == 1                  # attempted (idempotent create)
     assert gh.marked == [(7, si.FIXING_LABEL)]  # still claimed — self-heal, not error
     assert res.picked == [(7, "self-fix-issue-7")]
@@ -151,5 +151,5 @@ def test_pickup_gh_list_failure_is_swallowed():
 
     gh = BoomGh()
     spy = SpyCreate()
-    res = asyncio.run(si.run_self_fix_pickup(spy, repo="dsdevq/devclaw", gh=gh))
+    res = asyncio.run(si.run_self_fix_pickup(spy, repo="lifekit-hq/devclaw", gh=gh))
     assert spy.calls == [] and res.picked == []  # logged + swallowed, edge intact

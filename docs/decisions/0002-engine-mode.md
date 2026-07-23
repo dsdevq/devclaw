@@ -24,7 +24,7 @@ Run the side-by-side spike on a host with `claude` + `docker` + the
 ```bash
 .venv/bin/python evals/compare_engines.py \
     --workspace /tmp/spike-ws \
-    --repo git@github.com:dsdevq/lifekit-dashboard.git \
+    --repo git@github.com:lifekit-hq/lifekit-dashboard.git \
     --suite-file evals/passrate_suite.tsv
 ```
 

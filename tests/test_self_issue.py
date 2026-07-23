@@ -103,7 +103,7 @@ def test_files_recurring_terminal_problem_once_then_idempotent(tmp_path):
     )
     gh = FakeGh()
     kw = dict(cycle_key="2026-07-03", start_ms=1000, end_ms=2000, now_ms=2000,
-              repo="dsdevq/devclaw", gh=gh)
+              repo="lifekit-hq/devclaw", gh=gh)
 
     res = asyncio.run(si.run_self_issue_filing(store, **kw))
     assert len(gh.created) == 1                        # filed exactly one issue
@@ -124,7 +124,7 @@ def test_self_healed_only_problem_is_never_filed(tmp_path):
     gh = FakeGh()
     res = asyncio.run(si.run_self_issue_filing(
         store, cycle_key="c", start_ms=1000, end_ms=2000, now_ms=2000,
-        repo="dsdevq/devclaw", gh=gh))
+        repo="lifekit-hq/devclaw", gh=gh))
     assert gh.created == [] and res.filed == []
 
 
@@ -137,7 +137,7 @@ def test_age_out_closes_stale_open_issue(tmp_path):
     gh = FakeGh()
     res = asyncio.run(si.run_self_issue_filing(
         store, cycle_key="d", start_ms=now, end_ms=now, now_ms=now,
-        repo="dsdevq/devclaw", gh=gh, quiet_ms=3 * DAY_MS))
+        repo="lifekit-hq/devclaw", gh=gh, quiet_ms=3 * DAY_MS))
     assert gh.closed == [55] and res.closed == [55]
     row = store.open_issue_problems()
     assert row == []                                   # no longer open
@@ -151,7 +151,7 @@ def test_noise_cap_limits_new_issues_and_names_suppressed(tmp_path):
     gh = FakeGh()
     res = asyncio.run(si.run_self_issue_filing(
         store, cycle_key="2026-07-03", start_ms=1000, end_ms=2000, now_ms=2000,
-        repo="dsdevq/devclaw", gh=gh, per_cycle_cap=3))
+        repo="lifekit-hq/devclaw", gh=gh, per_cycle_cap=3))
     assert len(gh.created) == 3                         # capped
     assert len(res.filed) == 3 and len(res.suppressed) == 2   # rest named, not dropped
 

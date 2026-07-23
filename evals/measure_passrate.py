@@ -34,7 +34,7 @@ from devclaw.state_store import StateStore
 from devclaw.task_queue import TaskQueue
 from devclaw.engine.sandcastle import run_sandcastle, SANDBOX_IMAGE, EXEC_MODEL
 
-REPO_URL = os.environ.get("MEASURE_REPO_URL", "https://github.com/dsdevq/lifekit-dashboard.git")
+REPO_URL = os.environ.get("MEASURE_REPO_URL", "https://github.com/lifekit-hq/lifekit-dashboard.git")
 VERIFY_CMD = os.environ.get("MEASURE_VERIFY_CMD", "cd backend && dotnet test")
 WORKROOT = Path(os.environ.get("MEASURE_WORKROOT", str(Path.home() / "projects" / ".devclaw-measure")))
 # Overridable for containerized runs (VPS one-off `docker compose run`): /app

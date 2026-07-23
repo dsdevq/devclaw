@@ -2,7 +2,7 @@
   {
     "id": "example-1",
     "project": "lifekit-dashboard",
-    "repo_url": "https://github.com/dsdevq/lifekit-dashboard.git",
+    "repo_url": "https://github.com/lifekit-hq/lifekit-dashboard.git",
     "kind": "implement_feature",
     "verify_cmd": "cd backend && dotnet test",
     "goal": "<a REAL, bounded, machine-verifiable ticket from this project's backlog — tell the engineer to add focused tests and not weaken the suite so the gate is meaningful>"

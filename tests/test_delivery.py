@@ -151,8 +151,8 @@ def test_scope_suffix_tunable_thresholds():
 
 
 def test_extract_pr_url():
-    out = "https://github.com/dsdevq/lifekit-dashboard/pull/12\n"
-    assert _extract_pr_url(out) == "https://github.com/dsdevq/lifekit-dashboard/pull/12"
+    out = "https://github.com/lifekit-hq/lifekit-dashboard/pull/12\n"
+    assert _extract_pr_url(out) == "https://github.com/lifekit-hq/lifekit-dashboard/pull/12"
     assert _extract_pr_url("nothing here") is None
 
 
@@ -383,7 +383,7 @@ async def test_done_is_not_observable_before_delivery(store, tmp_path, monkeypat
     _init_repo(repo)
 
     seen = {}
-    pr = "https://github.com/dsdevq/lifekit-dashboard/pull/99"
+    pr = "https://github.com/lifekit-hq/lifekit-dashboard/pull/99"
 
     async def fake_deliver(*, workspace_dir, task_id, goal, kind=None, verify=None, title=None, advisories=None):
         # While delivery runs, the task must still be 'running' (not yet 'done').
