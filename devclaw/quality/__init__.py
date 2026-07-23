@@ -568,9 +568,13 @@ async def _review_panel_core(
 # not — a legitimate large diff can still earn a real verdict.
 #
 # Fail-closed is preserved end to end:
-#   - Trigger is TIMEOUT ONLY (the documented symptom). An unparseable-verdict
-#     crash re-raises unchanged — re-running per file reproduces the same
-#     unparseable output, so degrading it is futile; it stays fail-closed + fast.
+#   - Trigger is a TIMEOUT or a non-quota UNPARSEABLE-VERDICT crash (#381): on an
+#     oversized diff the model can return non-JSON for the same "input too big"
+#     reason it times out, so per-file split is worth the same try. If the split
+#     ALSO can't parse, the sub-reviews RAISE → the whole diff still fails closed
+#     + fast. A quota/rate/auth-shaped crash is EXCLUDED from the trigger — it
+#     re-raises unchanged so the queue pauses instead of the ladder spraying
+#     per-file calls into a live usage cap.
 #   - Each per-file sub-review STILL fails closed: a sub-review that times out or
 #     can't be parsed RAISES, which propagates out of the ladder → the whole diff
 #     fails closed (never an approval), carrying its raw response so a quota-shaped
@@ -614,12 +618,46 @@ def _degrade_max_files() -> int:
     return max(1, v)
 
 
-def _is_review_timeout(err: Exception) -> bool:
-    """True iff ``err`` is a cognition TIMEOUT — the documented degradation
-    trigger. Matches the planner's timeout message ("claude --print timed out
-    after ...ms") and the panel's sub-quorum raise when panelist timeouts drove
-    it. An unparseable-verdict crash is deliberately NOT a trigger."""
-    return isinstance(err, PlannerError) and "timed out" in str(err).lower()
+#: Markers of an UNPARSEABLE-VERDICT review crash (the model returned no usable
+#: JSON verdict). From ``extract_json`` ("No JSON object found …") and the review
+#: parser's own raises ("Review JSON parse failed …", "must be a JSON object").
+_REVIEW_UNPARSEABLE_MARKERS = (
+    "no json object",
+    "json parse failed",
+    "must be a json object",
+)
+
+
+def _is_degradable(err: Exception) -> bool:
+    """True iff ``err`` is a review failure worth retrying by per-file split (#381).
+
+    Two triggers now, not one:
+    - a **TIMEOUT** (the original symptom), or
+    - an **unparseable-verdict crash** (no-JSON / parse-failed) that is NOT
+      quota/rate/auth-shaped.
+
+    The insight #381 adds: on an **oversized** diff the review model can return
+    non-JSON for the *same* "input too big" reason it times out — the response
+    runs long / gets truncated / never emits the verdict object. Splitting into
+    per-file sub-diffs fits the budget and can earn a real verdict, exactly as it
+    does for a timeout. Fail-closed is untouched: if the sub-reviews also can't
+    parse, they RAISE → the whole diff still fails closed (never an approval).
+
+    A quota/rate/auth-shaped non-JSON is deliberately EXCLUDED — it must re-raise
+    unchanged so the queue's pause-and-resume classifier sees it, instead of the
+    ladder spraying per-file calls into a live usage cap. (A timeout is never
+    quota-shaped, so this guard only matters for the new unparseable trigger.)"""
+    if not isinstance(err, PlannerError):
+        return False
+    if "timed out" in str(err).lower():
+        return True
+    if not any(m in str(err).lower() for m in _REVIEW_UNPARSEABLE_MARKERS):
+        return False
+    # Classify the RAW model output (where the quota/usage wording lives), not the
+    # generic "No JSON object found" message. Pausing kinds re-raise, never split.
+    from ..loom.limits import PAUSING_KINDS, classify_failure
+
+    return classify_failure(err.raw or str(err)).kind not in PAUSING_KINDS
 
 
 def _split_diff_by_file(diff: str) -> list[str]:
@@ -711,10 +749,11 @@ async def review_panel(
             claude_caller=claude_caller, record_vote=record_vote, n=n,
         )
     except PlannerError as err:
-        # Only a TIMEOUT triggers the ladder, and only when enabled. Anything else
-        # (an unparseable verdict, a quota-shaped crash) re-raises UNCHANGED so the
-        # queue's fail-closed / quota-classify paths see it exactly as before.
-        if not _degrade_enabled() or not _is_review_timeout(err):
+        # A TIMEOUT or a non-quota UNPARSEABLE-VERDICT crash triggers the ladder
+        # (#381), and only when enabled. A quota/rate/auth-shaped crash re-raises
+        # UNCHANGED so the queue's fail-closed / quota-classify paths see it as
+        # before — never spray per-file calls into a live usage cap.
+        if not _degrade_enabled() or not _is_degradable(err):
             raise
         sub_diffs = _split_diff_by_file(filter_reviewable_diff(diff))
         # Can't split further (0 or 1 reviewable file) → nothing cheaper to try →

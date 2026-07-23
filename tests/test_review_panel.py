@@ -480,22 +480,67 @@ async def test_review_ladder_over_file_cap_fails_closed(monkeypatch):
         )
 
 
-async def test_unparseable_verdict_is_not_degraded_and_still_fails_closed():
-    """The trigger is TIMEOUT ONLY. An UNPARSEABLE-verdict crash re-raises
-    unchanged (re-running per file reproduces the same non-JSON), so it never
-    fans out — it stays on the fail-closed + fast path."""
-    calls = {"n": 0}
+def _nonjson_on_full_diff(per_file):
+    """A caller that returns NON-JSON prose on the whole-diff prompt (both files)
+    and delegates to ``per_file`` for a per-file sub-diff. Mirrors the #381
+    symptom: an oversized diff makes the model ramble without ever emitting a
+    verdict object — the same 'input too big' failure a timeout is."""
+    async def caller(prompt: str) -> str:
+        if "a/a.py" in prompt and "a/b.py" in prompt:
+            return "a long prose review of the whole change with no json verdict object"
+        return await per_file(prompt)
+    return caller
 
+
+async def test_unparseable_verdict_on_oversized_diff_degrades_per_file_and_earns_verdict():
+    """#381: a non-JSON crash on the WHOLE diff now degrades like a timeout — the
+    model most likely rambled because the diff was too big. The ladder splits per
+    file; a per-file blocker still forces request_changes (evidence wins)."""
+    async def per_file(prompt: str) -> str:
+        if "a/a.py" in prompt:
+            return _blocker_json("a.py", "off-by-one")
+        return _approve_json()
+
+    result = await review_panel(
+        goal="g", kind="implement_feature", diff=_MULTI,
+        claude_caller=_nonjson_on_full_diff(per_file), n=1,
+    )
+    assert result["verdict"] == "request_changes"
+    assert any(i["location"] == "a.py" for i in result["blocking"])
+    assert "per-file" in result["summary"]
+
+
+async def test_unparseable_verdict_still_fails_closed_when_subreviews_also_unparseable():
+    """If the per-file sub-reviews ALSO can't parse (the non-JSON was deterministic,
+    not size-driven), they RAISE → the whole diff still fails closed. #186 holds —
+    degradation never manufactures an approval from non-JSON."""
     async def not_json(prompt: str) -> str:
-        calls["n"] += 1
-        return "this is prose, not a verdict"
+        return "prose, never a verdict object"
 
     with pytest.raises(PlannerError):
         await review_panel(
             goal="g", kind="implement_feature", diff=_MULTI,
             claude_caller=not_json, n=1,
         )
-    assert calls["n"] == 1  # one whole-diff call — the ladder did not engage
+
+
+async def test_quota_shaped_unparseable_is_not_degraded_and_reraises_for_pause():
+    """The #381 guard: a non-JSON crash whose RAW output is usage-limit prose must
+    NOT fan out per-file — that would spray `claude` calls into a live cap. It
+    re-raises unchanged (one whole-diff call only) so the queue's quota classifier
+    PAUSES instead."""
+    calls = {"n": 0}
+
+    async def quota_prose(prompt: str) -> str:
+        calls["n"] += 1
+        return "Internal error: You're out of extra usage · resets 9pm (UTC)"
+
+    with pytest.raises(PlannerError):
+        await review_panel(
+            goal="g", kind="implement_feature", diff=_MULTI,
+            claude_caller=quota_prose, n=1,
+        )
+    assert calls["n"] == 1  # ladder did NOT engage — quota-shaped re-raises to pause
 
 
 async def test_ladder_preserves_raw_response_for_quota_classification():
