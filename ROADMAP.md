@@ -20,7 +20,7 @@ Sizing: 1–2 weeks per version, one promise each. Work on devclaw itself is onl
 
 ## ▶ Current — v0.1 "Bounded tasks, proven"
 
-Tracking: [#178](https://github.com/dsdevq/devclaw/issues/178) · Milestone: [v0.1](https://github.com/dsdevq/devclaw/milestone/1)
+Tracking: [#178](https://github.com/lifekit-hq/devclaw/issues/178) · Milestone: [v0.1](https://github.com/lifekit-hq/devclaw/milestone/1)
 
 **Promise:** A bounded ticket (`fix_bug` / `implement_feature`) on a registered project produces a PR merged **without rework** at least **6/10** of the time.
 

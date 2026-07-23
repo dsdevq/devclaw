@@ -17,7 +17,7 @@ engine: devclaw
 workspace_dir: /var/lib/devclaw/workspaces/lifekit-dashboard
 # Repo to drive. DevClaw clones it here if the workspace is empty, and resets it
 # to the default branch at latest origin before EACH action (per-action freshness).
-repo_url: https://github.com/dsdevq/lifekit-dashboard.git
+repo_url: https://github.com/lifekit-hq/lifekit-dashboard.git
 
 # The gate DevClaw runs after the agent — "the agent's done is not trusted".
 # lifekit-dashboard backend is .NET (see devclaw's 5/5 run on this repo).

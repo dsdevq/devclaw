@@ -158,7 +158,7 @@ dev-loop where it belongs.
   `accepted` label; devclaw never *starts* modifying itself unprompted. (Distinct
   from §3, which is about the *merge*, not the start.)
 - **O6 — Self-repo recognition + merge seam. RESOLVED (mechanism) / REOPENED
-  (policy).** Recognize self by **slug** `dsdevq/devclaw` (`DEVCLAW_SELF_REPO`) via
+  (policy).** Recognize self by **slug** `lifekit-hq/devclaw` (`DEVCLAW_SELF_REPO`) via
   `parse_owner_repo`; the refusal seam lives in **`goal/merge.py`** (the proposal's
   original `delivery/merge.py` was wrong). *What* the seam does on self is §3.
 - **O7 — Where issues live. RESOLVED.** devclaw repo Issues; the cycle-report push

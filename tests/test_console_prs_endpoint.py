@@ -33,8 +33,8 @@ def store(tmp_path):
         ("https://github.com/dsdevq/closeloop/pull/47/", ("dsdevq", "closeloop", 47)),
         ("http://github.com/dsdevq/closeloop/pull/1", ("dsdevq", "closeloop", 1)),
         (
-            "https://github.com/dsdevq/lifekit-stack/pull/82",
-            ("dsdevq", "lifekit-stack", 82),
+            "https://github.com/lifekit-hq/lifekit-stack/pull/82",
+            ("lifekit-hq", "lifekit-stack", 82),
         ),
     ],
 )
