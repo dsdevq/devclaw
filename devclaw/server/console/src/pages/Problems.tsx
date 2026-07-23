@@ -1,26 +1,30 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { fetchProblems, type ProblemRow, type ProblemStage, type ProblemsResponse } from "../api";
 import { relativeTime } from "../util/time";
 import { IconExternal } from "../icons";
 import { EmptyState, ErrorNote, Loading, SectionLabel, StatusDot } from "../ui";
 
-// Problems — the problem-lifecycle tracker (ADR 0009 P2). Renders the
-// deduplicated problems catalog as a self-improving cycle: each entry moves
-// identified → filed → resolved. HONEST (§5.5): a filed & open issue reads as
-// "filed" (in the backlog); there is no auto-fixing stage — fixing is
-// propose-only, human-merges, so the UI never implies autonomy that isn't there.
+// Problems — the problem-lifecycle tracker (ADR 0009 P2 + N2/#372). Renders the
+// deduplicated problems catalog as the self-improving loop: each entry moves
+// identified → filed → fixing → resolved — the full "issue → reviewed PR" story.
+// HONEST (§5.5): `fixing` means a self-fix goal is running and a PR opens for
+// YOUR review — it is propose-only/human-merges, never autonomous auto-fix, so
+// the UI never implies autonomy that isn't there.
 
 const STAGE_COLOR: Record<ProblemStage, string> = {
   identified: "var(--amber)",
   filed: "var(--accent)",
+  fixing: "var(--violet)",
   resolved: "var(--green)",
 };
 const STAGE_LABEL: Record<ProblemStage, string> = {
   identified: "Identified",
   filed: "Filed",
+  fixing: "Fixing",
   resolved: "Resolved",
 };
-const STAGES: (ProblemStage | "all")[] = ["all", "identified", "filed", "resolved"];
+const STAGES: (ProblemStage | "all")[] = ["all", "identified", "filed", "fixing", "resolved"];
 
 export function Problems() {
   const [data, setData] = useState<ProblemsResponse | null>(null);
@@ -57,6 +61,7 @@ export function Problems() {
             <Tile label="Problems" value={problems.length} />
             <Tile label="Identified" value={countBy("identified")} color="var(--amber)" />
             <Tile label="Filed" value={countBy("filed")} color="var(--accent)" />
+            <Tile label="Fixing" value={countBy("fixing")} color="var(--violet)" />
             <Tile label="Resolved" value={countBy("resolved")} color="var(--green)" />
           </div>
 
@@ -98,8 +103,9 @@ export function Problems() {
           )}
 
           <div className="muted" style={{ fontSize: 11, marginTop: 14 }}>
-            Lifecycle: <b>identified</b> (in the catalog) → <b>filed</b> (a GitHub issue is open) → <b>resolved</b>
-            (issue closed). There is no auto-fixing stage — a filed issue is fixed <b>propose-only, human-merges</b>.
+            Lifecycle: <b>identified</b> (in the catalog) → <b>filed</b> (a GitHub issue is open) → <b>fixing</b>
+            (a self-fix goal is running) → <b>resolved</b> (issue closed). <b>Fixing</b> opens a PR for <b>your</b>{" "}
+            review — it is <b>propose-only, human-merges</b>, never autonomous auto-fix.
           </div>
         </>
       )}
@@ -108,6 +114,7 @@ export function Problems() {
 }
 
 function ProblemCard({ p, selfRepo }: { p: ProblemRow; selfRepo: string | null }) {
+  const nav = useNavigate();
   const issueUrl = selfRepo && p.issue_number ? `https://github.com/${selfRepo}/issues/${p.issue_number}` : null;
   return (
     <div className="card" style={{ padding: "12px 16px", borderLeft: `2px solid ${STAGE_COLOR[p.lifecycle]}` }}>
@@ -120,6 +127,15 @@ function ProblemCard({ p, selfRepo }: { p: ProblemRow; selfRepo: string | null }
       <div className="secondary" style={{ fontSize: 12.5, whiteSpace: "pre-wrap", wordBreak: "break-word", marginBottom: 8 }}>
         {p.summary}
       </div>
+      {p.lifecycle === "fixing" && p.fix_goal_id && (
+        <button
+          className="btn ghost sm"
+          onClick={() => nav(`/goals/${p.fix_goal_id}`)}
+          style={{ color: "var(--violet)", marginBottom: 8, display: "inline-flex", alignItems: "center", gap: 5 }}
+        >
+          ▸ fix goal running — open PR for your review
+        </button>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
         <Stat label="terminal" value={p.terminal_count} tone={p.terminal_count ? "var(--red)" : undefined} />
         <Stat label="recovered" value={p.recovered_count} tone={p.recovered_count ? "var(--green)" : undefined} />

@@ -26,6 +26,16 @@ def _fp(store, kind):
     return next(p["fingerprint"] for p in store.list_problems() if p["kind"] == kind)
 
 
+class _FakeGoals:
+    """Just the existence seam `/problems.json` uses for the `fixing` stage."""
+
+    def __init__(self, existing=()):
+        self._existing = set(existing)
+
+    def has_goal(self, goal_id: str) -> bool:
+        return goal_id in self._existing
+
+
 @pytest.fixture
 def http_mod(store, monkeypatch):
     from devclaw.server import http as http_mod
@@ -38,6 +48,9 @@ def http_mod(store, monkeypatch):
     store.set_problem_issue(_fp(store, "closed"), issue_number=7, issue_state="closed")
 
     monkeypatch.setattr(http_mod, "store", store)
+    # No self-fix goals by default → a filed & open issue stays `filed`,
+    # deterministically (never reads the real dev goal store).
+    monkeypatch.setattr(http_mod, "goals", _FakeGoals())
     return http_mod
 
 
@@ -70,6 +83,27 @@ async def test_problems_json_surfaces_issue_fields_and_lifecycle(http_mod):
 
     assert by_kind["closed"]["lifecycle"] == "resolved"
     assert by_kind["closed"]["issue_state"] == "closed"
+
+
+async def test_problems_json_filed_issue_with_running_fix_goal_reads_fixing(http_mod, monkeypatch):
+    # N2/#372: a filed & open issue whose deterministic self-fix goal exists is
+    # the §5.5 "being-worked" stage — it reads `fixing` and carries `fix_goal_id`
+    # so the console deep-links to the goal (its PR + human-merge surface). The
+    # open issue is #42 → goal `self-fix-issue-42`.
+    from starlette.requests import Request
+
+    monkeypatch.setattr(http_mod, "goals", _FakeGoals({"self-fix-issue-42"}))
+    req = Request({"type": "http", "method": "GET", "path": "/problems.json",
+                   "query_string": b"", "headers": []})
+    body = json.loads((await http_mod.problems_json(req)).body)
+    by_kind = {p["kind"]: p for p in body["problems"]}
+
+    assert by_kind["open"]["lifecycle"] == "fixing"
+    assert by_kind["open"]["fix_goal_id"] == "self-fix-issue-42"
+    # A closed issue never regresses to fixing even if a goal lingers.
+    assert by_kind["closed"]["lifecycle"] == "resolved"
+    # Without a matching goal it stays plain `filed` (the default-fixture case is
+    # covered by test_problems_json_surfaces_issue_fields_and_lifecycle above).
 
 
 def test_list_problems_default_omits_issue_fields(store):

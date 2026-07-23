@@ -620,6 +620,13 @@ class GoalService:
         except Exception:  # noqa: BLE001 — display path; see docstring
             return None
 
+    def has_goal(self, goal_id: str) -> bool:
+        """Cheap existence check (no goal load). The console problem-lifecycle
+        tracker uses it to tell a *filed* issue whose self-fix goal is running
+        (``fixing``) apart from one merely sitting in the backlog — N2/#372. The
+        join key is the deterministic ``self-fix-issue-<n>`` id."""
+        return self._goal_store.exists(goal_id)
+
     def get_goal(self, goal_id: str) -> dict:
         if not self._goal_store.exists(goal_id):
             raise KeyError(goal_id)

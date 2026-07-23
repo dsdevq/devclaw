@@ -359,11 +359,12 @@ export async function fetchTraces(goalId: string, limit = 200): Promise<TraceEve
 
 // ---- problems catalog / lifecycle (ADR 0009 P2) ---------------------------
 
-export type ProblemStage = "identified" | "filed" | "resolved";
+export type ProblemStage = "identified" | "filed" | "fixing" | "resolved";
 
 /** A deduplicated problem + its self-issue-filing lifecycle. `issue_number` is
- *  set once filed; `lifecycle` is derived server-side (honest: a filed & open
- *  issue is `filed`, never "auto-fixing" — fixing is human-gated). */
+ *  set once filed; `lifecycle` is derived server-side. `fixing` (honest, §5.5)
+ *  = a filed & open issue whose self-fix goal is running — a PR opens for your
+ *  review, NOT autonomous auto-fix; `fix_goal_id` deep-links to that goal. */
 export interface ProblemRow {
   fingerprint: string;
   category: string;
@@ -380,6 +381,7 @@ export interface ProblemRow {
   issue_number: number | null;
   issue_state: string | null;
   lifecycle: ProblemStage;
+  fix_goal_id?: string | null; // set when lifecycle === "fixing"
 }
 
 export interface ProblemsResponse {
