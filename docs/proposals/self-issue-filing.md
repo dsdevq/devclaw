@@ -3,9 +3,11 @@
 - **Status:** **Stage 1 (FILE + CLOSE) — LOCKED 2026-07-22. Stage 2 (FIX) — LOCKED
   2026-07-23.** §3 self-merge autonomy RESOLVED = **tiered by blast radius** (§3;
   reversed the 2026-07-22 full-auto lean "with fresh eyes" exactly as that clause
-  required); P2 boundary firmed in §5A with **shadow-first** tiered auto-merge chosen.
-  LOCKED = direction, not schedule — the tranche is Denys's to sequence; no Stage-2
-  code lands outside it. Stage 1 carries no self-merge, so it locked independently.
+  required). **P2 sliced propose-only** (§5A): the first build is fix → PR → human
+  merges — the §3 tiered auto-merge classifier is DEFERRED to P2.1 (shadow) / P2.2
+  (live) as a complexity cut, §3 stays the locked target. LOCKED = direction, not
+  schedule — the tranche is Denys's to sequence; no Stage-2 code lands outside it.
+  Stage 1 carries no self-merge, so it locked independently.
 - **Date opened:** 2026-07-22 · **Revived + partially locked:** 2026-07-22 ·
   **Stage 2 locked:** 2026-07-23 · **Authors:** Denys + Claude
 - **Relates to:** [ADR 0006](../decisions/0006-continuous-eval-projection.md)
@@ -183,42 +185,53 @@ only; P3 stays named-but-unsized. The end-to-end FIX flow and what's in vs out:
 - **Concurrency = 1 self-fix goal at a time (firmed, tunable).** Serialize
   self-modification: parallel self-fixes multiply the self-brick surface and muddy
   failure attribution. One in flight; a queued `accepted` issue waits.
-- **Fix → DRAFT PR → gates (existing loop).** On the self-repo, delivery opens a
-  **draft** PR so the merge seam decides; the review / eval / browser gates run as
-  today under the goal's `trust` dial.
-- **Merge seam = the §3 tiered classifier (firmed mechanism).** In `goal/merge.py`
-  (O6): classify the PR's changed paths against the §3 blast-radius allowlist.
-  Peripheral+green → the auto-merge tier; core / mixed / unknown-path → stays a
-  human-gated draft PR + one owner ping. **Fail-closed** — unclassifiable ⇒ core.
-- **Close.** Stage-1 CLOSE already retires the issue when recurrence stops; a merged
-  auto-tier fix additionally closes it as `fixed` and comments the PR link.
+- **Fix → PR → gates → human merges (P2, the first build).** On the self-repo the
+  goal loop fixes the issue and opens a PR (linking the issue); the review / eval /
+  browser gates run as today under the goal's `trust` dial. **Denys reviews and merges
+  it like any other PR** — no auto-merge, no classifier in this slice. This is the
+  complete, demoable self-fix loop (issue → fix → PR) and it ships standalone.
+- **Merge seam = the §3 tiered classifier — DEFERRED to P2.1 (simplification
+  2026-07-23).** The tiered blast-radius auto-merge (§3) is the *eventual* policy, but
+  it is the complex, risky half and the first slice does not need it: with a human
+  merging every self-PR, P2 is already safe by construction. Build the classifier in
+  `goal/merge.py` (O6) only when unattended merges are actually wanted — and by then
+  there are real self-fix PRs to calibrate it against. **P2.1** = classifier in shadow
+  (logs its verdict, human still merges); **P2.2** = flip shadow→live. §3's tiered
+  partition + fail-closed rule stand as the locked target for that day.
+- **Close.** Stage-1 CLOSE already retires the issue when recurrence stops; once P2.2
+  auto-merges a fix it additionally closes as `fixed`. In P2 the human merge closes it.
 
-**How the tiered auto-merge turns on — RESOLVED 2026-07-23 = SHADOW-FIRST.**
+**How autonomous the merge is — SLICED 2026-07-23 (complexity cut, Denys).**
 
-Build the full tiered classifier in P2, but ship it with auto-merge **defaulted OFF**
-behind a flag: on every self-PR the classifier *logs* its verdict ("would auto-merge:
-yes/no, tier=…") while a human still merges everything. Flip the flag to live (P2.1)
-once a handful of shadow verdicts look right. This builds the whole §3 mechanism yet
-fires **zero unattended self-merges until there's evidence** — maximally de-risks the
-self-brick concern the §3 decision was about, and P2 still ships a complete, demoable
-self-fix loop (issue → PR → gates) as a standalone increment. *Rejected:
-live-immediately* (faster to full autonomy, but no evidence buffer before the first
-unattended self-merge). The live-flip is its own tiny slice **P2.1**, gated on shadow
-evidence.
+§3 resolved the *eventual target* (tiered by blast radius). Slicing decides *when we
+build it*, and the answer is **not in P2**. The whole merge-automation stack — the
+blast-radius classifier, the shadow flag, the fail-closed path logic — is the complex,
+self-brick-adjacent half; with a human merging every self-PR it buys nothing in the
+first slice. So:
 
-**Sizing P2 (shadow-first path), in devclaw units — end-of-week cap:**
+- **P2 = propose-only in effect** (fix → PR → human merges). No classifier, no shadow,
+  no auto-merge. Ships the demoable loop; zero self-brick risk by construction.
+- **P2.1 = the §3 tiered classifier in *shadow*** — logs "would auto-merge: yes/no,
+  tier=…" on each self-PR while the human still merges. Builds the §3 mechanism and
+  gathers calibration evidence.
+- **P2.2 = flip shadow→live** — the first unattended self-merges, on the green
+  peripheral tier only, once shadow verdicts have proven out.
 
-1. Pickup: `accepted`-scan + one_shot goal spawn at the cycle edge (+ concurrency
-   cap). **~1 PR.**
-2. Draft-PR-on-self + the tiered classifier in `goal/merge.py`, **shadow mode**
-   (log verdict, human merges). **~1–2 PRs.**
-3. Named regression tests (accepted→goal spawn, classifier partition incl.
-   fail-closed on unknown path, mixed-diff human-gate, shadow logs-but-never-merges,
-   zero-token guard on the scan) + `invariant-guard`. **folded into the above.**
+This is finer slicing of the *same* locked direction, not a reversal: §3 (tiered,
+fail-closed, self-repo-only) stands as the target; we just don't pay its complexity
+until unattended merging is actually wanted.
 
-→ **P2 ≈ 2–3 PRs**, capped end-of-week. The live-flip flip (P2.1) is a later, tiny
-slice once shadow evidence accrues. P3 (recurrence-trigger tuning, dedup, cost caps)
-stays unsized until P2 lands.
+**Sizing P2 (propose-only), in devclaw units — end-of-week cap:**
+
+1. Pickup: `accepted`-scan + `one_shot` self-repo goal spawn at the cycle edge (+
+   concurrency-1 cap). **~1 PR.**
+2. Named regression tests (accepted→goal spawn only-when-labeled, no-spawn when a goal
+   already exists, concurrency cap, zero-token guard on the scan) + `invariant-guard`.
+   **folded in.**
+
+→ **P2 ≈ 1–2 PRs**, capped end-of-week. P2.1 (shadow classifier) and P2.2 (live flip)
+are later, independently-schedulable slices. P3 (recurrence-trigger tuning, dedup,
+cost caps) stays unsized until P2 lands.
 
 ## 6. Invariants — referenced, not restated
 
