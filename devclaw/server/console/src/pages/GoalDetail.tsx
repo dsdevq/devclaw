@@ -4,7 +4,7 @@ import { answerGoal, cancelGoal, fetchGoal, resumeGoal, setGoalStrictness, steer
 import { EventFeed } from "../components/EventFeed";
 import { GoalRunWindow } from "../components/GoalRunWindow";
 import { PRList } from "../components/PRList";
-import { TasksSection } from "../components/TasksSection";
+import { MilestoneTasks } from "../components/MilestoneTasks";
 import { IconAlert, IconSteer, IconStop } from "../icons";
 import { phaseColor, VERDICT_LABEL, verdictColor } from "../status";
 import { Badge, ErrorNote, Loading, Modal, StatusDot, Tabs } from "../ui";
@@ -222,7 +222,7 @@ export function GoalDetail() {
           <div style={{ paddingTop: 22 }}>
             {tab === "timeline" && <Timeline data={data} />}
             {tab === "tasks" && (
-              <TasksSection tasks={data.tasks ?? []} emptyLabel="No tasks dispatched yet — the heartbeat files them here." />
+              <MilestoneTasks tasks={data.tasks ?? []} emptyLabel="No tasks dispatched yet — the heartbeat files them here." />
             )}
             {tab === "prs" && <PRList goalId={data.id} />}
             {tab === "activity" && <EventFeed goalId={data.id} />}
