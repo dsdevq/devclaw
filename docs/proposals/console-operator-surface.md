@@ -1,8 +1,12 @@
 # Console as a live operator surface — the node you watch AND command
 
-**Status: DRAFT** — 2026-07-22. Direction not locked. No code before lock (spec
-lifecycle). Reference artifact: a clickable mockup built this session (link in the
-vault note `console-live-operator-vision-2026-07-22`).
+**Status: LOCKED (P1 direction)** — 2026-07-23. The P1 slice (read hierarchy +
+layer trace) is firm and clear to build; **P2 and P3 stay named-but-unsized**
+until P1 lands. All eight §5 `[OPEN]`s are resolved or explicitly deferred-to-slice
+with an owner (below). Locking is direction, not schedule — sequencing stays
+Denys's call. Reference artifact: a clickable mockup built 2026-07-22 (link in the
+vault note `console-live-operator-vision-2026-07-22`); per `[OPEN] #8` the mockup
+is a demo-of-everything, **not** the target IA.
 
 > This proposal references, does not restate, the invariants in
 > [`../../CLAUDE.md`](../../CLAUDE.md) and [`../architecture.md`](../architecture.md).
@@ -20,10 +24,21 @@ surface so it becomes a real build target instead of evaporating (the exact drif
 the spec lifecycle exists to prevent — a prior console idea already died this way;
 see the operator-UX gap).
 
-It is squarely a **packaging / legibility** move (the CV/portfolio scoreboard's
+Its **primary** value is packaging / legibility (the CV/portfolio scoreboard's
 stated priority), not reliability hardening. A browser surface where you *watch an
 autonomous loop grade itself and command it in natural language* is the single
 strongest demo/portfolio artifact this system can produce.
+
+**Direction note (`[OPEN] #7`, resolved 2026-07-23):** Denys chose to **lean this
+toward a commandable daily driver**, not treat it as packaging-only. The read
+hierarchy (P1) is unaffected either way, but the control surfaces (P3 chat, the
+intent API's mutation reach) are now explicitly a step toward the direct-use
+"helper" devclaw's v1 was — reconciling the helper→PoC drift rather than holding
+the fire-and-forget thesis as the sole frame. Named follow-on: **re-surface the v1
+task-runner** (`one_shot` / `dispatch_task`); the known structural snag is
+branch-off-main (see the vault note `helper-to-poc-drift-2026-07-22`). This lean is
+a direction signal for P2/P3, not a committed architecture — it graduates through
+its own firm/lock when those slices are scheduled.
 
 ## The shape (P1 → P3 slices; only P1 is firmed)
 
@@ -34,7 +49,7 @@ The IA is one drill-down spine, with the same disclosure rule at **every tier**:
 NODE (the running instance)
   → PROJECT (→ GitHub)
     → GOAL (lifecycle + direction)
-      → MILESTONE  (= plan slice / plan_key — NOT a new entity; see §5 [OPEN])
+      → MILESTONE  (= plan slice / plan_key grouping — NOT a new entity; §5.1 RESOLVED)
         → TASK (token/time/verdict stats)
 ```
 
@@ -83,43 +98,57 @@ computer-use. We own the console; the agent emits *what*, the console does *how*
 faster, reliable, testable, and it doesn't break when a button is restyled.
 Computer-use is for apps we don't control; this isn't one.
 
-## §5 — `[OPEN]` items (the clarify step — resolve before LOCK)
+## §5 — clarify items (all resolved / deferred-to-slice 2026-07-23 → LOCK)
 
-1. **`[OPEN]` Is "milestone" a real new entity, or a rendering of `plan_key`
-   grouping?** Recommendation: **`plan_key` grouping** (a plan slice already groups
-   tasks; no new table, nothing to drift). Confirm — or decide milestones warrant a
-   first-class concept with its own description/stats persisted.
-2. **`[OPEN]` P1 boundary.** Does P1 include the health dashboard, or is that
-   strictly P2? Recommendation: **trace in P1, charts in P2** (charts are a distinct
-   build; the read hierarchy ships value without them).
-3. **`[OPEN]` Chat scope — global vs per-goal.** Global (create/steer anything) and
-   a per-goal steer box are both desirable. Which lands first in P3?
-4. **`[OPEN]` How far does the intent API reach?** Read/navigate only, or also
-   mutate (create/steer/cancel/answer) from the browser? Mutation needs the
-   console's auth story pinned (tailnet today).
-5. **`[OPEN]` Self-*resolution* honesty.** The problem-lifecycle UI shows a loop
-   that is *partly* built: file is Stage-1-locked (`self-issue-filing.md` #347), but
-   *fix* is propose-only-on-self, human-merges — NOT full auto. The UI must mark the
-   auto-fix stage as **gated**, never imply autonomy that isn't there. Confirm the
-   labeling contract.
-6. **`[OPEN]` Token stat honesty.** Tokens are *estimated* (traces cost estimate);
-   time and verdict are real. Every chart labels estimated-vs-real. Confirm.
-7. **`[OPEN]` Does this reopen the helper-vs-PoC question?** A commandable console
-   is close to the "daily helper" devclaw deliberately isn't. Is this packaging
-   (watch + light control) or a pivot toward a daily driver? Recommendation:
-   **packaging** — augment direct manipulation, don't replace the fire-and-forget
-   thesis.
-8. **`[OPEN]` Screen decomposition — NOT one mega-page.** The reference mockup
-   deliberately concentrates every surface on a single scroll to *show* the whole
-   vision at once. The shipped console must split into proper screens/routes/tabs
-   (e.g. an overview vs goal-detail vs health/problems screen). Do NOT treat the
-   mockup's single-page layout as the target IA — rethink the layout at build time
-   (Denys, 2026-07-22).
+Every item below is either **RESOLVED** (answered, folded into the P1 spec) or
+**DEFERRED** to the slice it belongs to, with a named owner. Per the spec
+lifecycle, a deferral-with-owner is a valid resolution of a clarify `[OPEN]` — none
+remain open, so the P1 direction is clear to lock.
+
+1. **RESOLVED — milestone = `plan_key` grouping.** A plan slice already groups its
+   tasks; the console renders that grouping. No new table, no persisted
+   description/stats, nothing to drift. Milestone is a *view*, not an entity.
+2. **RESOLVED — P1 = read hierarchy + layer trace; charts are P2.** P1 is the node
+   view + project→goal→milestone→task drill-down (active/settled disclosure) + the
+   layer trace. The health/self-eval **charts and the problem-lifecycle tracker are
+   strictly P2** — a distinct build the read hierarchy ships value without. This is
+   the locked P1 boundary.
+3. **DEFERRED → P3** (owner: Denys at P3 firm). Chat scope (global create/steer vs a
+   per-goal steer box, and which lands first) is decided when P3 is scheduled. Not a
+   P1 concern.
+4. **RESOLVED — P1 is read/navigate-only; mutation reach is a P3 decision.** The P1
+   intent API is `open` / `filter` / `select` only. Browser mutation
+   (create/steer/cancel/answer) — and the console auth story it requires (tailnet
+   today) — is pulled into P3 with the chat, not P1. Keeps P1's surface clean and
+   testable.
+5. **DEFERRED → P2** (owner: Denys at P2 firm). The self-*resolution* honesty
+   labeling contract (mark the auto-*fix* stage **gated**, never imply autonomy that
+   isn't there — file is Stage-1-locked, fix is propose-only/human-merges) is pinned
+   when the problem-lifecycle UI is actually built in P2.
+6. **DEFERRED → P2** (owner: Denys at P2 firm). Token-stat honesty (label
+   estimated-vs-real on every chart) is a charts concern — decided when the charts
+   land in P2.
+7. **RESOLVED — lean toward a commandable daily driver** (Denys, 2026-07-23), *not*
+   packaging-only. Does not move the P1 read hierarchy; it reframes the P2/P3 control
+   surfaces as a step toward direct daily use and lights up the **re-surface-v1-helper**
+   follow-on (snag: branch-off-main). Captured as the "Direction note" under **Why**
+   and in the non-goals below. It graduates through its own firm/lock at P2/P3.
+8. **RESOLVED — not one mega-page; split into proper screens/routes/tabs** (Denys,
+   2026-07-22). The reference mockup concentrates every surface on one scroll to
+   *show* the whole vision at once; the shipped console must decompose into real
+   screens (overview vs goal-detail vs health/problems). The mockup's single-page
+   layout is **not** the target IA — the layout is rethought at build time.
 
 ## Out of scope / non-goals
 
-- Not a reliability change — read surfaces + a control panel over existing state.
+- **P1 is read-only.** No mutation from the browser in P1 — that reach is a P3
+  decision (§5.4). P1 adds no write surface.
+- Not a reliability change — read surfaces + (later) a control panel over existing
+  state.
 - Not a new cognition path on any tick (charts/problem-lifecycle are arithmetic
   over projections; the chat reuses the waiter). The zero-token idle guard is
   untouched.
 - Not computer-use browser automation (§4).
+- **Not (yet) a thesis rewrite.** The `[OPEN] #7` daily-driver lean is a recorded
+  *direction* for P2/P3, not a committed pivot; the fire-and-forget durable-goal
+  thesis stays intact until a P2/P3 firm says otherwise. P1 does not depend on it.
