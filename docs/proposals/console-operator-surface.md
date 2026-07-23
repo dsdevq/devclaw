@@ -1,11 +1,13 @@
 # Console as a live operator surface — the node you watch AND command
 
-**Status: P1 GRADUATED → [ADR 0008](../decisions/0008-console-operator-surface-p1.md)**
-— 2026-07-23. The P1 slice (read hierarchy + layer trace, read-only) is scheduled
-and its decision + sizing are frozen in ADR 0008, which is now canonical for P1.
-**P2 and P3 remain LOCKED-direction but unsized** (this proposal stays their home
-until each is scheduled and graduates its own ADR). All eight §5 `[OPEN]`s are
-resolved or explicitly deferred-to-slice with an owner (below). Reference artifact:
+**Status: P1 → [ADR 0008](../decisions/0008-console-operator-surface-p1.md), P2 → [ADR 0009](../decisions/0009-console-operator-surface-p2.md) (both GRADUATED)**
+— 2026-07-23. P1 (read hierarchy + layer trace) shipped (PRs A–F). P2 (health
+enrichment + problem-lifecycle tracker) is scheduled and frozen in ADR 0009, which
+resolves the deferred §5.5 (self-resolution honesty → fix stage shown *gated*) and
+§5.6 (token spend labelled *estimated*). **P3 (co-pilot chat + §6 structured blocks
++ mutation reach) remains LOCKED-direction but unsized** (this proposal stays its
+home until it graduates its own ADR). All eight §5 `[OPEN]`s are now resolved.
+Reference artifact:
 a clickable mockup built 2026-07-22 (link in the vault note
 `console-live-operator-vision-2026-07-22`); per `[OPEN] #8` the mockup is a
 demo-of-everything, **not** the target IA.
