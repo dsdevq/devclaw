@@ -142,6 +142,7 @@ three precedence layers with divergent defaults was a debugging trap.
 | `DEVCLAW_SELF_ISSUE_MIN_CYCLES` | `3` | Distinct run-cycles a problem must survive (with ≥1 terminal occurrence) before it earns a self-filed issue — the recurrence gate (rescues the ops-agent O4 trend-repeat threshold). A one-night burst is one cycle; three cycles running is a real, file-worthy problem. |
 | `DEVCLAW_SELF_ISSUE_QUIET_DAYS` | `3` | Quiet span (≈ cycle-spans, cycles being ~daily) after which an OPEN self-filed issue auto-closes as stale — the age-out exit that keeps the board from accumulating (backlog #259). It reopens automatically if the problem recurs. |
 | `DEVCLAW_SELF_ISSUE_MAX_PER_CYCLE` | `3` | Cap on NEW self-filed issues opened per cycle (noise budget). Reopens and closes are not capped (not new noise); anything suppressed over the cap is **named** in the cycle-report line, never silently dropped. |
+| `DEVCLAW_SELF_FIX_CONCURRENCY` | `1` | How many self-fix goals may be in flight at once (self-issue-filing **Stage 2 / P2 — FIX pickup**). At the same once-per-cycle edge, a human-`accepted` + `devclaw:self-filed` issue is picked up as ONE `one_shot` self-fix goal that opens a PR for **human** review (no auto-merge — the tiered classifier is deferred to P2.1/P2.2). `1` serialises self-modification: parallel self-fixes multiply the self-brick surface and muddy failure attribution. Gated by `DEVCLAW_SELF_REPO` (unset ⇒ no pickup, nothing shelled). |
 
 ## Deploy hosting
 

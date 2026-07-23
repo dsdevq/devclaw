@@ -304,6 +304,40 @@ async def test_self_issue_filing_fires_once_per_cycle_past_the_idempotency_gate(
 
 
 @pytest.mark.asyncio
+async def test_self_fix_pickup_fires_once_per_cycle_and_is_handed_create_goal(
+    tmp_path, db, monkeypatch
+):
+    """Placement guard (Stage 2 P2): the FIX pickup rides the SAME cycle-close edge,
+    PAST the ``cycle_report_exists`` short-circuit — once per cycle, never per tick
+    (the zero-token guard) — and is handed the service's OWN ``create_goal`` (so goal
+    creation stays in the service, not the helper). Pins the call site + the injected
+    creator so a refactor can't hoist it above the idempotency gate unnoticed."""
+    from devclaw.goal import self_issue as _si
+
+    fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
+    monkeypatch.setattr("devclaw.goal.service._now_ms", lambda: fixed_now)
+
+    handed: list = []
+
+    async def _spy(create_goal, **kw):
+        handed.append(create_goal)
+        return _si.SelfFixResult()
+
+    monkeypatch.setattr("devclaw.goal.self_issue.run_self_fix_pickup", _spy)
+
+    svc, planner, evaluator = _svc(tmp_path, db, RecordingNotifier())
+
+    await svc._maybe_emit_cycle_report()
+    assert len(handed) == 1                             # fired once, at the close edge
+    assert handed[0] == svc.create_goal                 # the service's own creator
+    assert planner.calls == 0 and evaluator.calls == 0  # zero-token edge
+
+    # Second wakeup same cycle: short-circuits BEFORE pickup — not re-run.
+    await svc._maybe_emit_cycle_report()
+    assert len(handed) == 1
+
+
+@pytest.mark.asyncio
 async def test_cycle_report_wedge_marks_night_unclean(tmp_path, db, monkeypatch):
     fixed_now = _ms(datetime(2026, 7, 22, 10, 0, tzinfo=_UTC))
     monkeypatch.setattr("devclaw.goal.service._now_ms", lambda: fixed_now)

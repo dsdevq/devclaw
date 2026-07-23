@@ -497,6 +497,23 @@ class GoalService:
                 sys.stderr.write(f"goal-layer: cycle {cycle_key} {line}\n")
         except Exception as exc:  # noqa: BLE001 — filing never fails the cycle edge
             sys.stderr.write(f"goal-layer: self-issue filing failed: {exc}\n")
+
+        # Self-issue-filing STAGE 2 (P2 — FIX pickup, proposal §5A): at this SAME
+        # once-per-cycle edge, turn a human-`accepted` self-filed issue into ONE
+        # `one_shot` self-fix goal that opens a PR for HUMAN review — NO auto-merge
+        # (the tiered classifier is deferred to P2.1/P2.2). ZERO LLM to detect (a
+        # `gh issue list` + pure selection); env-gated on DEVCLAW_SELF_REPO (unset ⇒
+        # no-op, shells nothing) and best-effort — a pickup hiccup never wedges the
+        # cycle edge. Goal creation stays here (`self.create_goal`, injected).
+        try:
+            from . import self_issue as _si2
+
+            picked = await _si2.run_self_fix_pickup(self.create_goal)
+            pline = picked.report_line()
+            if pline:
+                sys.stderr.write(f"goal-layer: cycle {cycle_key} {pline}\n")
+        except Exception as exc:  # noqa: BLE001 — pickup never fails the cycle edge
+            sys.stderr.write(f"goal-layer: self-fix pickup failed: {exc}\n")
         return cycle_key
 
     # ---- steer / observe surface (wrapped by MCP tools) --------------------
