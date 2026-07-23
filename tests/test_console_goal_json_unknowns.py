@@ -120,3 +120,55 @@ def test_goal_json_unknowns_carry_options_for_one_tap_answers(tmp_path, db, monk
     # back to the textarea, it never guesses.
     assert by_id["cf-u2"]["options"] == []
     assert by_id["cf-u2"]["defaultIfNoAnswer"] is None
+
+
+# ── §6 execution-block options (ADR 0010) ────────────────────────────────────
+
+
+def test_goal_json_surfaces_block_options_for_needs_answer(tmp_path, db, monkeypatch):
+    from devclaw.goal.models import BlockOption
+
+    svc, goals_dir = _svc(tmp_path, db)
+    seed_goal(goals_dir, "g")
+    svc._goal_store.write_block_options(
+        "g",
+        [
+            BlockOption(key="a", label="Migrate", detail="big tranche", steer="Do the migration."),
+            BlockOption(key="b", label="Drop it", steer="Drop the ng-zorro requirement."),
+        ],
+        "b",
+    )
+    svc._goal_store.save_status(
+        "g",
+        GoalStatus(lifecycle="executing", phase="blocked",
+                   blocked_on="ng-zorro or bespoke?", blocked_kind="needs_answer"),
+    )
+    monkeypatch.setattr(http_mod, "goals", svc)
+    monkeypatch.setattr(http_mod, "store", db)
+
+    body = json.loads(asyncio.run(http_mod.goal_json(_get({"goal_id": "g"}))).body)
+    assert body["blockOptions"]["recommended"] == "b"
+    assert [o["key"] for o in body["blockOptions"]["options"]] == ["a", "b"]
+    assert body["blockOptions"]["options"][0]["steer"] == "Do the migration."
+
+
+def test_goal_json_hides_block_options_on_mechanical_block(tmp_path, db, monkeypatch):
+    # Anti-stale-menu (the documented safety property): options were stored on a
+    # prior needs_answer block, but the goal is now blocked MECHANICALLY — the
+    # endpoint must NOT surface the stale menu (else a click applies a steer that
+    # no longer matches the block).
+    from devclaw.goal.models import BlockOption
+
+    svc, goals_dir = _svc(tmp_path, db)
+    seed_goal(goals_dir, "g")
+    svc._goal_store.write_block_options("g", [BlockOption(key="a", label="A", steer="s")], "a")
+    svc._goal_store.save_status(
+        "g",
+        GoalStatus(lifecycle="executing", phase="blocked",
+                   blocked_on="doc corrupt", blocked_kind="mechanical:corrupt_doc"),
+    )
+    monkeypatch.setattr(http_mod, "goals", svc)
+    monkeypatch.setattr(http_mod, "store", db)
+
+    body = json.loads(asyncio.run(http_mod.goal_json(_get({"goal_id": "g"}))).body)
+    assert body["blockOptions"] == {}

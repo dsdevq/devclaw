@@ -276,6 +276,19 @@ class Action:
 
 
 @dataclass(frozen=True)
+class BlockOption:
+    """One selectable answer for a ``needs_answer`` block (§6, ADR 0010). The
+    planner emits these at block time; the console renders them as buttons.
+    ``steer`` is the pre-baked ``steer_goal`` message applied when the owner
+    picks this option — the model writes the resolution for each branch it saw."""
+
+    key: str
+    label: str
+    detail: str = ""
+    steer: str = ""
+
+
+@dataclass(frozen=True)
 class PlanResult:
     """The next-action planner's full decision for one wakeup."""
 
@@ -284,6 +297,11 @@ class PlanResult:
     actions: list[Action] = field(default_factory=list)
     #: present when decision == "blocked"
     question: str = ""
+    #: §6 (ADR 0010): structured options for a needs_answer block. Blank-safe —
+    #: absent/malformed ⇒ [] ⇒ the block renders exactly as it did pre-§6.
+    options: list[BlockOption] = field(default_factory=list)
+    #: the key of the option the planner recommends (may be "" / unknown-key).
+    recommended: str = ""
     #: human-readable summary for the log + notify, any decision
     note: str = ""
 

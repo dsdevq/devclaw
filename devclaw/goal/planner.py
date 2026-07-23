@@ -22,7 +22,7 @@ import re
 from typing import Awaitable, Callable
 
 from .checklist import ready_items as _ready_items
-from .models import Action, Checklist, Goal, GoalStatus, PlanResult
+from .models import Action, BlockOption, Checklist, Goal, GoalStatus, PlanResult
 from ..task_git import _review_repo_context_sync
 
 ClaudeCaller = Callable[[str], Awaitable[str]]
@@ -249,6 +249,32 @@ def extract_json(text: str) -> str:
     raise GoalPlannerError("No JSON object found in planner response", text)
 
 
+def _parse_block_options(raw: object) -> list[BlockOption]:
+    """Blank-safe parse of a blocked decision's structured options (§6, ADR
+    0010). A non-list — or any entry missing key/label/steer, or a duplicate
+    key — is silently dropped: an absent/malformed options field must degrade
+    to the pre-§6 free-text block, NEVER raise. This is the fail-closed
+    cognition rule — an undocumented/garbled model field is ignored, not
+    honored (cf. the removed planner verify_cmd override)."""
+    if not isinstance(raw, list):
+        return []
+    out: list[BlockOption] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key", "")).strip()
+        label = str(entry.get("label", "")).strip()
+        steer = str(entry.get("steer", "")).strip()
+        if not key or not label or not steer or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            BlockOption(key=key, label=label, detail=str(entry.get("detail", "")).strip(), steer=steer)
+        )
+    return out
+
+
 def validate(parsed: object) -> PlanResult:
     if not isinstance(parsed, dict):
         raise GoalPlannerError("Plan must be a JSON object")
@@ -261,7 +287,17 @@ def validate(parsed: object) -> PlanResult:
         question = str(parsed.get("question", "")).strip()
         if not question:
             raise GoalPlannerError("blocked decision requires a non-empty 'question'")
-        return PlanResult(decision="blocked", question=question, note=note or question)
+        options = _parse_block_options(parsed.get("options"))
+        # `recommended` is only meaningful if it names one of the parsed options;
+        # an unknown/blank key degrades to "no recommendation" (the UI just shows
+        # no highlight), never an error.
+        recommended = str(parsed.get("recommended", "")).strip()
+        if recommended and recommended not in {o.key for o in options}:
+            recommended = ""
+        return PlanResult(
+            decision="blocked", question=question, options=options,
+            recommended=recommended, note=note or question,
+        )
 
     if decision in ("sleep", "done"):
         return PlanResult(decision=decision, note=note)

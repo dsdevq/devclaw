@@ -103,5 +103,22 @@ Respond with STRICT JSON ONLY — no prose, no markdown fences. Schema:
       "addresses": ["<checklist-item-id>", ...]   // checklist-mode only; empty in backlog mode
     }}
   ],
-  "question": "<present iff decision == 'blocked' — what you need from a human>"
+  "question": "<present iff decision == 'blocked' — what you need from a human>",
+  "options": [           // OPTIONAL, blocked only: the distinct ways to resolve this
+    {{
+      "key": "<short stable id, e.g. 'a'>",
+      "label": "<the choice in a few words, e.g. 'Migrate to ng-zorro'>",
+      "detail": "<one sentence on what this choice means / its tradeoff>",
+      "steer": "<the EXACT steering message to apply if the owner picks this — write it as a direct instruction to yourself, e.g. 'Drop the ng-zorro requirement from done_when; keep the bespoke library.'>"
+    }}
+  ],
+  "recommended": "<OPTIONAL: the key of the option you recommend, or omit>"
 }}
+
+When you block, you almost always already know the 2-4 distinct ways a human
+could resolve it — so emit them as `options`. Each option's `steer` is the
+pre-written instruction that will be applied verbatim if the owner clicks it, so
+make it a complete, self-contained steering message (not "option A"). Mark your
+`recommended` key when you have a genuine recommendation. `options` is optional:
+omit it (or leave it empty) only when the block is a truly open-ended question
+with no enumerable choices — then the owner just types a free answer.

@@ -740,6 +740,10 @@ async def _handle_executing(
                     blocked_kind="needs_answer", next=""),
             expect=status, consume_steering=consume_ids,
         )
+        # §6 (ADR 0010): persist the planner's structured options for the console
+        # to render as click-to-steer buttons. Always written (even empty) so a
+        # re-block overwrites any stale prior options. Same single-writer path.
+        ctx.store.write_block_options(goal_id, result.options, result.recommended)
         ctx.store.append_log(goal_id, f"blocked: {result.question}")
         await _notify(
             ctx.notifier, NotifyLevel.OWNER, f"🟡 [{goal_id}] needs you — {result.question}",
