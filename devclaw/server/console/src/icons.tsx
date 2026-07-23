@@ -30,6 +30,15 @@ export const IconOverview = (p: P) => (
   </Svg>
 );
 
+export const IconNode = (p: P) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="7" rx="1.5" />
+    <rect x="3" y="13" width="18" height="7" rx="1.5" />
+    <circle cx="7" cy="7.5" r="1" fill="currentColor" stroke="none" />
+    <circle cx="7" cy="16.5" r="1" fill="currentColor" stroke="none" />
+  </Svg>
+);
+
 export const IconProjects = (p: P) => (
   <Svg {...p}>
     <path d="M3 7.5 12 3l9 4.5-9 4.5-9-4.5Z" />

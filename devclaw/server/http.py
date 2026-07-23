@@ -718,6 +718,101 @@ async def control_json(request: Request) -> Response:
     })
 
 
+def _node_vitals() -> dict:
+    """Assemble the NODE view's vitals from projections that already exist (ADR
+    0008 P1). Read-only: dispatch/heartbeat state, goal population, the
+    clean-cycle headline, and a 5-layer strip. HONEST per the ADR — a layer gets
+    a status only where one is genuinely derivable (L1 is serving this request;
+    L2 is the dispatch/heartbeat state; L4 is whether any task is running). L3
+    cognition and L5 worker have no idle probe yet, so they are ``unknown`` — a
+    real per-layer health rollup is a deferred, separate build, NOT faked here."""
+    from ..dispatch_gate import operator_block
+    from ..state_store import _now_ms
+
+    now = _now_ms()
+    on, hold_reason = store.operator_hold()
+    schedule = store.get_run_schedule()
+    q_until, q_reason = store.global_pause()
+    quota_active = q_until > now
+    op_blocked, op_reason = operator_block((on, hold_reason), schedule, now)
+    blocked = op_blocked or quota_active
+    reason = op_reason if op_blocked else (f"quota: {q_reason}" if quota_active else "")
+
+    # Goal population — bucketed the same way the morning digest triages
+    # (cancelled/done are terminal; needs-you = blocked OR stalled OR a
+    # stop-state verdict; everything else active is running).
+    total = running = needs_you = done = cancelled = 0
+    for g in goals.list_goals():
+        total += 1
+        phase = g.get("phase")
+        prog = g.get("progress") or {}
+        if phase == "cancelled":
+            cancelled += 1
+        elif phase in ("done", "achieved"):
+            done += 1
+        elif g.get("blocked_on") or prog.get("stalled") or g.get("direction") in ("stalled", "needs_human"):
+            needs_you += 1
+        else:
+            running += 1
+
+    # Clean-cycle headline + rolling rate over the cycle_reports window (ADR 0006).
+    cycles = store.list_cycle_reports(limit=30)
+    if cycles:
+        latest = cycles[0]
+        clean = bool(latest["clean"])
+        last_window_end = latest["window_end_ms"]
+        clean_recent = sum(1 for c in cycles if c["clean"])
+    else:
+        clean, last_window_end, clean_recent = None, None, 0
+
+    running_tasks = len(store.list_tasks(status="running", limit=200))
+
+    # L2 heartbeat status derives from the dispatch state; L4 from live tasks.
+    l2 = "paused" if quota_active else ("held" if op_blocked else "up")
+    l4 = "active" if running_tasks > 0 else "idle"
+
+    return {
+        "version": __version__,
+        "dispatch": {
+            "blocked": blocked,
+            "reason": reason,
+            "operatorHold": {"on": on, "reason": hold_reason},
+            "schedule": schedule,
+            "quotaPause": {"activeUntilMs": q_until if quota_active else 0, "reason": q_reason},
+        },
+        "goals": {
+            "total": total,
+            "running": running,
+            "needsYou": needs_you,
+            "done": done,
+            "cancelled": cancelled,
+        },
+        "cleanCycle": {
+            "clean": clean,
+            "lastWindowEndMs": last_window_end,
+            "recent": {"clean": clean_recent, "total": len(cycles)},
+        },
+        "runningTasks": running_tasks,
+        # The 5-layer strip (CLAUDE.md layer map). ``unknown`` is honest, not a
+        # gap to paper over: L3/L5 have no idle probe today.
+        "layers": [
+            {"n": 1, "key": "mcp", "name": "MCP surface", "status": "up"},
+            {"n": 2, "key": "goal", "name": "GoalService + heartbeat", "status": l2},
+            {"n": 3, "key": "cognition", "name": "Cognition callers", "status": "unknown"},
+            {"n": 4, "key": "engine", "name": "TaskQueue + engine", "status": l4},
+            {"n": 5, "key": "worker", "name": "Worker harness", "status": "unknown"},
+        ],
+    }
+
+
+@mcp.custom_route("/node.json", methods=["GET"])
+async def node_json(request: Request) -> Response:
+    """The NODE view's vitals (ADR 0008 P1): dispatch/heartbeat, goal population,
+    clean-cycle headline, and the 5-layer strip — all read-only over existing
+    projections. The top of the console's drill-down spine."""
+    return JSONResponse(_node_vitals())
+
+
 @mcp.custom_route("/control/pause", methods=["POST"])
 async def control_pause(request: Request) -> Response:
     """Turn on the manual operator hold — stops all NEW dispatch (in-flight tasks
