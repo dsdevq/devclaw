@@ -1,13 +1,12 @@
 # Console as a live operator surface — the node you watch AND command
 
-**Status: P1 → [ADR 0008](../decisions/0008-console-operator-surface-p1.md), P2 → [ADR 0009](../decisions/0009-console-operator-surface-p2.md) (both GRADUATED)**
-— 2026-07-23. P1 (read hierarchy + layer trace) shipped (PRs A–F). P2 (health
-enrichment + problem-lifecycle tracker) is scheduled and frozen in ADR 0009, which
-resolves the deferred §5.5 (self-resolution honesty → fix stage shown *gated*) and
-§5.6 (token spend labelled *estimated*). **P3 (co-pilot chat + §6 structured blocks
-+ mutation reach) remains LOCKED-direction but unsized** (this proposal stays its
-home until it graduates its own ADR). All eight §5 `[OPEN]`s are now resolved.
-Reference artifact:
+**Status: P1 → [ADR 0008](../decisions/0008-console-operator-surface-p1.md), P2 → [ADR 0009](../decisions/0009-console-operator-surface-p2.md), P3.1 (§6) → [ADR 0010](../decisions/0010-console-p3-structured-blocks.md) — all GRADUATED**
+— 2026-07-23. P1 (read hierarchy + layer trace) + P2 (health + problem-lifecycle)
+shipped. P3 is **sliced**: **P3.1 = §6 structured decision blocks** (planner emits
+options at block time → console renders click-to-steer; frozen in ADR 0010, which
+resolves §6a–§6d) is scheduled; **P3.2 = the co-pilot chat + OpenClaw-waiter-over-OAuth
+integration (§4) + §5.3 chat-scope remains LOCKED-direction, unsized** (a distinct,
+larger undertaking). All §5 `[OPEN]`s resolved. Reference artifact:
 a clickable mockup built 2026-07-22 (link in the vault note
 `console-live-operator-vision-2026-07-22`); per `[OPEN] #8` the mockup is a
 demo-of-everything, **not** the target IA.
