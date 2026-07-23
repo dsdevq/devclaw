@@ -52,6 +52,11 @@ export interface TaskRow {
   createdAt: number;
   completedAt: number | null;
   prUrl: string | null;
+  // ADR 0008 P1: the milestone tier groups tasks by planKey (a view, not an
+  // entity). milestone is the spec-milestone label when one was set. Either may
+  // be null for standalone tasks.
+  planKey: string | null;
+  milestone: string | null;
 }
 
 export interface ProjectWarning {

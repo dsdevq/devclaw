@@ -4,7 +4,7 @@ import { fetchProject, tokenQueryString, type GoalRow, type ProjectDetail as PD 
 import { IconAlert, IconExternal } from "../icons";
 import { phaseColor, phaseIsLive } from "../status";
 import { relativeTime } from "../util/time";
-import { EmptyState, ErrorNote, Loading, SectionLabel, StatusDot } from "../ui";
+import { EmptyState, ErrorNote, Loading, SectionLabel, StatusDot, TieredDisclosure } from "../ui";
 import { ProjectSettings } from "../components/ProjectSettings";
 import { TasksSection } from "../components/TasksSection";
 
@@ -16,7 +16,6 @@ export function ProjectDetail() {
   const qs = tokenQueryString();
   const [data, setData] = useState<PD | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -110,19 +109,9 @@ export function ProjectDetail() {
 
           {data.archived.length > 0 && (
             <section style={{ marginBottom: 30 }}>
-              <SectionLabel
-                count={data.archived.length}
-                right={
-                  <button className="btn ghost sm" onClick={() => setShowArchived((s) => !s)}>
-                    {showArchived ? "Hide" : "Show"}
-                  </button>
-                }
-              >
-                Archived goals
-              </SectionLabel>
-              {showArchived && (
-                <div className="card" style={{ overflow: "hidden", opacity: 0.75 }}>{data.archived.map(goalRow)}</div>
-              )}
+              <TieredDisclosure label="Archived goals" count={data.archived.length}>
+                <div className="card" style={{ overflow: "hidden" }}>{data.archived.map(goalRow)}</div>
+              </TieredDisclosure>
             </section>
           )}
 
