@@ -5,6 +5,7 @@ import {
   IconEvals,
   IconGoals,
   IconMoon,
+  IconNode,
   IconOverview,
   IconProjects,
   IconSettings,
@@ -15,6 +16,7 @@ import { StatusDot } from "../ui";
 
 const NAV = [
   { to: "/", label: "Overview", Icon: IconOverview, end: true },
+  { to: "/node", label: "Node", Icon: IconNode, end: false },
   { to: "/projects", label: "Projects", Icon: IconProjects, end: false },
   { to: "/goals", label: "Goals", Icon: IconGoals, end: false },
   { to: "/evals", label: "Evals", Icon: IconEvals, end: false },

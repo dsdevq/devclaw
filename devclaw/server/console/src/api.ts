@@ -291,6 +291,36 @@ export async function fetchControl(): Promise<ControlState> {
   return r.json();
 }
 
+// ---- node vitals (ADR 0008 P1: the top of the drill-down spine) ----------
+
+/** One of the 5 layers (CLAUDE.md layer map). `status` is honest: "unknown"
+ *  where devclaw has no idle probe for that layer yet — never a faked signal. */
+export interface NodeLayer {
+  n: number;
+  key: string;
+  name: string;
+  status: "up" | "held" | "paused" | "active" | "idle" | "unknown";
+}
+
+export interface NodeVitals {
+  version: string;
+  dispatch: ControlState;
+  goals: { total: number; running: number; needsYou: number; done: number; cancelled: number };
+  cleanCycle: {
+    clean: boolean | null;
+    lastWindowEndMs: number | null;
+    recent: { clean: number; total: number };
+  };
+  runningTasks: number;
+  layers: NodeLayer[];
+}
+
+export async function fetchNode(): Promise<NodeVitals> {
+  const r = await fetch(`/node.json${tokenQS()}`);
+  if (!r.ok) throw new Error(`node.json ${r.status}`);
+  return r.json();
+}
+
 export async function pauseDispatch(reason?: string): Promise<{ operatorHold: OperatorHold }> {
   const r = await fetch(`/control/pause${tokenQS()}`, {
     method: "POST",
